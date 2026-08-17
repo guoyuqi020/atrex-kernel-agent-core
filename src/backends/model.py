@@ -145,6 +145,14 @@ class AgentRunRequest:
 
 
 @dataclass(frozen=True)
+class RawSessionFile:
+    """One unmodified Provider-owned Session file captured before cleanup."""
+
+    relative_path: str
+    payload: bytes
+
+
+@dataclass(frozen=True)
 class AgentRunResult:
     runtime_id: str
     exit_status: int
@@ -153,10 +161,21 @@ class AgentRunResult:
     events: tuple[NormalizedAgentEvent, ...]
     capabilities: AgentRuntimeCapabilities
     observation_errors: tuple[str, ...]
-    stdout_tail: str
-    stderr_tail: str
+    stdout: str
+    stderr: str
+    raw_session_files: tuple[RawSessionFile, ...]
+    raw_provider_capture_complete: bool
+    policy_diagnostics: tuple[str, ...]
     session_id: str = ""
     budget_exhausted: bool = False
+
+    @property
+    def stdout_tail(self) -> str:
+        return self.stdout[-2000:]
+
+    @property
+    def stderr_tail(self) -> str:
+        return self.stderr[-2000:]
 
     @property
     def tokens(self) -> int:

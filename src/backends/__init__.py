@@ -17,6 +17,7 @@ from .model import (
     AgentRuntime,
     AgentRuntimeCapabilities,
     NormalizedAgentEvent,
+    RawSessionFile,
     TokenUsage,
     subtract_token_usage,
     sum_token_usages,
@@ -24,6 +25,7 @@ from .model import (
 )
 from .process import (
     ProcessObserver,
+    ProcessResult,
     ProcessRunner,
     dependency_process_violation,
     descendant_process_commands,
@@ -56,9 +58,11 @@ __all__ = [
     "PiAdapter",
     "PiRuntime",
     "ProcessObserver",
+    "ProcessResult",
     "ProcessRunner",
     "QoderAdapter",
     "QoderRuntime",
+    "RawSessionFile",
     "TokenUsage",
     "build_agent_runtime",
     "build_session_environment",

@@ -11,7 +11,7 @@ Core 负责 Agent 可见的优化行为：
 
 - Agent Backend 的选择与启动；
 - 分阶段 Prompt 和 GPU Kernel 工程流程；
-- Provider Token 的实时观测与标准化 Session Trace；
+- Provider Token 的实时观测、未脱敏 Session 捕获与规范化用量索引；
 - Runtime Gateway 与外部 Wiki 的协议客户端；
 - Experiment Journal 与终态 Report；
 - 对结构化 Profiling Evidence 的解释。
@@ -37,8 +37,9 @@ Runtime 必须显式设置 `ATREX_CORE_PHASE`。每次进程只执行一个全�
 | `framework_baseline` | 通过 Runtime Tool 把某个 DSL Seed 建成正确的权威 Baseline | Kernel Tree 与 `scratch/` Report |
 | `optimization_attempt` | 基于不可变 Evidence 和 Incumbent 测试一个可归因优化方向 | Candidate Kernel 与终态 Attempt Report |
 
-每个阶段都会生成 Runtime 校验的 Token Report。Core 不跨 Attempt 恢复进程内存；历史经验只通过
-不可变 Epoch Evidence 和同分支 Attempt Evidence 提供。
+每个阶段都会生成 Runtime 校验的 Token Report。Core 不跨 Attempt 恢复进程内存；历史经验通过
+一棵不可变的单 Lineage Evidence View 提供，其中组合跨 Epoch 晋升历史与当前所选 Revision 的
+更早 Attempt；Active/Challenger Role 不会暴露。
 
 ## Runtime Workspace
 
@@ -49,20 +50,42 @@ Runtime 必须显式设置 `ATREX_CORE_PHASE`。每次进程只执行一个全�
 ├── attempt.json
 ├── input/
 │   ├── kernel/                 # 不可变 incumbent
-│   ├── evidence/               # 不可变跨 Epoch 历史
-│   ├── attempt-evidence/       # 不可变同分支历史
+│   ├── evidence/               # 不可变、按 Epoch 组织的统一 Evidence View
+│   │   ├── manifest.json       # 可信可见范围与来源 Digest
+│   │   ├── instructions.md     # Runtime 编写的 Prompt Fragment
+│   │   ├── bootstrap/
+│   │   └── epochs/             # 晋升 Lineage 与可见当前 Attempt
 │   └── agent-problem/          # 公开算子契约
 ├── agent/optimizer/            # 不可变 Core Revision
 ├── work/kernel/                # 可写 candidate
-├── sessions/                   # 标准化 Agent Session 输出
+├── sessions/                   # 未脱敏 Agent Session Artifact
 └── scratch/                    # Request、Journal、Report、Token Usage
 ```
 
-私有 Evaluation Contract 只以 Digest 出现，具体内容留在 Runtime/Gateway。Gateway 与 Wiki 使用
-Runtime 签发的短期 Attempt-scoped Capability。Worker 能读取该委托 Capability，但拿不到上游
+私有 Evaluation Contract 只以 Digest 出现，具体内容留在 Runtime/Gateway。
+Runtime 把 Evidence 结构说明注入最终 Agent Prompt；本仓库只校验并拼接受 Digest 绑定的 Fragment，
+不持有这段结构文案。
+Gateway 与 Wiki 使用 Runtime 签发的短期 Attempt-scoped Capability。Worker 能读取该委托 Capability，但拿不到上游
 Agate/Wiki Credential。Core 把 Request 写在 `scratch/`，并以
 [`src/runtime_tools.py`](src/runtime_tools.py) 作为规范、受限的协议客户端；即使 Agent 直接构造
 Proxy Request，Runtime 仍独立执行身份、操作白名单、配额、幂等和权威结果校验。
+
+Runtime Manifest 启用 Trace 时，每个阶段写出一个 Session Artifact 目录：
+
+```text
+sessions/<name>/
+├── input/prompt.md
+├── provider/stdout.stream-json
+├── provider/stderr.log
+├── provider/codex-rollout.raw-jsonl  # 仅 Codex
+├── events.jsonl                      # 规范化用量索引
+└── session.json                      # 捕获状态与诊断
+```
+
+Prompt 与 Provider 文件不做脱敏、Event 过滤或文本改写；Provider 实际输出的 Reasoning、工具参数与
+结果、命令输出及敏感值都会保留。Core 不会主动复制 Provider 从未输出的凭据。输出超过安全上限或
+Codex Rollout 捕获不完整时，阶段会失败，不会把不完整 Trace 伪装成完整结果。Coding Agent 不能
+预先创建或重定向 Runtime 选定的 Session 路径。
 
 ## 工程循环
 

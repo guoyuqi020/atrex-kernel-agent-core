@@ -8,7 +8,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Callable, Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 import backends
@@ -83,9 +83,8 @@ def usage_report(
     }
 
 
-def atomic_json(path: Path, value: object) -> None:
+def atomic_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    payload = json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True).encode()
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
@@ -106,37 +105,105 @@ def atomic_json(path: Path, value: object) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def write_trace(context: SessionContext, result: backends.AgentRunResult) -> None:
+def atomic_json(path: Path, value: object) -> None:
+    atomic_bytes(
+        path,
+        json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True).encode(),
+    )
+
+
+def atomic_text(path: Path, value: str) -> None:
+    atomic_bytes(path, value.encode("utf-8"))
+
+
+def write_trace(
+    context: SessionContext,
+    result: backends.AgentRunResult,
+    prompt: str,
+) -> None:
+    """Persist unredacted Session input and Provider files plus a normalized usage index."""
     if context.session_trace_path is None:
         return
-    context.session_trace_path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    events = context.session_trace_path / "events.jsonl"
-    with events.open("w", encoding="utf-8") as output:
-        for event in result.events:
-            value: dict[str, Any] = {
-                "schema_version": 1,
-                "sequence": event.sequence,
-                "kind": event.kind,
+    trace_root = context.session_trace_path
+    parent = trace_root.parent
+    workspace = context.workspace.resolve()
+    if parent.is_symlink() or not parent.is_dir() or not parent.resolve().is_relative_to(workspace):
+        raise ValueError("Session trace parent changed after launch validation")
+    if trace_root.exists() or trace_root.is_symlink():
+        raise ValueError("Session trace path must not be created by the Coding Agent")
+    raw_files: list[tuple[PurePosixPath, bytes]] = []
+    raw_paths: set[str] = set()
+    reserved_paths = {
+        "provider/stdout.stream-json",
+        "provider/stderr.log",
+    }
+    for raw_file in result.raw_session_files:
+        relative = PurePosixPath(raw_file.relative_path)
+        normalized = relative.as_posix()
+        if (
+            relative.is_absolute()
+            or normalized == "."
+            or ".." in relative.parts
+            or not relative.parts
+            or relative.parts[0] != "provider"
+            or normalized in reserved_paths
+            or normalized in raw_paths
+        ):
+            raise ValueError("Raw Provider Session file has an unsafe path")
+        raw_paths.add(normalized)
+        raw_files.append((relative, raw_file.payload))
+    trace_root.mkdir(mode=0o700)
+    atomic_text(trace_root / "input/prompt.md", prompt)
+    atomic_text(trace_root / "provider/stdout.stream-json", result.stdout)
+    atomic_text(trace_root / "provider/stderr.log", result.stderr)
+    for relative, payload in raw_files:
+        atomic_bytes(trace_root.joinpath(*relative.parts), payload)
+
+    normalized_events: list[dict[str, Any]] = [
+        {"type": "session", "version": 0, "id": result.session_id}
+    ]
+    for event in result.events:
+        data: dict[str, Any] = {
+            "schema_version": 1,
+            "sequence": event.sequence,
+            "kind": event.kind,
+        }
+        if event.usage is not None:
+            data["usage"] = {
+                "uncached_input_tokens": event.usage.input_tokens,
+                "output_tokens": event.usage.output_tokens,
+                "cache_read_tokens": event.usage.cache_read_tokens,
+                "cache_write_tokens": event.usage.cache_write_tokens,
+                "total_tokens": event.usage.total_tokens,
+                "measurement": event.usage.measurement,
             }
-            if event.usage is not None:
-                value["usage"] = {
-                    "uncached_input_tokens": event.usage.input_tokens,
-                    "output_tokens": event.usage.output_tokens,
-                    "cache_read_tokens": event.usage.cache_read_tokens,
-                    "cache_write_tokens": event.usage.cache_write_tokens,
-                    "total_tokens": event.usage.total_tokens,
-                    "measurement": event.usage.measurement,
-                }
-            output.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
+        normalized_events.append(
+            {
+                "type": "provider/usage",
+                "seq": event.sequence,
+                "time": event.sequence,
+                "data": data,
+                "ignorable": True,
+            }
+        )
+    atomic_text(
+        trace_root / "events.jsonl",
+        "".join(
+            json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n"
+            for event in normalized_events
+        ),
+    )
     atomic_json(
-        context.session_trace_path / "session.json",
+        trace_root / "session.json",
         {
             "schema_version": 1,
             "runtime_id": result.runtime_id,
             "session_id": result.session_id,
             "exit_status": result.exit_status,
             "timed_out": result.timed_out,
+            "raw_provider_capture_complete": result.raw_provider_capture_complete,
             "observation_errors": list(result.observation_errors),
+            "policy_diagnostics": list(result.policy_diagnostics),
         },
     )
 
@@ -163,11 +230,9 @@ def execute_agent_session(
                 token_budget=context.token_budget,
             )
         )
-        write_trace(context, result)
-        if result.stdout_tail:
-            print(result.stdout_tail, flush=True)
-        if result.stderr_tail:
-            print(result.stderr_tail, file=sys.stderr, flush=True)
+        write_trace(context, result, prompt)
+        if not result.raw_provider_capture_complete:
+            return 126
         if result.budget_exhausted:
             return 125
         if result.timed_out:

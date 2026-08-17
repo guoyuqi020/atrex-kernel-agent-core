@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from agent_config import AgentConfig
+from sessions.attempt import _tool_instructions
 
 CORE_ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,3 +38,10 @@ def test_prompts_do_not_reveal_product_or_control_plane_identity() -> None:
         )
         is None
     )
+
+
+def test_attempt_tool_example_uses_the_trusted_lineage_dsl() -> None:
+    instructions = _tool_instructions("triton")
+
+    assert '"query": "triton vectorized load requirements' in instructions
+    assert "CUDA vectorized load requirements" not in instructions

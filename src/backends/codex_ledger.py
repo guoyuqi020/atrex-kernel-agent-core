@@ -171,7 +171,7 @@ class CodexTemporaryHome:
 
 
 class CodexSessionLedgerObserver:
-    """Incrementally normalize one Codex rollout without persisting its raw content."""
+    """Observe one Codex rollout and capture it before the isolated home is removed."""
 
     def __init__(self, home: Path | None = None):
         self.home = (home or codex_home()).resolve()
@@ -327,6 +327,22 @@ class CodexSessionLedgerObserver:
             terminal_usage=invocation_usage,
             session_usage=final_session_usage,
         )
+
+    def capture_raw_rollout(self, thread_id: str, *, max_bytes: int) -> bytes:
+        """Read the exact rollout file before the isolated Codex home is removed."""
+        if max_bytes <= 0:
+            raise ValueError("Codex rollout byte limit must be positive")
+        path = self._find_rollout_path(thread_id)
+        sessions = (self.home / "sessions").resolve()
+        if not path.is_relative_to(sessions) or not path.is_file():
+            raise CodexLedgerError("Codex rollout path is outside the isolated Session store")
+        size = path.stat().st_size
+        if size > max_bytes:
+            raise CodexLedgerError("Codex rollout exceeds the raw capture byte limit")
+        payload = path.read_bytes()
+        if len(payload) != size:
+            raise CodexLedgerError("Codex rollout changed during raw capture")
+        return payload
 
     def observe_reconciled(
         self, thread_id: str, stream_terminal: TokenUsage

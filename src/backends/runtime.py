@@ -33,12 +33,14 @@ from .model import (
     AgentRunRequest,
     AgentRunResult,
     AgentRuntime,
+    RawSessionFile,
     TokenUsage,
     sum_token_usages,
 )
 from .process import ProcessObserver, ProcessRunner, run_bounded
 
 REASONING_EFFORTS = frozenset({"low", "medium", "high", "max"})
+MAX_CODEX_ROLLOUT_CAPTURE_BYTES = 16 * 1024 * 1024
 
 
 class TokenBudgetObserver(ProcessObserver):
@@ -310,14 +312,14 @@ class CliAgentRuntime:
         )
         try:
             if budget_observer is None:
-                stdout, stderr, exit_status, timed_out = self._process_runner(
+                process = self._process_runner(
                     command,
                     cwd=request.workspace,
                     timeout=request.timeout_s,
                     env=environment,
                 )
             else:
-                stdout, stderr, exit_status, timed_out = self._process_runner(
+                process = self._process_runner(
                     command,
                     cwd=request.workspace,
                     timeout=request.timeout_s,
@@ -328,6 +330,8 @@ class CliAgentRuntime:
             if codex_temporary_home is not None:
                 codex_temporary_home.close()
             raise
+        stdout = process.stdout
+        stderr = process.stderr
         observation_errors: tuple[str, ...] = pre_observation_errors
         if budget_observer is not None and budget_observer.monitoring_failed:
             observation_errors += ("token_budget_monitoring_failed",)
@@ -338,17 +342,19 @@ class CliAgentRuntime:
             # and the existing terminal token budget must remain available.
             events = ()
             terminal_usage = terminal_usage_from_stream(stdout)
-            observation_errors = (f"stream_normalization_failed:{type(exc).__name__}",)
+            observation_errors += (f"stream_normalization_failed:{type(exc).__name__}",)
         capabilities = replace(
             self._adapter.capabilities,
             usage_delta_observed=any(event.kind == "usage_delta" for event in events),
         )
+        codex_capture_thread_id = ""
         if codex_observer is not None:
             observed_session_id = codex_thread_id_from_stream(stdout)
             try:
                 if not observed_session_id:
                     observed_session_id = codex_observer.identify_new_thread(request.workspace)
                 session_id = observed_session_id
+                codex_capture_thread_id = observed_session_id
                 (
                     events,
                     terminal_usage,
@@ -358,20 +364,51 @@ class CliAgentRuntime:
                 observation_errors += ledger_errors
             except Exception as exc:
                 observation_errors += (f"codex_ledger_unavailable:{type(exc).__name__}",)
+        raw_session_files: tuple[RawSessionFile, ...] = ()
+        raw_provider_capture_complete = not process.output_overflow
+        if self.id == "codex":
+            if codex_observer is None:
+                raw_provider_capture_complete = False
+                observation_errors += ("codex_raw_rollout_capture_unavailable",)
+            else:
+                try:
+                    if not codex_capture_thread_id:
+                        codex_capture_thread_id = codex_thread_id_from_stream(stdout)
+                    if not codex_capture_thread_id:
+                        codex_capture_thread_id = codex_observer.identify_new_thread(
+                            request.workspace
+                        )
+                    raw_session_files = (
+                        RawSessionFile(
+                            relative_path="provider/codex-rollout.raw-jsonl",
+                            payload=codex_observer.capture_raw_rollout(
+                                codex_capture_thread_id,
+                                max_bytes=MAX_CODEX_ROLLOUT_CAPTURE_BYTES,
+                            ),
+                        ),
+                    )
+                except Exception as exc:
+                    raw_provider_capture_complete = False
+                    observation_errors += (
+                        f"codex_raw_rollout_capture_failed:{type(exc).__name__}",
+                    )
         if codex_temporary_home is not None:
             cleanup_error = codex_temporary_home.close()
             if cleanup_error:
                 observation_errors += (cleanup_error,)
         return AgentRunResult(
             runtime_id=self.id,
-            exit_status=exit_status,
-            timed_out=timed_out,
+            exit_status=process.returncode,
+            timed_out=process.timed_out,
             terminal_usage=terminal_usage,
             events=events,
             capabilities=capabilities,
             observation_errors=observation_errors,
-            stdout_tail=stdout[-2000:],
-            stderr_tail=stderr[-2000:],
+            stdout=stdout,
+            stderr=stderr,
+            raw_session_files=raw_session_files,
+            raw_provider_capture_complete=raw_provider_capture_complete,
+            policy_diagnostics=process.policy_diagnostics,
             session_id=session_id,
             budget_exhausted=(budget_observer.exhausted if budget_observer is not None else False),
         )

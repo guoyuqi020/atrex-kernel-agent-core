@@ -109,12 +109,11 @@ Kernel 保留与 Agent 晋升都使用普通权威 Evaluate。
 | --- | --- |
 | Incumbent Kernel | `input/kernel` |
 | Candidate Kernel | `work/kernel` |
-| 先前 Epoch Evidence | `input/evidence` |
-| 同分支 Attempt Evidence | `input/attempt-evidence` |
+| 统一的晋升 Lineage/当前 Attempt Evidence View | `input/evidence` |
 | 公开算子契约 | `input/agent-problem` |
 | Core Revision | `agent/optimizer` |
 | Request、Plan、Journal、Report | `scratch` |
-| 标准化 Trace | `sessions` |
+| 未脱敏 Agent Session Artifact 与规范化用量索引 | `sessions` |
 
 Agent 使用 Prompt 声明的精确命令：
 

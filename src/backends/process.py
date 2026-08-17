@@ -9,12 +9,25 @@ import signal
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 DEPENDENCY_GUARD_POLL_SECONDS = 0.25
 OUTPUT_READ_CHUNK_CHARS = 64 * 1024
 MAX_CAPTURE_CHARS = 8 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    """Raw bounded Provider streams plus separate trusted process diagnostics."""
+
+    stdout: str
+    stderr: str
+    returncode: int
+    timed_out: bool
+    output_overflow: bool
+    policy_diagnostics: tuple[str, ...]
 
 
 class ProcessObserver(Protocol):
@@ -37,7 +50,7 @@ class ProcessRunner(Protocol):
         timeout: int | None,
         env: dict[str, str] | None = None,
         observer: ProcessObserver | None = None,
-    ) -> tuple[str, str, int, bool]: ...
+    ) -> ProcessResult: ...
 
 
 def python_import_roots(code: str, *, _depth: int = 0) -> set[str]:
@@ -324,7 +337,7 @@ def run_bounded(
     timeout: int | None,
     env: dict[str, str] | None = None,
     observer: ProcessObserver | None = None,
-) -> tuple[str, str, int, bool]:
+) -> ProcessResult:
     """Run a guarded command with live output observation and a wall deadline."""
     proc = subprocess.Popen(
         command,
@@ -448,17 +461,23 @@ def run_bounded(
     stdout = "".join(stdout_parts)
     stderr = "".join(stderr_parts)
     returncode = proc.returncode
+    policy_diagnostics: list[str] = []
     if output_limit_exceeded.is_set():
-        policy_message = "[core] Agent output exceeded the bounded capture limit"
-        stderr = (stderr or "") + ("\n" if stderr else "") + policy_message + "\n"
+        policy_diagnostics.append("Agent output exceeded the bounded capture limit")
         if returncode == 0:
             returncode = 126
     if dependency_violations:
-        policy_message = (
-            "[core] dependency policy violation; terminated coding session:\n"
+        policy_diagnostics.append(
+            "dependency policy violation; terminated coding session:\n"
             + "\n".join(dependency_violations)
         )
-        stderr = (stderr or "") + ("\n" if stderr else "") + policy_message + "\n"
         if returncode == 0:
             returncode = 126
-    return stdout or "", stderr or "", returncode, timed_out
+    return ProcessResult(
+        stdout=stdout or "",
+        stderr=stderr or "",
+        returncode=returncode,
+        timed_out=timed_out,
+        output_overflow=output_limit_exceeded.is_set(),
+        policy_diagnostics=tuple(policy_diagnostics),
+    )

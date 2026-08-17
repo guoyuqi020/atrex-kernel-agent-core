@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Mapping
@@ -14,6 +15,7 @@ from .common import object_value, text_value, within
 _REQUIRED_ENVIRONMENT = (
     "ATREX_ATTEMPT_MANIFEST",
     "ATREX_ATTEMPT_REPORT_PATH",
+    "ATREX_EVIDENCE_PROMPT_PATH",
     "ATREX_GATEWAY_CAPABILITY",
     "ATREX_GATEWAY_PROXY_URL",
     "ATREX_OPTIMIZER_REPOSITORY",
@@ -25,7 +27,6 @@ _EXPECTED_PATHS = {
     "input_kernel": "input/kernel",
     "working_kernel": "work/kernel",
     "evidence": "input/evidence",
-    "attempt_evidence": "input/attempt-evidence",
     "agent_problem": "input/agent-problem",
     "optimizer": "agent/optimizer",
 }
@@ -47,13 +48,22 @@ _CONTEXT_FIELDS = {
     "lineage_id",
     "epoch_id",
     "epoch_number",
-    "branch",
     "attempt_ordinal",
     "operator",
     "hardware_target",
     "evaluation_contract_digest",
     "agent_problem_digest",
 }
+_EVIDENCE_VIEW_FIELDS = {
+    "schema_version",
+    "role",
+    "lineage_checkpoint",
+    "prompt_fragment_sha256",
+    "through_completed_epoch",
+    "current_epoch",
+    "visibility",
+}
+_MAX_EVIDENCE_PROMPT_BYTES = 32 * 1024
 
 
 @dataclass(frozen=True)
@@ -66,6 +76,7 @@ class RuntimeAttemptContext:
     session_trace_path: Path | None
     gateway_url: str
     gateway_capability: str
+    evidence_prompt: str
     wiki_url: str | None
     wiki_capability: str | None
     token_budget: int
@@ -87,7 +98,7 @@ class RuntimeAttemptContext:
         manifest = object_value(
             json.loads(manifest_path.read_text(encoding="utf-8")), "Attempt manifest"
         )
-        if manifest.get("schema_version") != 5:
+        if manifest.get("schema_version") != 6:
             raise ValueError("unsupported Attempt manifest schema_version")
         if set(manifest) != _MANIFEST_FIELDS:
             raise ValueError("Attempt manifest fields do not match the Core protocol")
@@ -112,7 +123,6 @@ class RuntimeAttemptContext:
             "campaign_id",
             "lineage_id",
             "epoch_id",
-            "branch",
             "operator",
             "hardware_target",
             "evaluation_contract_digest",
@@ -136,6 +146,65 @@ class RuntimeAttemptContext:
             path = within(workspace, relative, label)
             if not path.is_dir():
                 raise ValueError(f"Attempt workspace path is missing: {relative}")
+
+        evidence_manifest_path = workspace / _EXPECTED_PATHS["evidence"] / "manifest.json"
+        if evidence_manifest_path.is_symlink() or not evidence_manifest_path.is_file():
+            raise ValueError("Evidence view manifest must be a regular file")
+        evidence_view = object_value(
+            json.loads(evidence_manifest_path.read_text(encoding="utf-8")),
+            "Evidence view manifest",
+        )
+        if set(evidence_view) != _EVIDENCE_VIEW_FIELDS:
+            raise ValueError("Evidence view manifest fields do not match the Core protocol")
+        current_epoch = object_value(evidence_view.get("current_epoch"), "current Evidence Epoch")
+        visibility = object_value(evidence_view.get("visibility"), "Evidence visibility")
+        expected_visibility = {
+            "completed_epochs": "promoted_lineage",
+            "current_attempts_before": context["attempt_ordinal"],
+        }
+        if (
+            evidence_view.get("schema_version") != 1
+            or evidence_view.get("role") != "optimizer"
+            or evidence_view.get("lineage_checkpoint")
+            != manifest["epoch_evidence_checkpoint"]
+            or evidence_view.get("through_completed_epoch") != context["epoch_number"] - 1
+            or current_epoch
+            != {
+                "number": context["epoch_number"],
+                "snapshot_digest": manifest["attempt_evidence_digest"],
+                "status": "in_progress",
+                "trigger": None,
+            }
+            or visibility != expected_visibility
+        ):
+            raise ValueError("Evidence view disagrees with the trusted Attempt manifest")
+        prompt_input = Path(os.environ["ATREX_EVIDENCE_PROMPT_PATH"])
+        if prompt_input.is_symlink() or not prompt_input.is_file():
+            raise ValueError("Evidence Prompt Fragment must be a regular file")
+        prompt_path = prompt_input.resolve()
+        expected_prompt_path = workspace / _EXPECTED_PATHS["evidence"] / "instructions.md"
+        if prompt_path != expected_prompt_path:
+            raise ValueError("Evidence Prompt Fragment path disagrees with the Evidence view")
+        prompt_bytes = prompt_path.read_bytes()
+        if not prompt_bytes or len(prompt_bytes) > _MAX_EVIDENCE_PROMPT_BYTES:
+            raise ValueError("Evidence Prompt Fragment is empty or exceeds its byte limit")
+        if hashlib.sha256(prompt_bytes).hexdigest() != evidence_view.get(
+            "prompt_fragment_sha256"
+        ):
+            raise ValueError("Evidence Prompt Fragment digest disagrees with the manifest")
+        try:
+            evidence_prompt = prompt_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("Evidence Prompt Fragment must be UTF-8") from error
+        current_attempts = (
+            workspace
+            / _EXPECTED_PATHS["evidence"]
+            / "epochs"
+            / f"{int(context['epoch_number']):08d}"
+            / "attempts"
+        )
+        if current_attempts.is_symlink() or not current_attempts.is_dir():
+            raise ValueError("Evidence view is missing its visible current Attempts")
 
         report_path = Path(os.environ["ATREX_ATTEMPT_REPORT_PATH"]).resolve()
         token_path = Path(os.environ["ATREX_TOKEN_USAGE_REPORT"]).resolve()
@@ -173,6 +242,7 @@ class RuntimeAttemptContext:
             gateway_capability=text_value(
                 os.environ["ATREX_GATEWAY_CAPABILITY"], "Gateway capability"
             ),
+            evidence_prompt=evidence_prompt,
             wiki_url=wiki_url,
             wiki_capability=wiki_capability,
             token_budget=budget,

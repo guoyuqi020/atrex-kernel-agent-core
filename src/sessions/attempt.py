@@ -10,7 +10,7 @@ from contexts.attempt import RuntimeAttemptContext
 from .common import execute_agent_session, guarded_main
 
 
-def _tool_instructions() -> str:
+def _tool_instructions(dsl: str) -> str:
     tool = "agent/optimizer/src/runtime_tools.py"
     return f"""
 ## Session tools
@@ -42,7 +42,7 @@ Example authoritative evaluation request:
 Example knowledge query request:
 
 ```json
-{{"query": "CUDA vectorized load requirements for the target architecture"}}
+{{"query": "{dsl} vectorized load requirements for the target architecture"}}
 ```
 
 Each `record-experiment` request must contain exactly these fields:
@@ -90,7 +90,6 @@ def _trusted_context(context: RuntimeAttemptContext) -> str:
     value = {
         "dsl": manifest["dsl"],
         "epoch_number": task["epoch_number"],
-        "branch": task["branch"],
         "attempt_ordinal": task["attempt_ordinal"],
         "operator": task["operator"],
         "hardware_target": task["hardware_target"],
@@ -104,7 +103,18 @@ def _trusted_context(context: RuntimeAttemptContext) -> str:
 
 def render_prompt(context: RuntimeAttemptContext, config: AgentConfig) -> str:
     base = config.prompt_path("optimization_attempt").read_text(encoding="utf-8").rstrip()
-    return "\n\n".join((base, _trusted_context(context), _tool_instructions())) + "\n"
+    dsl = str(context.manifest["dsl"])
+    return (
+        "\n\n".join(
+            (
+                base,
+                context.evidence_prompt.rstrip(),
+                _trusted_context(context),
+                _tool_instructions(dsl),
+            )
+        )
+        + "\n"
+    )
 
 
 def run() -> int:

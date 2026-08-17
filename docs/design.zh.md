@@ -13,7 +13,7 @@ Kernel，但不持有 Campaign 生命周期。
 | Backend、Prompt、Workflow、Tool 展示和 Report 编写 | Campaign/Lineage/Epoch/Attempt 状态与 Fencing |
 | `work/kernel` 下的 Candidate 修改 | Workspace、隔离、资源限制和清理 |
 | 通过规范客户端发起聚焦 Gateway/Wiki Request | Capability 签发、外部 Credential、配额、幂等和外部 Client |
-| Provider Usage 观测和标准化 Trace | Token Budget 校验和不可变 Artifact |
+| Provider Usage 观测、未脱敏 Session 捕获和规范化用量索引 | Token Budget 校验和不可变 Artifact |
 | 优化假设和解释 | 正确性/性能权威、保留、晋升和回滚 |
 
 Evolver 位于 Parent/Candidate 仓库之外，可以在私有 Candidate Copy 中修改任何 Tracked Core
@@ -55,20 +55,24 @@ Baseline Kernel Revision 和 Ready Lineage。
 
 ### 3.3 Optimization Attempt
 
-Runtime 提供 Incumbent、Agent Problem、累计 Epoch Evidence、同分支 Attempt Evidence 和不可变
-Core Revision。Agent 测试一个可归因工程方向，所有 GPU/Wiki 操作使用 Runtime Protocol Client，
+Runtime 提供 Incumbent、Agent Problem、单一晋升 Lineage Evidence View 和不可变 Core Revision。
+该 View 按 Epoch 组合已晋升历史与当前所选 Revision 的更早 Attempt，不暴露 Active/Challenger
+Role。Agent 测试一个可归因工程方向，
+所有 GPU/Wiki 操作使用 Runtime Protocol Client，
 实验即时写入 Journal，最后只发布一个终态 Report。Candidate Publication 只是 Evidence，不是
 晋升决定。
 
 ## 4. Workspace 与权限
 
-Attempt Manifest v5 固定以下布局：
+Attempt Manifest v6 固定以下布局：
 
 ```text
 attempt.json
 input/kernel/
 input/evidence/
-input/attempt-evidence/
+input/evidence/manifest.json
+input/evidence/bootstrap/
+input/evidence/epochs/
 input/agent-problem/
 agent/optimizer/
 work/kernel/
@@ -90,14 +94,21 @@ Runtime。规范客户端还负责 Candidate 打包、Request/Response 大小限
 Event 与 Token Usage；启动层使用显式环境、隔离 Backend Home、进程组、Timeout/Reaping 和有界
 stdout/stderr Capture。
 
+启用 Session 捕获时，Core 只在 Agent 进程退出后创建 Runtime 选定的 Trace 目录。它保存精确 Prompt、
+捕获到的 Provider stdout/stderr，并在选择 Codex 时保存原始 Codex Rollout；这些文件不做脱敏、
+Event 过滤或文本改写。`events.jsonl` 是供 Runtime 投影使用的独立规范化用量索引，不能替代原始
+文件；`session.json` 记录捕获完整性和可信进程诊断。输出溢出、Codex Rollout 缺失、不安全的原始
+文件路径或 Agent 预建 Trace 路径都会 Fail Closed。安全上限用于阻止无界捕获，但不完整数据绝不会
+被标记为完整。
+
 Input、Output、Cache Read、Cache Write Token 等权计入配额。达到 Budget 会终止完整进程组。
 Core 总是写严格 Token Report，Runtime 拒绝缺失、不完整或内部不一致的计量。Core 不包含嵌套
 Plan Reviewer，所有规划发生在主 Session 内。
 
 ## 6. Evidence 与记忆
 
-Core 没有持久 Campaign 数据库。每次 Attempt 从不可变输入重建历史：Epoch Evidence、同分支
-Attempt Evidence、公开 Agent Problem 和 Runtime 选择的精确 Incumbent。Experiment Journal 只在
+Core 没有持久 Campaign 数据库。每次 Attempt 从不可变输入重建历史：统一晋升 Lineage Evidence、
+当前所选 Revision 的更早 Attempt、公开 Agent Problem 和 Runtime 选择的精确 Incumbent。Experiment Journal 只在
 本 Attempt 内可写，终态后由 Runtime 封存；不存在第二套本地 Memory Manager。
 
 ## 7. 知识与 GPU 执行

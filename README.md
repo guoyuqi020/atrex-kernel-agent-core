@@ -12,7 +12,7 @@ Core owns Agent-visible optimization behavior:
 
 - Agent backend selection and invocation;
 - phase-specific prompts and GPU-kernel engineering workflow;
-- live provider-token observation and normalized Session Trace production;
+- live provider-token observation, unredacted Session capture, and normalized usage indexing;
 - Runtime Gateway and external Wiki tool bindings;
 - experiment journaling and terminal report authoring; and
 - structured profiling-evidence interpretation inside the selected Agent workflow.
@@ -42,8 +42,9 @@ entrypoint supports exactly three fresh-process phases:
 | `optimization_attempt` | Test one attributable optimization direction from immutable Evidence and an incumbent Kernel. | Candidate Kernel plus terminal Attempt report under `scratch/` |
 
 Every phase runs in a new Agent session and produces a Runtime-validated token report. Core never
-resumes process memory between Attempts. Historical experience is supplied explicitly through
-immutable Epoch and same-branch Attempt Evidence.
+resumes process memory between Attempts. Historical experience is supplied through one immutable,
+single-lineage Evidence view that combines the promoted cross-Epoch history with only earlier
+Attempts from the currently selected revision. Active/Challenger roles are not exposed.
 
 ## Runtime workspace
 
@@ -54,21 +55,45 @@ Core validates the Runtime-owned manifest before launching an Agent. A normal At
 ├── attempt.json
 ├── input/
 │   ├── kernel/                 # immutable incumbent
-│   ├── evidence/               # immutable cross-Epoch history
-│   ├── attempt-evidence/       # immutable same-branch history
+│   ├── evidence/               # immutable unified, Epoch-organized Evidence view
+│   │   ├── manifest.json       # trusted scope and source digests
+│   │   ├── instructions.md     # Runtime-authored Prompt Fragment
+│   │   ├── bootstrap/
+│   │   └── epochs/             # promoted lineage plus visible current Attempts
 │   └── agent-problem/          # public operator contract
 ├── agent/optimizer/            # immutable materialized Core Revision
 ├── work/kernel/                # writable candidate
-├── sessions/                   # normalized Agent-session output
+├── sessions/                   # unredacted Agent-session artifacts
 └── scratch/                    # requests, experiment journal, reports, token usage
 ```
 
 The private Evaluation Contract is referenced only by digest and remains inside Runtime/Gateway.
+Runtime injects the Evidence structure instructions into the final Agent Prompt; this repository
+only verifies and appends the Digest-bound Fragment and does not own that structure text.
 Gateway and Wiki access use short-lived, Attempt-scoped capabilities issued by Runtime. The Worker
 can read those delegated capabilities, while upstream Agate/Wiki credentials remain outside the
 sandbox. Core writes operation requests under `scratch/` and uses
 [`src/runtime_tools.py`](src/runtime_tools.py) as the canonical bounded protocol client; Runtime
 still enforces identity, operation allowlists, quotas, idempotency, and result authority.
+
+When enabled by the Runtime manifest, each phase writes one Session Artifact directory:
+
+```text
+sessions/<name>/
+├── input/prompt.md
+├── provider/stdout.stream-json
+├── provider/stderr.log
+├── provider/codex-rollout.raw-jsonl  # Codex only
+├── events.jsonl                      # normalized usage index
+└── session.json                      # capture status and diagnostics
+```
+
+Prompt and Provider files are captured without redaction, event filtering, or text rewriting;
+reasoning, tool arguments/results, command output, and any sensitive values emitted by the Provider
+remain present. Core does not proactively copy credentials that the Provider never emitted. A
+bounded-output overflow or incomplete Codex rollout capture fails the phase instead of silently
+claiming a complete Trace. The Coding Agent may not pre-create or redirect the Runtime-selected
+Session path.
 
 ## Engineering loop
 

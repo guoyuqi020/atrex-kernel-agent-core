@@ -31,13 +31,15 @@ def test_process_capture_is_bounded(
     import backends.process as process
 
     monkeypatch.setattr(process, "MAX_CAPTURE_CHARS", 128)
-    stdout, stderr, returncode, timed_out = run_bounded(
+    result = run_bounded(
         [sys.executable, "-c", "print('x' * 4096, flush=True)"],
         tmp_path,
         timeout=5,
     )
 
-    assert len(stdout) <= 128
-    assert "bounded capture limit" in stderr
-    assert returncode != 0
-    assert timed_out is False
+    assert len(result.stdout) <= 128
+    assert result.stderr == ""
+    assert result.output_overflow is True
+    assert "bounded capture limit" in result.policy_diagnostics[0]
+    assert result.returncode != 0
+    assert result.timed_out is False

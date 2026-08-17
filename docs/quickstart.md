@@ -127,12 +127,11 @@ The selected Agent receives fixed paths:
 | --- | --- |
 | immutable incumbent Kernel | `input/kernel` |
 | writable candidate Kernel | `work/kernel` |
-| prior Epoch Evidence | `input/evidence` |
-| same-branch current-Epoch Evidence | `input/attempt-evidence` |
+| unified promoted-lineage/current-Attempt Evidence view | `input/evidence` |
 | public operator contract | `input/agent-problem` |
 | immutable Core Revision | `agent/optimizer` |
 | requests, plan, journal, reports | `scratch` |
-| normalized Agent trace | `sessions` |
+| unredacted Agent Session Artifacts and normalized usage index | `sessions` |
 
 The private Evaluation Contract and exact hidden cases are never placed in this workspace. The Agent
 uses Runtime tools described in the phase Prompt:
