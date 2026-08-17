@@ -1,0 +1,129 @@
+# Atrex Kernel Agent Core 设计
+
+[English](design.md) | 中文
+
+## 1. 定位
+
+Core 是一个相对 Runtime 不可信、可以自进化的 Optimizer Bundle。Runtime 把完整仓库封存在一个
+Content Digest 下，并在全新 Sandbox 进程中启动唯一入口。Core 决定 Agent 如何推理和修改
+Kernel，但不持有 Campaign 生命周期。
+
+| Core 负责 | Runtime 负责 |
+| --- | --- |
+| Backend、Prompt、Workflow、Tool 展示和 Report 编写 | Campaign/Lineage/Epoch/Attempt 状态与 Fencing |
+| `work/kernel` 下的 Candidate 修改 | Workspace、隔离、资源限制和清理 |
+| 通过规范客户端发起聚焦 Gateway/Wiki Request | Capability 签发、外部 Credential、配额、幂等和外部 Client |
+| Provider Usage 观测和标准化 Trace | Token Budget 校验和不可变 Artifact |
+| 优化假设和解释 | 正确性/性能权威、保留、晋升和回滚 |
+
+Evolver 位于 Parent/Candidate 仓库之外，可以在私有 Candidate Copy 中修改任何 Tracked Core
+文件。Runtime 校验完整仓库、记录 Changed Path、独立评估 Challenger，并控制晋升。
+
+## 2. 可执行仓库
+
+`atrex-bundle.json` 是导入边界。Runtime 只接受严格的版本 1 Manifest、固定 Bundle Format 和
+安全 Regular-file Entry；在封存前拒绝 Link、Special File、Git Metadata、未批准 Submodule、
+不安全路径和超限内容。
+
+`atrex-agent.json` 是可进化行为配置，版本 2 包含 Backend、Reasoning Effort、Backend-specific
+Session Settings 和三个阶段的精确 Prompt Path。Core 不选择第二入口，也不启动嵌套控制面。
+
+## 3. 阶段 Dispatcher
+
+`src/main.py` 要求显式 `ATREX_CORE_PHASE`：
+
+```text
+problem_generalization -> sessions/problem_generalization.py
+framework_baseline     -> sessions/lineage_bootstrap.py
+optimization_attempt   -> sessions/attempt.py
+```
+
+每个阶段在启动 Backend 前严格校验 Runtime Manifest、固定路径、Report/Token 目标和仓库身份；
+未知字段、版本、路径、缺失 Capability 或矛盾环境都会失败关闭。
+
+### 3.1 Problem Generalization
+
+只有此阶段能看到评测私有 Reference、Input、Shape 和可选 Aggregate Metadata。它没有 Gateway/
+Wiki 网络权限。Agent 生成一个有界公开 JSON，Session Wrapper 注入 Controller-owned Schema，
+Runtime 再独立执行 Schema 与隐私校验并封存 Artifact。
+
+### 3.2 Framework Baseline
+
+Runtime 提供一个 DSL Seed、公开 Agent Problem 及 Pre-Lineage Gateway/Wiki Capability。Core 只修改
+`work/kernel`，并发布与权威 Evaluate Outcome 绑定的 Baseline Report。Runtime 完成对账后才创建
+Baseline Kernel Revision 和 Ready Lineage。
+
+### 3.3 Optimization Attempt
+
+Runtime 提供 Incumbent、Agent Problem、累计 Epoch Evidence、同分支 Attempt Evidence 和不可变
+Core Revision。Agent 测试一个可归因工程方向，所有 GPU/Wiki 操作使用 Runtime Protocol Client，
+实验即时写入 Journal，最后只发布一个终态 Report。Candidate Publication 只是 Evidence，不是
+晋升决定。
+
+## 4. Workspace 与权限
+
+Attempt Manifest v5 固定以下布局：
+
+```text
+attempt.json
+input/kernel/
+input/evidence/
+input/attempt-evidence/
+input/agent-problem/
+agent/optimizer/
+work/kernel/
+sessions/
+scratch/
+```
+
+Runtime 通过 Bubblewrap 与 cgroup v2 约束挂载、进程和资源。Evaluation Contract 只暴露 Digest。
+
+`runtime_tools.py` 是规范 Core 协议客户端，而不是 Credential 隔离边界。Runtime 签发的短期
+Attempt Capability 对不可信 Worker 可见，因此即使 Agent 直接构造 Proxy Request，Runtime 也必须
+重新校验身份、操作、配额、幂等、Candidate 和 Outcome。上游 Agate/Wiki Credential 始终留在
+Runtime。规范客户端还负责 Candidate 打包、Request/Response 大小限制、连续 Journal 以及原子
+终态 Report。
+
+## 5. Session 与 Token
+
+每个阶段创建全新 Provider Session。`src/backends/` 把 Claude、Codex、Pi、Qoder 统一成 Session
+Event 与 Token Usage；启动层使用显式环境、隔离 Backend Home、进程组、Timeout/Reaping 和有界
+stdout/stderr Capture。
+
+Input、Output、Cache Read、Cache Write Token 等权计入配额。达到 Budget 会终止完整进程组。
+Core 总是写严格 Token Report，Runtime 拒绝缺失、不完整或内部不一致的计量。Core 不包含嵌套
+Plan Reviewer，所有规划发生在主 Session 内。
+
+## 6. Evidence 与记忆
+
+Core 没有持久 Campaign 数据库。每次 Attempt 从不可变输入重建历史：Epoch Evidence、同分支
+Attempt Evidence、公开 Agent Problem 和 Runtime 选择的精确 Incumbent。Experiment Journal 只在
+本 Attempt 内可写，终态后由 Runtime 封存；不存在第二套本地 Memory Manager。
+
+## 7. 知识与 GPU 执行
+
+Core 不携带 Wiki Corpus 或本地 Gateway。`wiki-query` 通过 Runtime 返回带 Source/Snapshot 身份的
+冻结响应；`gateway-execute` 只执行当前 Capability 授权的 Agate 等价操作。只有正确的权威
+Evaluate 可以进入 Kernel 保留或 Agent 晋升比较。
+
+Bubblewrap 的 `host` 网络模式不提供目标过滤；需要同时访问 Agent Provider 与 Runtime Service 的
+生产部署必须在 Bubblewrap 之外实施 Egress Policy。`isolated` 模式完全无网络。不能把网络隔离
+寄托在 Prompt 指令上。
+
+## 8. 进化边界
+
+Core Revision 是完整 Tracked Repository 的 Digest。Evolution 可以修改 Prompt、Backend、Adapter、
+Workflow 和 Helper，但不能修改 Runtime、Sandbox Mount、Capability/Quota、Registry/Artifact/
+Gateway/Wiki 状态、Parent Revision、Evidence 或 Runtime 的比较与晋升决策。Kernel 是否保留与
+Agent Revision 是否晋升相互独立。
+
+## 9. 必须保持的不变量
+
+1. 一次 Runtime Launch 只执行一个受支持阶段和一个全新主 Agent Session。
+2. Core 只读声明输入，只写声明输出根。
+3. 精确评测 Case 只存在于 Problem Generalization 和 Gateway。
+4. 每个 GPU/Wiki 操作都经过 Runtime 签发的 Scope Authority。
+5. 每个决定性实验在终态 Report 前记录。
+6. Agent Report 不覆盖正确性、Latency、保留或晋升事实。
+7. Token 只根据 Provider Evidence 计量，不估算。
+8. Git Branch、Worktree、本地 Daemon 和进程内 Memory 都不能作为跨 Attempt Handoff。

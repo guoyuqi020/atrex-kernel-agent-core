@@ -1,309 +1,180 @@
-# Architecture Design
+# Atrex Kernel Agent Core Design
 
-## Overview
+English | [中文](design.zh.md)
 
-Atrex Kernel Agent is an orchestrated system for GPU kernel implementation, profiling, and
-iterative optimization. The repository has one supported entry point: `orchestrator/optimize.py`.
-It owns the optimization lifecycle and launches isolated Long Horizon episodes through Claude,
-Qoder, Codex, or Pi.
+## 1. Role
 
-Agent sessions propose and implement changes. The orchestrator remains authoritative for
-budgets, state transitions, sandbox execution, correctness and performance gates, production
-policy, rollback, aggregation, and final packaging.
+Atrex Kernel Agent Core is an untrusted-to-Runtime, self-evolvable Optimizer Bundle. Runtime seals
+the complete repository at one content digest and launches its declared entrypoint in a fresh
+sandboxed process. Core determines how an Agent reasons about and modifies a Kernel; it does not
+own the optimization campaign lifecycle.
 
-Each canonical optimization version is one multi-experiment episode in a private Git worktree.
-The internal `long_horizon/` engine supplies worktree isolation, journals, handoff recovery,
-same-allocation ABBA verification, and squash promotion; it is not a second CLI.
+The split is intentional:
 
-## Design Goals
+| Core owns | Runtime owns |
+| --- | --- |
+| Agent backend, Prompt, Skills, tool presentation, experiment/report authoring | Campaign/Lineage/Epoch/Attempt state and fencing |
+| Candidate edits under `work/kernel` | Workspace construction, isolation, process limits, and cleanup |
+| Focused Gateway/Wiki requests through the canonical client | Capability issuance, external credentials, quotas, idempotency, and external clients |
+| Provider usage observation and normalized trace output | Token budget, usage validation, immutable Artifact storage |
+| Optimization hypotheses and interpretations | Correctness/performance authority, retention, promotion, rollback |
 
-- **Mechanical control**: termination and acceptance are decided by code rather than Agent
-  self-assessment.
-- **Profile-driven optimization**: kernel changes must be supported by official profiler
-  evidence.
-- **Reproducible state**: Git HEAD is the incumbent kernel; structured memory and artifacts
-  preserve the reasoning and measurements behind each attempt.
-- **Execution isolation**: GPU work crosses `tools/sandbox.py`; campaign memory, plans, edits,
-  and Git state remain local.
-- **Evaluator integrity**: immutable ground truth and full-workload validation prevent harness
-  edits or partial-shape wins from becoming accepted results.
-- **Production provenance**: production mode mechanically enforces the selected framework and
-  PyTorch compute rules, while an isolated policy Agent reviews ambiguous third-party dependency
-  use from a read-only candidate snapshot.
-- **Backend portability**: one Agent Runtime interface normalizes commands, events, usage, and
-  process policy across supported coding CLIs.
+An Evolver runs outside the parent and candidate repositories. It may propose changes to any tracked
+Core file in a private candidate copy, but Runtime validates the resulting repository, records exact
+changed paths, evaluates the Challenger independently, and controls promotion.
 
-## Project Structure
+## 2. Executable repository
 
-```text
-.
-├── orchestrator/
-│   ├── optimize.py                    # CLI entry point: arguments, framework dispatch, run wiring
-│   ├── campaign.py                    # Single-operator campaign: baseline, episodes, promotion
-│   ├── operator_layout.py             # Supported operator layout detection
-│   ├── session_io.py                  # Coding-agent sessions, dependency review, sandbox I/O
-│   ├── workspace_state.py             # Canonical memory, git facts, stall counter
-│   ├── workspace_runtime.py           # Workspace runtime links, agent skills, directives
-│   ├── hardware.py                    # Vendor/framework identity and Gluon escalation
-│   ├── constants.py                   # Shared paths, policy defaults, state filenames
-│   ├── agent_runtime/                 # Claude/Qoder/Codex/Pi adapters and process policy
-│   ├── telemetry/                     # Phase timing and token telemetry
-│   ├── optimization_policy.py         # leaderboard/production policy gates
-│   ├── templates/                     # Generated-code templates embedded into candidates
-│   └── prompts/                       # Setup, inspection, baseline, and episode prompts
-├── long_horizon/                      # Episode worktrees, handoff protocol, ABBA verification
-├── agents/                            # Baseline Agent definition injected into campaign workspaces
-├── skills/                            # Backend-local workflow and plan-generation skills
-├── tools/
-│   ├── sandbox.py                     # Gateway packaging and execution boundary
-│   ├── local_gateway.py               # Trusted localhost FIFO scheduler
-│   ├── memory_manager.py              # Structured iteration memory manager
-│   └── profile_*.sh / analysis tools  # NVIDIA and AMD profiling helpers
-├── reference/                         # Workspace init, evaluator adapters, schema, SOL packaging
-├── gpu-wiki/                          # Hardware and optimization knowledge base
-├── reference-projects/                # Optional source-search repositories
-└── 3rdparty/                          # Profiler-analysis dependencies
-```
+`atrex-bundle.json` is the import boundary. Runtime accepts only a strict version-1 manifest with
+bundle format `atrex-kernel-agent-bundle-v1` and one safe regular-file entrypoint. It rejects
+links, special files, Git metadata, unresolved submodules, unsafe paths, oversized files, and bundle
+limit violations before sealing the tree.
 
-The `skills/` and `agents/` directories are internal runtime assets. The orchestrator links or
-installs them into generated campaign workspaces; they are not standalone repository entry
-points.
+`atrex-agent.json` is evolvable behavior configuration. Version 2 contains:
 
-### Authority boundaries
+- `agent_backend`: `claude`, `codex`, `pi`, or `qodercli`;
+- `reasoning_effort`: `low`, `medium`, `high`, or `max`;
+- backend-specific `session_settings` serialized as a string; and
+- exact Prompt paths for all supported phases.
 
-| Boundary | Owner | Durable result |
-| --- | --- | --- |
-| Campaign control | `orchestrator/campaign.py` | Workspace Git history and canonical memory |
-| Episode exploration | `long_horizon/` plus one coding-agent session | Journal, handoff, archived attempt and telemetry |
-| GPU execution | `tools/sandbox.py` plus gateway | Structured evaluator result and requested profile artifacts |
-| Optimization knowledge | `gpu-wiki/`, then optional `reference-projects/` | Evidence references recorded by the episode |
+Core never selects a second entrypoint or invokes a nested control plane.
 
-The Agent may edit only its isolated candidate worktree. It cannot decide promotion, mutate the
-incumbent directly, replace evaluator inputs, or use local host GPU execution. Conversely, the
-supervisor does not generate optimization code: it validates, measures, records, and promotes
-exact committed sources.
+## 3. Phase dispatcher
 
-## Supported Entry Point
-
-```bash
-python orchestrator/optimize.py \
-  --op-dir /path/to/operator \
-  --platform TARGET_GPU \
-  --sandbox-hardware REMOTE_GPU \
-  --framework Triton
-```
-
-The public path creates an isolated Git-worktree episode for each optimization version. A fresh
-Agent thread may perform several related profile/research/edit/validate cycles. Claude and Codex
-support bounded same-thread recovery when the terminal handoff is incomplete; canonical state
-crosses episode boundaries through Git, structured memory, journals, plans, and profiles.
-
-The main workspace name is deterministic. Leaderboard mode uses
-`kernel_opt_<op>_<framework>_<platform>`; production mode appends `_production` so a strict
-production campaign cannot silently resume permissive leaderboard history. Omitting `--framework`
-launches one child process and one independent workspace for every framework supported by the
-runtime-detected GPU vendor.
-
-## Core Components
-
-### Campaign lifecycle
-
-`Campaign` in `orchestrator/campaign.py` is the single-operator state machine:
-
-1. Materialize or resume a Git workspace and validate its committed V0.
-2. In production mode by default, create and pin a self-contained framework-native V1.
-3. Create one private branch/worktree and launch one multi-cycle episode per canonical version.
-4. Validate its structured journal and `candidate_ready`, `pivot`, or `blocked` handoff, with
-   bounded same-thread recovery for Claude and Codex.
-5. Check protected paths, clean worktree state, exact candidate commit, and production policy.
-6. Independently compare a valid candidate with the incumbent in one ABBA allocation.
-7. Squash-promote only a strict correctness-passing improvement; otherwise commit only canonical
-   failure/pivot/block evidence.
-8. Stop on version budget, token budget, optional stall budget, target utilization, or a terminal
-   repeated blocker.
-9. Recheck production policy and package the final candidate.
-
-`HEAD` is always the incumbent. A failed, regressing, or policy-violating candidate is not
-allowed to replace it.
-
-### Agent Runtime
-
-`orchestrator/agent_runtime/` separates backend-specific command and event formats from campaign
-control. Adapters expose a common request/result model containing:
-
-- exit status and timeout state;
-- normalized session identity;
-- terminal token usage;
-- per-event usage deltas and phase-marker receipts when supported;
-- backend capability and observation-error metadata.
-
-The process supervisor also protects the host execution boundary by rejecting dependency builds,
-direct host GPU execution, profiler use outside the sandbox, and mutations of a shared localhost
-gateway.
-
-### Workspace runtime assets
-
-`link_runtime()` exposes `tools/`, `reference/`, `skills/`, `reference-projects/`, and `gpu-wiki/`
-inside each campaign workspace. It also prepares backend-specific project-local discovery trees:
-
-- `.claude/` and `.qoder/` receive Agent definitions and knowledge skills;
-- `.agents/skills/` receives repository-scoped Codex/Pi optimization skills;
-- The repository-native `gen-plan` skill is linked into every backend's local discovery tree and
-  independently obtains read-only, non-persistent Codex and Qoder reviews before evidence-based
-  cross-review synthesis. A matching primary backend reviews in its current session to avoid
-  recursion. Before the first episode, the campaign probes each external reviewer once, caches the
-  result in private runtime state, and disables later calls to reviewers that were unavailable.
-
-### Sandbox and gateway
-
-All correctness, benchmark, and profiling work crosses
-`tools/sandbox.py`. The sandbox builds an explicit input allowlist, omits optimizer-only state,
-submits a typed `run`/`profile` job when representable, and falls back to a self-contained `dev`
-job for SOL or custom commands.
-
-Execution may target an external atrex-gpu-gateway or `tools/local_gateway.py`. The localhost
-gateway persists jobs in SQLite and consumes them FIFO with one worker by default. It is a
-transport-compatible trusted-code executor, not a security boundary.
-
-### Full-workload optimization
-
-SOL and native Atrex-Bench operators run one campaign over the complete workload set. Every
-candidate is validated for full-workload correctness and compared by its full-workload geomean.
-Production makes generalized input handling a mode policy rather than an operator opt-in. A native
-operator's user-provided `agent_problem.json` is validated and used directly. When only detailed
-`shapes.json` exists, a dedicated clean problem-authoring session reads the evaluator inputs in an
-ephemeral directory and derives the public contract before any baseline or optimization session runs.
-Only the resulting generalized domain, invariants, safe aggregate distribution, and synthetic
-development cases enter the campaign workspace.
-
-The sandbox injects exact shapes and evaluator metadata only at the official remote evaluation
-boundary. Profiling selects an opaque id from canonical memory and injects only that real shape into
-the ephemeral remote profile job; the complete hidden shape table never enters the workspace.
-Optimization feedback retains aggregate results plus real per-shape latency keyed by opaque shape id,
-while withholding shape inputs, per-case failure details, and raw evaluator logs. The Atrex-Bench
-runtime is copied into the workspace without linking its checkout-level `data/` tree. Sandbox private
-shape injection, opaque-shape profiling, and generalized result masking require the persisted workspace
-mode to be `production`. Leaderboard always retains legacy exact-shape exposure, regardless of whether
-the source operator also contains a public problem contract.
-
-### Production policy
-
-`optimization_mode=leaderboard` allows evidence-backed framework changes and compatible
-third-party libraries. `optimization_mode=production` is fail-closed:
-
-- the selected framework is a hard constraint;
-- non-standard imports, declared dependencies, and library references are reviewed by an
-  independent Agent according to their actual use; toolchain/launch plumbing may be accepted,
-  while prebuilt compute, alternate frameworks, hidden dispatch, and external code are rejected;
-- PyTorch compute fallbacks and dynamic external-code loading are rejected;
-- `kernel.py` and `solution.json` are first checked mechanically,
-  then copied into a bounded temporary workspace for dependency review when needed;
-- a missing, malformed, incomplete, or evidence-mutating Agent verdict fails closed;
-- violating episode candidates are rejected before promotion and recorded as failed memory.
-
-Production Triton campaigns enter a mandatory Triton-to-Gluon episode after the configured stall
-threshold. The episode receives an explicit conversion directive and TTGIR/conversion-sheet
-workflow. Conversion remains latched until a committed Gluon candidate passes correctness and
-performance-parity gates.
-
-### Long Horizon episode engine
-
-`Campaign.run()` in `orchestrator/campaign.py` invokes the internal Long Horizon engine. It creates
-an isolated branch and Git worktree from the incumbent for each episode. The Agent records
-structured experiments in a journal and publishes one terminal handoff: `candidate_ready`,
-`pivot`, or `blocked`.
-
-A candidate must leave a clean worktree, change `kernel.py`, preserve protected paths, satisfy
-production policy, and pass an exact same-allocation ABBA schedule. Accepted candidates are
-squash-promoted to the incumbent with canonical memory. Rejected and non-candidate episodes
-advance memory history without changing the incumbent kernel. Active episode state supports
-crash recovery. The internal engine has no public parser or module entry point; all settings are
-provided by `orchestrator/optimize.py`.
-
-## End-to-End Flow
-
-### 1. Resolve the operator and runtime
-
-`--op-dir` supplies all operator-specific ground truth. The orchestrator detects SOL or native
-Atrex-Bench format, probes the runtime GPU architecture, resolves the framework set, initializes
-required submodules, and creates a framework/hardware-suffixed workspace below `--workspace` or
-the current directory.
-
-### 2. Establish V0
-
-SOL operators receive a mechanically seeded PyTorch wrapper and immutable evaluator inputs.
-Native Atrex-Bench and derived inputs use a bounded setup session. V0 must have a passing complete
-workload result, `memory/v0.json`, and a Git root commit.
-
-### 3. Establish the framework baseline
-
-Production mode runs a dedicated framework-baseline session by default
-(`--framework-baseline=auto`). The orchestrator restores immutable inputs, checks framework
-purity, validates the base seed plus five additional seeds, commits the result as V1, and pins its
-commit for optimization. `always` enables this stage in leaderboard mode; `never` starts from V0.
-
-### 4. Explore one episode per version
-
-Each version repeats a coherent evidence loop as many times as needed within its episode:
+`src/main.py` dispatches only on `ATREX_CORE_PHASE`:
 
 ```text
-profile -> research -> plan -> edit/compile/repair
-        -> correctness -> benchmark -> journal/checkpoint -> repeat or handoff
+problem_generalization -> sessions/problem_generalization.py
+framework_baseline     -> sessions/lineage_bootstrap.py
+optimization_attempt   -> sessions/attempt.py
 ```
 
-GPU commands run remotely while plans, source edits, journals, and Git remain local. A
-`candidate_ready` handoff is not authoritative: the supervisor validates protected paths, policy,
-clean worktree state, and the exact candidate commit, then runs incumbent/candidate ABBA in one
-gateway allocation. A rejected candidate, `pivot`, or `blocked` outcome advances canonical memory
-without changing the incumbent. Active episode state is restart-safe.
+Each phase validates a Runtime-authored manifest, fixed workspace paths, report/token destinations,
+and the materialized repository identity before starting the configured Agent backend. Unsupported
+versions, unknown paths, missing capabilities, or inconsistent environment values fail closed.
 
-For progress visibility, the supervisor creates ignored `memory/live.json` at episode start and the
-journal command refreshes it after every decisive experiment. This live view is explicitly
-non-canonical; a numbered `memory/v<N>.json` is written only after terminal handoff processing and
-independent verification.
+### 3.1 Problem generalization
 
-### 5. Finalize
+This is the only phase that sees evaluator-private reference, input, shape, and optional aggregate
+metadata files. It has no Gateway or Wiki network authority. The Agent must publish one bounded
+`atrex.agent_problem.v1` JSON document that preserves operator semantics while hiding exact evaluator
+cases and reversible distributions. The session wrapper adds the controller-owned schema metadata
+after successful generation; Runtime then independently validates privacy and schema constraints
+before sealing the Artifact.
 
-At termination, production mode rechecks policy and SOL campaigns emit a directly submittable
-output.
+### 3.2 Framework baseline
 
-## Workspace State
+Runtime supplies one DSL seed Kernel, the public Agent Problem, and a pre-Lineage Gateway/Wiki
+capability. Core may edit only `work/kernel` and must finish with a framework-baseline report bound to
+the exact authoritative Evaluate outcome. Runtime creates the Baseline Kernel Revision and Ready
+Lineage only after report/outcome reconciliation.
+
+### 3.3 Optimization Attempt
+
+Runtime supplies the incumbent Kernel, public Agent Problem, cumulative Epoch Evidence, same-branch
+Attempt Evidence, and one immutable Core Revision. The Agent follows one attributable engineering
+direction and uses Runtime tools for every GPU or Wiki operation. It records experiments as they
+happen and publishes exactly one terminal Attempt report. Candidate publication is evidence, not a
+promotion decision.
+
+## 4. Workspace and authority
+
+The normal Attempt layout is fixed by manifest protocol version 5:
 
 ```text
-kernel_opt_<name>_<framework>_<platform>[_production]/
-├── kernel.py
-├── test_kernel.py
-├── README.md
-├── memory/v<N>.json
-├── memory/long_horizon_e<NNNN>.json  # Evidence for promoted episodes
-├── plans/
-├── profiles/
-├── framework_baseline.json
-└── .atrex_long_horizon/               # Episode state, journals, telemetry, verification
+attempt.json
+input/kernel/
+input/evidence/
+input/attempt-evidence/
+input/agent-problem/
+agent/optimizer/
+work/kernel/
+sessions/
+scratch/
 ```
 
-Not every campaign uses every artifact. Git plus unmasked `memory/v<N>.json` files are the durable
-optimization history. `.atrex_long_horizon/` and temporary verification payloads are excluded
-from main-workspace commits; their recoverable local state remains on disk.
+Only `work/kernel`, `sessions`, and `scratch` are writable. Runtime owns mount policy and may enforce
+that boundary with bubblewrap and cgroup v2. The Evaluation Contract is represented by a digest and
+never materialized for the Agent.
 
-## Profiling and Telemetry
+`runtime_tools.py` is the canonical Core client for Runtime HTTP capabilities. The delegated,
+Attempt-scoped capability is visible to the untrusted Worker, so this client is not a credential
+isolation boundary. Runtime remains authoritative even if an Agent constructs a direct proxy
+request. The client:
 
-- NVIDIA profiling uses `tools/profile_nvidia.sh` and Nsight Compute.
-- AMD profiling uses `tools/profile_kernel.sh`, rocprofv3, ATT, PMC, and assembly extraction.
-- `tools/memory_manager.py` creates, reads, updates, masks, and summarizes iteration records.
-- Episodes attribute wall time and token usage to profile, research, planning, implementation,
-  correctness, benchmark, and recording phases when the backend emits complete markers and usage
-  deltas.
-- Missing or inconsistent observations are retained with explicit partial/unavailable measurement
-  labels rather than fabricated values.
+- attaches the current candidate tree to Gateway operations;
+- binds every request to the Runtime identity and capability;
+- provides live external Wiki queries without exposing the upstream Wiki credential;
+- writes an atomic, contiguous experiment journal; and
+- validates the shape of terminal baseline and Attempt reports before submission.
 
-## Critical Constraints
+Tool results remain Agent-visible evidence. Runtime separately freezes authoritative Gateway
+outcomes and Wiki interactions.
 
-- Hardware specifications must come from `gpu-wiki` with auditable source references.
-- Official profiler evidence is required before optimization code changes.
-- Ground-truth evaluator inputs are immutable.
-- Correctness must pass before performance conclusions or promotion.
-- Every accepted candidate must be represented by Git and structured memory.
-- `masked: true` memory is excluded from active planning.
-- Production candidates must be self-contained in their selected framework.
-- Local gateway mode accepts trusted code only and should remain bound to loopback.
+## 5. Agent sessions and token accounting
+
+All phases create a new provider session. `src/backends/` normalizes Claude, Codex, Pi, and Qoder
+processes into a common result and Session Event stream. The launch layer uses an explicit
+environment, isolated backend homes where required, a process group, timeout/reaping, and bounded
+stdout/stderr capture.
+
+The live observer counts provider-reported uncached input, output, cache-read, and cache-write tokens
+equally. Reaching the Runtime budget terminates the process group. Core always writes a strict token
+report; Runtime rejects missing, incomplete, or internally inconsistent accounting. Wall-clock
+timeouts are safety limits, not optimization iteration quotas.
+
+Core has no nested plan-review implementation because its provider usage could not be hidden from
+the phase budget. Planning remains inside the selected primary Agent session.
+
+## 6. Evidence and memory
+
+Core has no durable local campaign database. A fresh Attempt reconstructs history from immutable
+inputs:
+
+- Epoch Evidence contains completed prior-Epoch facts and bounded trace/diff projections;
+- Attempt Evidence contains only the current branch's contiguous earlier Attempts in this Epoch;
+- the public Agent Problem describes stable operator constraints; and
+- the incumbent Kernel is the exact branch checkpoint selected by Runtime.
+
+The Agent-authored experiment journal is local to one Attempt until Runtime seals its terminal
+report. Core contains no second local memory manager; Runtime Evidence and the terminal report are
+the only cross-session handoff.
+
+## 7. Knowledge and GPU execution
+
+Core contains no Wiki corpus or local Gateway. `wiki-query` reaches the independent GPU Wiki through
+a Runtime proxy and returns one frozen response with source identity. `gateway-execute` reaches Agate
+through Runtime and supports only the operations granted to that Attempt. GPU validation, profiling,
+compiler inspection, and development commands therefore remain observable and quota-controlled.
+
+Only a correct authoritative Evaluate result can enter Runtime retention or promotion comparison.
+
+Bubblewrap provides filesystem, process, and resource isolation. Its `host` network mode does not
+implement destination filtering; production deployments that require live Agent-provider and
+Runtime service access must enforce egress policy outside bubblewrap. `isolated` mode provides no
+network. This limitation is explicit and is not delegated to Agent instructions.
+
+## 8. Evolution boundary
+
+A Core Revision is the digest of the complete tracked repository. Evolution may change prompts,
+skills, backend selection, adapters, analysis tools, and workflow implementation. It cannot change:
+
+- Runtime code or deployment configuration;
+- sandbox mounts, credentials, capabilities, or quotas;
+- Registry, Artifact, Gateway, or Wiki service state;
+- the immutable parent Revision or Evidence inputs; or
+- Runtime's Kernel/Agent comparison and promotion decisions.
+
+Runtime evaluates Active and Challenger from the same Kernel and Evidence checkpoint. A better Kernel
+may be retained independently of whether the producing Agent Revision is promoted.
+
+## 9. Required invariants
+
+1. One Runtime launch executes exactly one supported phase and one fresh primary Agent session.
+2. Core reads only declared inputs and writes only declared output roots.
+3. Exact evaluator cases remain private outside problem generalization and Gateway.
+4. Every GPU/Wiki operation uses Runtime-issued scoped authority.
+5. Every decisive experiment is recorded before terminal reporting.
+6. A candidate report never overrides correctness, latency, retention, or promotion facts.
+7. Token usage is measured from provider evidence and is never estimated.
+8. No Git branch, worktree, local daemon, or in-process memory is a cross-Attempt handoff mechanism.

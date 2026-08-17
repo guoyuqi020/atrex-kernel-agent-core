@@ -1,0 +1,11 @@
+{
+  "schema_version": 2,
+  "agent_backend": "claude",
+  "reasoning_effort": "max",
+  "session_settings": "",
+  "prompts": {
+    "problem_generalization": "prompts/generalize_agent_problem.md",
+    "framework_baseline": "prompts/framework_baseline.md",
+    "optimization_attempt": "prompts/episode.md"
+  }
+}
