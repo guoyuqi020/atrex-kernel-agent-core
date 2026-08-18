@@ -168,6 +168,50 @@ def test_codex_rollout_is_captured_before_temporary_home_cleanup(tmp_path: Path)
         observer.capture_raw_rollout(thread_id, max_bytes=1)
 
 
+def test_codex_ledger_normalizes_current_usage_without_cache_write(tmp_path: Path) -> None:
+    thread_id = "01234567-89ab-cdef-0123-456789abcdef"
+    rollout = tmp_path / "sessions/2026" / f"rollout-test-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    usage = {
+        "input_tokens": 16_002,
+        "cached_input_tokens": 9_984,
+        "output_tokens": 723,
+        "reasoning_output_tokens": 348,
+        "total_tokens": 16_725,
+    }
+    rollout.write_text(
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": usage,
+                        "total_token_usage": usage,
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    observation = CodexSessionLedgerObserver(tmp_path).observe(thread_id)
+
+    assert observation.terminal_usage == TokenUsage(
+        input_tokens=6_018,
+        output_tokens=723,
+        cache_read_tokens=9_984,
+        cache_write_tokens=0,
+        total_tokens=16_725,
+        measurement="exact",
+    )
+    assert [event.kind for event in observation.events] == [
+        "usage_delta",
+        "terminal_usage",
+    ]
+
+
 def test_incomplete_raw_provider_capture_fails_the_phase(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

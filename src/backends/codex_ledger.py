@@ -71,19 +71,36 @@ def usage_matches(observed: TokenUsage, terminal: TokenUsage) -> bool:
     return observed.total_tokens is not None and terminal.total_tokens is not None
 
 
-def _usage(value: object) -> TokenUsage:
+def token_usage_from_codex_mapping(value: object) -> TokenUsage:
+    """Normalize Codex/OpenAI counters into disjoint Runtime usage buckets.
+
+    Codex reports ``cached_input_tokens`` as a subset of ``input_tokens`` and currently omits a
+    cache-write counter when that bucket is unsupported. Runtime reports disjoint uncached/read/
+    write buckets, so subtract the cache subsets and treat an absent cache-write field as zero.
+    """
     if not isinstance(value, Mapping):
         return TokenUsage.unavailable()
-    components = (
-        _counter(value, "input_tokens"),
-        _counter(value, "output_tokens"),
-        _counter(value, "cached_input_tokens"),
-        _counter(value, "cache_write_input_tokens"),
-        _counter(value, "total_tokens"),
-    )
-    if any(item is None for item in components):
+    input_tokens = _counter(value, "input_tokens")
+    output_tokens = _counter(value, "output_tokens")
+    if input_tokens is None or output_tokens is None:
         return TokenUsage.unavailable()
-    return TokenUsage(*components, measurement="exact")
+    cache_read_tokens = _counter(value, "cached_input_tokens") or 0
+    cache_write_tokens = _counter(value, "cache_write_input_tokens") or 0
+    uncached_input_tokens = input_tokens - cache_read_tokens - cache_write_tokens
+    if uncached_input_tokens < 0:
+        return TokenUsage.unavailable()
+    computed_total = input_tokens + output_tokens
+    official_total = _counter(value, "total_tokens")
+    if official_total is not None and official_total != computed_total:
+        return TokenUsage.unavailable()
+    return TokenUsage(
+        input_tokens=uncached_input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        total_tokens=computed_total,
+        measurement="exact",
+    )
 
 
 CODEX_LEDGER_CAPABILITIES = AgentRuntimeCapabilities(
@@ -274,8 +291,8 @@ class CodexSessionLedgerObserver:
                 continue
             info = body.get("info")
             info = info if isinstance(info, Mapping) else {}
-            last_usage = _usage(info.get("last_token_usage"))
-            session_usage = _usage(info.get("total_token_usage"))
+            last_usage = token_usage_from_codex_mapping(info.get("last_token_usage"))
+            session_usage = token_usage_from_codex_mapping(info.get("total_token_usage"))
             last_total = last_usage.total_tokens
             session_total = session_usage.total_tokens
             if last_total is None or session_total is None:

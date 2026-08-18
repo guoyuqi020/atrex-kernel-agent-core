@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 
+from .codex_ledger import token_usage_from_codex_mapping
 from .model import (
     AgentRuntimeCapabilities,
     NormalizedAgentEvent,
@@ -429,18 +430,7 @@ class CodexAdapter(AgentBackendAdapter):
         for event in _json_events(stdout):
             if event.get("type") in {"turn.completed", "result"}:
                 raw_usage = event.get("usage")
-                terminal = token_usage_from_mapping(raw_usage)
-                if isinstance(raw_usage, Mapping):
-                    cached = _counter(raw_usage, "cached_input_tokens", "cachedInputTokens")
-                    if cached is not None:
-                        terminal = TokenUsage(
-                            input_tokens=terminal.input_tokens,
-                            output_tokens=terminal.output_tokens,
-                            cache_read_tokens=cached,
-                            cache_write_tokens=terminal.cache_write_tokens,
-                            total_tokens=terminal.total_tokens,
-                            measurement=terminal.measurement,
-                        )
+                terminal = token_usage_from_codex_mapping(raw_usage)
                 if terminal.total_tokens is not None:
                     normalized.append(
                         NormalizedAgentEvent(

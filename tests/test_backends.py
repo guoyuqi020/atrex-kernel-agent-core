@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 import pytest
 
 from backends.adapter import ClaudeAdapter, CodexAdapter, PiAdapter, QoderAdapter
+from backends.model import TokenUsage
 from backends.process import run_bounded
 
 
@@ -22,6 +24,24 @@ def test_every_backend_builds_one_fresh_noninteractive_command() -> None:
     assert commands["pi"][:3] == ["pi", "--mode", "json"]
     assert commands["codex"][:3] == ["codex", "exec", "--json"]
     assert all(command[-1] == "prompt" for command in commands.values())
+
+
+def test_codex_terminal_usage_uses_disjoint_cache_buckets() -> None:
+    stdout = json.dumps(
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 16_002,
+                "cached_input_tokens": 9_984,
+                "output_tokens": 723,
+            },
+        }
+    )
+
+    events, terminal = CodexAdapter().normalize_stream(stdout)
+
+    assert terminal == TokenUsage(6_018, 723, 9_984, 0, 16_725, "exact")
+    assert len(events) == 1 and events[0].kind == "terminal_usage"
 
 
 def test_process_capture_is_bounded(
