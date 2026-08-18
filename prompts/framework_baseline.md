@@ -75,6 +75,12 @@ Use bounded `gateway-execute` requests with `operation="dev"` or `operation="che
 compilation and correctness repair. Then evaluate the exact current candidate with a full
 `gateway-execute` request containing `{"operation":"evaluate"}`.
 
+Every `evaluate` call is an exploratory measurement of the exact `work/kernel/` tree at that
+moment. You may submit multiple changed candidates, using a new idempotency key for each distinct
+tree; the controller durably retains every evaluated Kernel and raw result. Replaying the same
+request with the same key returns the same record. These Agent-visible measurements are evidence,
+not the authoritative baseline outcome.
+
 Correctness must pass every reported case and every configured seed. A slower but correct baseline
 is valid. On failure, diagnose the smallest causal issue and repair it while a concrete next step
 remains. Never fabricate a measurement, weaken the evaluation contract, or claim success from a
@@ -91,9 +97,13 @@ Invoke `lineage-bootstrap-report` exactly once with either:
 - `status="blocked"` when a concrete technical or infrastructure blocker remains after exhausting
   safe in-scope repairs.
 
-The trusted controller independently validates the report, candidate digest, correctness, latency,
-dependency policy, and evaluation contract before creating or advancing the lineage. Chat text,
-local files, or your own conclusion cannot promote the baseline.
+`baseline_ready` nominates the exact final `work/kernel/` tree as the Candidate. The trusted
+controller seals that tree, verifies that its reported result belongs to a correct exploratory
+evaluation of the same bytes, then independently submits the sealed Candidate for a fresh final
+evaluation. Only that controller-owned final result is the authoritative baseline outcome. The
+controller validates dependency policy and the evaluation contract before creating or advancing
+the lineage. Chat text, local files, your own conclusion, or an exploratory result cannot promote
+the baseline.
 
 Never try to locate the private evaluation contract or exact shapes. The evaluation service alone
 supplies those inputs during evaluation.

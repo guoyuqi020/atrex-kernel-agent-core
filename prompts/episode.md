@@ -129,6 +129,12 @@ Focused `dev` or `check` calls may accelerate repair, but a terminal candidate r
 Require all reported cases to pass, a correct result, and finite positive latency. Inspect maximum
 error and per-shape results when available.
 
+Each `evaluate` call is an exploratory measurement of the exact candidate tree at that moment. You
+may evaluate multiple changed candidates in this Attempt, and the controller durably retains every
+Kernel/result pair. Use a new idempotency key whenever the candidate or request changes; replay the
+same key only for an identical request. An exploratory evaluation is evidence for nomination, not
+the authoritative Attempt outcome.
+
 Compilation, partial probes, profiler estimates, and repeated local measurements are not promotion
 authority. The trusted controller independently applies its configured evaluation policies for
 Kernel retention and implementation promotion. Publish a mature candidate promptly; secondary
@@ -156,8 +162,8 @@ Leave the loop when one coherent candidate passes full correctness with credible
 evidence, when the direction is exhausted, or when infrastructure or missing authority blocks
 progress. Reach exactly one evidence-backed state:
 
-1. `candidate_ready`: the current candidate passes a full evaluation and has credible performance
-   evidence for independent comparison;
+1. `candidate_ready`: the current candidate passes a full exploratory evaluation and has credible
+   performance evidence for independent comparison;
 2. `pivot`: this coherent direction is exhausted or reverted;
 3. `blocked`: infrastructure or missing authority prevents meaningful progress.
 
@@ -170,4 +176,8 @@ consumed sources, reusable lessons, and next directions. Use only these pairs:
 - `status="blocked", decision="blocked"`.
 
 Chat text is not a handoff. Do not invent correctness or a speedup to terminate; a well-supported
-pivot is a valid result. A missing or inconsistent report cannot promote a Kernel.
+pivot is a valid result. `candidate_ready` nominates the exact final `work/kernel/` tree. The
+controller seals it, requires a matching correct exploratory evaluation, and independently submits
+the sealed Candidate for a fresh final evaluation. Only that controller-owned final result becomes the
+authoritative Attempt outcome and can enter retention or promotion. A missing or inconsistent
+report cannot promote a Kernel.

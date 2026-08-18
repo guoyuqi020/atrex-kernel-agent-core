@@ -87,8 +87,9 @@ atrex-kernel-agent-runtime bootstrap \
 ```
 
 未指定 `dsls` 时使用配置中的默认 DSL，代码默认顺序为 CUDA、Triton、CuteDSL。新 Campaign 只
-运行一次 `problem_generalization`，每条选中 Lineage 运行一次 `framework_baseline`。只有 Core
-Report 与正确的权威 Gateway Outcome 对账后，Lineage 才 Ready。
+运行一次 `problem_generalization`，每条选中 Lineage 运行一次 `framework_baseline`。Core 的
+Evaluate 都是探索评测；只有 Runtime 封存最终提名并执行一次新的正确 Runtime-final 评测后，
+Lineage 才 Ready。
 
 ## 5. 运行 Epoch
 
@@ -101,7 +102,7 @@ atrex-kernel-agent-runtime run-campaign \
 
 每个 Epoch 从同一 Checkpoint 创建 Active/Challenger Branch，每条 Branch 获得固定数量的全新
 Attempt Session。保留 Kernel 成为同分支下一 Attempt 的 Incumbent；另一分支中间结果不可见。
-Kernel 保留与 Agent 晋升都使用普通权威 Evaluate。
+Runtime 会独立重新评测每个终止提名，再进行 Kernel 保留与 Agent 晋升。
 
 ## 6. Attempt 可见内容
 
@@ -126,6 +127,9 @@ python agent/optimizer/src/runtime_tools.py attempt-report --request scratch/rep
 
 Request 必须是 `scratch/` 下受限的 Regular JSON File。新内容使用新 Idempotency Key；只有完全相同
 的 Request 才能重放同一个 Key。
+
+Agent 的每次 `evaluate` 都会保留准确 Candidate 文件和原始 Outcome，但不会结束 Attempt。
+`candidate_ready` 提名当前 `work/kernel`；Core 退出后由 Runtime 执行新的权威终评。
 
 Worker 能读取短期 Scoped Capability，但拿不到上游 Agate/Wiki Credential。直接请求与规范客户端
 请求都必须通过 Runtime Authorization。Bubblewrap `host` 网络没有目标过滤，生产部署必须在网络
@@ -157,4 +161,4 @@ PYTHONPYCACHEPREFIX=/tmp/atrex-core-pycache \
 - Gateway/Wiki Capability 被拒绝：过期、耗尽、撤销或操作未授权。
 - Token Report 不完整：Backend 没有暴露可靠 Usage；Runtime 不会估算。
 - 缺少终态 Report：Agent 退出、超时、耗尽 Budget 或输出无效。
-- Candidate 被拒绝：Report、Candidate Digest 或权威 Gateway Outcome 不一致。
+- Candidate 被拒绝：没有正确探索结果匹配提名，或独立 Runtime-final 评测失败。

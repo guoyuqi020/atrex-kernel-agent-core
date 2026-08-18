@@ -66,8 +66,9 @@ before sealing the Artifact.
 
 Runtime supplies one DSL seed Kernel, the public Agent Problem, and a pre-Lineage Gateway/Wiki
 capability. Core may edit only `work/kernel` and must finish with a framework-baseline report bound to
-the exact authoritative Evaluate outcome. Runtime creates the Baseline Kernel Revision and Ready
-Lineage only after report/outcome reconciliation.
+an exact correct exploratory Evaluate. Runtime seals the nominated final tree, performs a fresh
+Runtime-final evaluation, and creates the Baseline Kernel Revision and Ready Lineage only from that
+authoritative result.
 
 ### 3.3 Optimization Attempt
 
@@ -111,8 +112,9 @@ request. The client:
 - writes an atomic, contiguous experiment journal; and
 - validates the shape of terminal baseline and Attempt reports before submission.
 
-Tool results remain Agent-visible evidence. Runtime separately freezes authoritative Gateway
-outcomes and Wiki interactions.
+Tool results remain Agent-visible evidence. Runtime freezes every exploratory Kernel/result pair,
+then separately evaluates a terminal nomination to create the authoritative Gateway outcome. Wiki
+interactions are frozen independently.
 
 ## 5. Agent sessions and token accounting
 
@@ -158,7 +160,8 @@ a Runtime proxy and returns one frozen response with source identity. `gateway-e
 through Runtime and supports only the operations granted to that Attempt. GPU validation, profiling,
 compiler inspection, and development commands therefore remain observable and quota-controlled.
 
-Only a correct authoritative Evaluate result can enter Runtime retention or promotion comparison.
+Agent Evaluates are exploratory and may occur multiple times per Attempt. Only the independent
+Runtime-final Evaluate result can enter Runtime retention or promotion comparison.
 
 Bubblewrap provides filesystem, process, and resource isolation. Its `host` network mode does not
 implement destination filtering; production deployments that require live Agent-provider and

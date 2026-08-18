@@ -99,10 +99,10 @@ Session path.
 
 [`prompts/episode.md`](prompts/episode.md) contains the complete optimization Attempt loop:
 reconstruct the incumbent, profile progressively, query focused external knowledge, plan one
-falsifiable direction, edit and repair, execute an authoritative Evaluate, record every decisive
-experiment immediately, and publish one terminal report. A terminal outcome is `candidate_ready`,
-`pivot`, or `blocked`; Runtime independently decides whether a correct candidate is retained and
-whether its Kernel Agent Revision is promoted.
+falsifiable direction, edit and repair, execute one or more exploratory Evaluates, record every
+decisive experiment immediately, and publish one terminal report. A terminal outcome is
+`candidate_ready`, `pivot`, or `blocked`; Runtime independently re-evaluates the nominated exact
+Kernel and decides whether it is retained and whether its Kernel Agent Revision is promoted.
 
 [`prompts/framework_baseline.md`](prompts/framework_baseline.md) defines the narrower
 framework-baseline phase.

@@ -100,8 +100,9 @@ Triton, then CuteDSL. Selected Lineages are created sequentially and idempotentl
 request after interruption to reuse completed Lineages and continue the remainder.
 
 Bootstrap runs Core once in `problem_generalization` for a new Campaign and once in
-`framework_baseline` for each selected Lineage. A Lineage becomes ready only after Runtime reconciles
-the Core report with a correct authoritative Gateway outcome.
+`framework_baseline` for each selected Lineage. Core's Evaluate calls are exploratory. A Lineage
+becomes ready only after Runtime seals the final nomination and a fresh Runtime-final evaluation is
+correct.
 
 ## 5. Run optimization Epochs
 
@@ -117,7 +118,7 @@ atrex-kernel-agent-runtime run-campaign \
 Each Epoch creates Active and Challenger branches from the same checkpoint. Each branch receives a
 fixed number of fresh `optimization_attempt` sessions. Within a branch, a retained Kernel becomes
 the next Attempt's incumbent; the opposite branch's intermediate results remain invisible. Runtime
-uses ordinary authoritative Evaluate for Kernel retention and Agent promotion.
+independently re-evaluates each terminal nomination before Kernel retention or Agent promotion.
 
 ## 6. What an Attempt can access
 
@@ -152,6 +153,10 @@ python agent/optimizer/src/runtime_tools.py attempt-report \
 
 Exact request schemas are enforced by the tool and Runtime protocols. Use a new idempotency key for
 new Gateway/Wiki content; replay the same key only with an identical request.
+
+Every Agent `evaluate` retains the exact candidate files and raw outcome. It does not finalize the
+Attempt. `candidate_ready` nominates the current `work/kernel`; Runtime performs the authoritative
+fresh evaluation after Core exits.
 
 The Worker receives the short-lived scoped capability used by these calls, but never receives the
 upstream Agate or Wiki service credential. Runtime authorization remains authoritative for direct as
@@ -191,5 +196,6 @@ standalone optimizer. That bypasses the system boundary the Core protocol is des
   estimate it.
 - **No terminal report:** the Agent exited, timed out, or exhausted budget before publishing a valid
   phase result.
-- **Candidate rejected:** the report, candidate digest, or authoritative Gateway outcome disagreed;
+- **Candidate rejected:** no correct exploratory result matched the nomination, or the independent
+  Runtime-final evaluation failed;
   inspect immutable Runtime Evidence rather than local process memory.

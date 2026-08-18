@@ -90,9 +90,10 @@ Codex Rollout 捕获不完整时，阶段会失败，不会把不完整 Trace �
 ## 工程循环
 
 [`prompts/episode.md`](prompts/episode.md) 包含完整 Attempt 循环：重建 Incumbent、渐进
-Profile、查询聚焦外部知识、规划一个可证伪方向、修改与修复、执行权威 Evaluate、立即记录每个
-决定性实验，并发布一个终态 Report。终态为 `candidate_ready`、`pivot` 或 `blocked`；Runtime
-独立决定 Kernel 是否保留以及产生它的 Kernel Agent Revision 是否晋升。
+Profile、查询聚焦外部知识、规划一个可证伪方向、修改与修复、执行探索 Evaluate、立即记录每个
+决定性实验，并发布一个终态 Report。其中 Evaluate 是可多次执行并完整留档的探索评测。终态为
+`candidate_ready`、`pivot` 或 `blocked`；Runtime 独立重新评测被提名的准确 Kernel，再决定 Kernel
+是否保留以及产生它的 Kernel Agent Revision 是否晋升。
 
 [`prompts/framework_baseline.md`](prompts/framework_baseline.md) 定义更窄的 Framework Baseline
 流程。

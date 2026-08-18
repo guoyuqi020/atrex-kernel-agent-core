@@ -50,8 +50,9 @@ Runtime 再独立执行 Schema 与隐私校验并封存 Artifact。
 ### 3.2 Framework Baseline
 
 Runtime 提供一个 DSL Seed、公开 Agent Problem 及 Pre-Lineage Gateway/Wiki Capability。Core 只修改
-`work/kernel`，并发布与权威 Evaluate Outcome 绑定的 Baseline Report。Runtime 完成对账后才创建
-Baseline Kernel Revision 和 Ready Lineage。
+`work/kernel`，并发布与准确、正确探索 Evaluate 绑定的 Baseline Report。Runtime 封存被提名的
+最终 Tree，执行一次新的 Runtime-final 评测，只根据该权威结果创建 Baseline Kernel Revision 和
+Ready Lineage。
 
 ### 3.3 Optimization Attempt
 
@@ -114,8 +115,9 @@ Core 没有持久 Campaign 数据库。每次 Attempt 从不可变输入重建�
 ## 7. 知识与 GPU 执行
 
 Core 不携带 Wiki Corpus 或本地 Gateway。`wiki-query` 通过 Runtime 返回带 Source/Snapshot 身份的
-冻结响应；`gateway-execute` 只执行当前 Capability 授权的 Agate 等价操作。只有正确的权威
-Evaluate 可以进入 Kernel 保留或 Agent 晋升比较。
+冻结响应；`gateway-execute` 只执行当前 Capability 授权的 Agate 等价操作。一个 Attempt 可进行
+多次探索 Evaluate，Runtime 会保留每一对 Kernel/Result。只有独立 Runtime-final Evaluate 可以进入
+Kernel 保留或 Agent 晋升比较。
 
 Bubblewrap 的 `host` 网络模式不提供目标过滤；需要同时访问 Agent Provider 与 Runtime Service 的
 生产部署必须在 Bubblewrap 之外实施 Egress Policy。`isolated` 模式完全无网络。不能把网络隔离
