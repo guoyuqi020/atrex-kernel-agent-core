@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from runtime_tools import (
+    _agent_knowledge,
     _atomic_json,
     _request_object,
     attempt_report,
@@ -96,3 +97,17 @@ def test_exclusive_atomic_write_never_replaces_existing_file(tmp_path: Path) -> 
     with pytest.raises(FileExistsError):
         _atomic_json(path, {"second": True}, exclusive=True)
     assert json.loads(path.read_text(encoding="utf-8")) == {"first": True}
+
+
+def test_agent_knowledge_hides_runtime_audit_envelope() -> None:
+    content = {"results": [{"source_ref": "docs/example.md", "excerpt": "summary"}]}
+
+    assert _agent_knowledge(
+        {
+            "schema_version": 1,
+            "interaction_artifact_digest": "sha256:internal",
+            "snapshot_id": "internal-snapshot",
+            "content_digest": "sha256:internal",
+            "content": content,
+        }
+    ) == content

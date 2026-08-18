@@ -55,7 +55,7 @@ properties but never evaluator identities, hidden input values, or reconstructed
 
 Query the external knowledge service using the actual architecture, vendor, DSL, operator, and
 mechanism. Prefer architecture-scoped API documentation, reference Kernels, hardware constraints,
-and known pitfalls. Preserve returned source and snapshot identities. Stop once one viable
+and known pitfalls. Preserve the `source_ref` values for sources actually used. Stop once one viable
 implementation approach has adequate support, and record its actionable constraints in a concise
 plan under `scratch/`.
 

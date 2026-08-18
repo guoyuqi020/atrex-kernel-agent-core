@@ -25,6 +25,7 @@ def test_prompts_use_only_real_runtime_tool_names() -> None:
 
     assert "gateway_execute" not in text
     assert "wiki_query" not in text
+    assert "wiki_read" not in text
 
 
 def test_prompts_do_not_reveal_product_or_control_plane_identity() -> None:
@@ -44,4 +45,6 @@ def test_attempt_tool_example_uses_the_trusted_lineage_dsl() -> None:
     instructions = _tool_instructions("triton")
 
     assert '"query": "triton vectorized load requirements' in instructions
+    assert "wiki-read" in instructions
+    assert "source_ref" in instructions
     assert "CUDA vectorized load requirements" not in instructions

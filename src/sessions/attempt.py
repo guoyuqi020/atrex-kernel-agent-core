@@ -21,6 +21,7 @@ write one JSON request under `scratch/`, then run exactly one of:
 ```text
 python {tool} gateway-execute --request scratch/<request>.json
 python {tool} wiki-query --request scratch/<request>.json
+python {tool} wiki-read --request scratch/<request>.json
 python {tool} record-experiment --request scratch/<request>.json
 python {tool} attempt-report --request scratch/<request>.json
 ```
@@ -44,6 +45,16 @@ Example knowledge query request:
 ```json
 {{"query": "{dsl} vectorized load requirements for the target architecture"}}
 ```
+
+`wiki-query` returns bounded excerpts with a `source_ref`. When an excerpt is relevant, read its
+complete source before relying on details:
+
+```json
+{{"source_ref": "the exact source_ref returned by wiki-query"}}
+```
+
+Use that request with `wiki-read`. Wiki protocol versions, snapshot identities, and integrity
+digests are retained by the service and are intentionally absent from Agent-facing results.
 
 Each `record-experiment` request must contain exactly these fields:
 
@@ -72,7 +83,7 @@ exactly these fields:
   "evaluation_evidence": "authoritative evaluation result identity and outcome",
   "result_interpretation": "what the measurements establish",
   "decision": "keep",
-  "research_sources": ["knowledge source and snapshot identity"],
+  "research_sources": ["source_ref values actually used"],
   "lessons": ["reusable positive or negative lesson"],
   "next_directions": ["evidence-backed next direction"]
 }}

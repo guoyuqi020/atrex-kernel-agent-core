@@ -37,12 +37,16 @@ operation request as one JSON object under `scratch/`, then invoke:
 ```text
 python {tool} gateway-execute --request scratch/<request>.json
 python {tool} wiki-query --request scratch/<request>.json
+python {tool} wiki-read --request scratch/<request>.json
 python {tool} lineage-bootstrap-report --request scratch/<report>.json
 ```
 
 `gateway-execute` attaches the exact `work/kernel` tree and trusted session identity. Never include
 a candidate, schema version, capability, or operation identity in the request. Typical requests are
 `{{"operation":"check"}}`, `{{"operation":"evaluate"}}`, and `{{"query":"focused GPU question"}}`.
+`wiki-query` returns bounded excerpts and `source_ref` values. Use
+`{{"source_ref":"the exact returned source_ref"}}` with `wiki-read` to inspect the complete source.
+Service snapshot and integrity identities remain internal and are not part of Agent-facing output.
 
 Each `lineage-bootstrap-report` request must contain exactly these fields:
 
@@ -55,7 +59,7 @@ Each `lineage-bootstrap-report` request must contain exactly these fields:
   "latency_us": 1.0,
   "candidate_artifact_digest": "candidate identity returned by evaluation",
   "gateway_result_digest": "result identity returned by evaluation",
-  "research_sources": ["knowledge source and snapshot identity"],
+  "research_sources": ["source_ref values actually used"],
   "lessons": "framework constraints, failures, and repairs",
   "next_directions": ["evidence-backed optimization direction"],
   "blocker": null
