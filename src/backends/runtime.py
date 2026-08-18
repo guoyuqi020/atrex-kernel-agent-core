@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import TextIO
 
 from .adapter import (
     DEFAULT_BACKEND_REGISTRY,
@@ -140,6 +141,10 @@ class TokenBudgetObserver(ProcessObserver):
                 self._seen_message_ids.add(message_id)
             return any(self._add(tokens) for tokens in deltas)
 
+    def on_stderr_line(self, line: str) -> bool:
+        del line
+        return self.exhausted
+
     def poll(self) -> bool:
         if self._codex is None:
             return self.exhausted
@@ -163,6 +168,87 @@ class TokenBudgetObserver(ProcessObserver):
                 if event.kind == "usage_delta" and event.usage is not None:
                     self._add(event.usage.total_tokens)
             return self._exhausted
+
+
+class _LiveSessionTraceObserver(ProcessObserver):
+    """Best-effort projection of live Provider streams into the fixed Session workspace."""
+
+    def __init__(self, root: Path) -> None:
+        self._codex: CodexSessionLedgerObserver | None = None
+        self._codex_thread_id = ""
+        self._lock = threading.Lock()
+        self._stdout = (root / "provider/stdout.stream-json").open("a", encoding="utf-8")
+        self._stderr = (root / "provider/stderr.log").open("a", encoding="utf-8")
+        raw_codex = root / "provider/codex-rollout.raw-jsonl"
+        self._raw_codex = raw_codex.open("r+b") if raw_codex.is_file() else None
+
+    def attach_codex(self, observer: CodexSessionLedgerObserver) -> None:
+        self._codex = observer
+
+    @staticmethod
+    def _append(output: TextIO, value: str) -> None:
+        try:
+            output.write(value)
+            output.flush()
+        except (OSError, ValueError):
+            return
+
+    def on_stdout_line(self, line: str) -> bool:
+        with self._lock:
+            self._append(self._stdout, line)
+            thread_id = codex_thread_id_from_stream(line)
+            if thread_id:
+                self._codex_thread_id = thread_id
+        return False
+
+    def on_stderr_line(self, line: str) -> bool:
+        with self._lock:
+            self._append(self._stderr, line)
+        return False
+
+    def poll(self) -> bool:
+        observer = self._codex
+        with self._lock:
+            thread_id = self._codex_thread_id
+        if observer is None or not thread_id:
+            return False
+        try:
+            payload = observer.capture_raw_rollout(
+                thread_id,
+                max_bytes=MAX_CODEX_ROLLOUT_CAPTURE_BYTES,
+            )
+            output = self._raw_codex
+            if output is None:
+                return False
+            with self._lock:
+                output.seek(0)
+                output.write(payload)
+                output.truncate()
+                output.flush()
+        except (CodexLedgerError, OSError):
+            pass
+        return False
+
+    def close(self) -> None:
+        with self._lock:
+            self._stdout.close()
+            self._stderr.close()
+            if self._raw_codex is not None:
+                self._raw_codex.close()
+
+
+class _CombinedProcessObserver(ProcessObserver):
+    def __init__(self, *observers: ProcessObserver) -> None:
+        self._observers = observers
+
+    def on_stdout_line(self, line: str) -> bool:
+        return any(observer.on_stdout_line(line) for observer in self._observers)
+
+    def on_stderr_line(self, line: str) -> bool:
+        return any(observer.on_stderr_line(line) for observer in self._observers)
+
+    def poll(self) -> bool:
+        return any(observer.poll() for observer in self._observers)
 
 
 def terminal_usage_from_stream(stdout: str) -> TokenUsage:
@@ -310,8 +396,27 @@ class CliAgentRuntime:
             if request.token_budget is not None
             else None
         )
+        live_trace_observer = (
+            _LiveSessionTraceObserver(request.live_trace_path)
+            if request.live_trace_path is not None
+            else None
+        )
+        if live_trace_observer is not None and codex_observer is not None:
+            live_trace_observer.attach_codex(codex_observer)
+        observers = tuple(
+            observer
+            for observer in (live_trace_observer, budget_observer)
+            if observer is not None
+        )
+        process_observer = (
+            None
+            if not observers
+            else observers[0]
+            if len(observers) == 1
+            else _CombinedProcessObserver(*observers)
+        )
         try:
-            if budget_observer is None:
+            if process_observer is None:
                 process = self._process_runner(
                     command,
                     cwd=request.workspace,
@@ -324,12 +429,16 @@ class CliAgentRuntime:
                     cwd=request.workspace,
                     timeout=request.timeout_s,
                     env=environment,
-                    observer=budget_observer,
+                    observer=process_observer,
                 )
         except BaseException:
+            if live_trace_observer is not None:
+                live_trace_observer.close()
             if codex_temporary_home is not None:
                 codex_temporary_home.close()
             raise
+        if live_trace_observer is not None:
+            live_trace_observer.close()
         stdout = process.stdout
         stderr = process.stderr
         observation_errors: tuple[str, ...] = pre_observation_errors

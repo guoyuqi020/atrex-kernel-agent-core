@@ -138,6 +138,7 @@ class AgentRunRequest:
     session_id: str | None = None
     session_settings: str = ""
     token_budget: int | None = None
+    live_trace_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.token_budget is not None and self.token_budget <= 0:

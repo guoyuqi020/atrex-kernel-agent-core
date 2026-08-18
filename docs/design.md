@@ -123,13 +123,16 @@ processes into a common result and Session Event stream. The launch layer uses a
 environment, isolated backend homes where required, a process group, timeout/reaping, and bounded
 stdout/stderr capture.
 
-When Session capture is enabled, Core creates the Runtime-selected Trace directory only after the
-Agent process exits. It stores the exact Prompt, captured Provider stdout/stderr, and the raw Codex
-rollout when Codex is selected. It performs no redaction, event filtering, or text rewriting on
-those files. `events.jsonl` is a separate normalized usage index for Runtime projection; it does not
-replace the raw files. `session.json` records capture completeness and trusted process diagnostics.
-An output overflow, missing Codex rollout, unsafe raw-file path, or Agent-created Trace path fails
-closed. Safety bounds prevent unbounded capture, but incomplete data is never reported as complete.
+When Session capture is enabled, Core creates the Runtime-selected Trace directory before launch.
+It records the exact Prompt, marks `session.json` as `running`, streams Provider stdout/stderr, and
+periodically mirrors the raw Codex rollout when Codex is selected. This Workspace view is live but
+not authoritative or sealed. After the Agent process is reaped, Core removes the live projection
+and rebuilds the final directory from its bounded captures. The final files receive no redaction,
+event filtering, or text rewriting. `events.jsonl` is a separate normalized usage index for Runtime
+projection; it does not replace the raw files. Final `session.json` records capture completeness and
+trusted process diagnostics. An output overflow, missing Codex rollout, unsafe raw-file path, or
+pre-created/redirected Trace path fails closed. Safety bounds prevent unbounded capture, but
+incomplete data is never reported as complete.
 
 The live observer counts provider-reported uncached input, output, cache-read, and cache-write tokens
 equally. Reaching the Runtime budget terminates the process group. Core always writes a strict token

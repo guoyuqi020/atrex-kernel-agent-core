@@ -84,8 +84,10 @@ sessions/<name>/
 
 Prompt 与 Provider 文件不做脱敏、Event 过滤或文本改写；Provider 实际输出的 Reasoning、工具参数与
 结果、命令输出及敏感值都会保留。Core 不会主动复制 Provider 从未输出的凭据。输出超过安全上限或
-Codex Rollout 捕获不完整时，阶段会失败，不会把不完整 Trace 伪装成完整结果。Coding Agent 不能
-预先创建或重定向 Runtime 选定的 Session 路径。
+Codex Rollout 捕获不完整时，阶段会失败，不会把不完整 Trace 伪装成完整结果。Core 在启动前创建
+该固定目录并把 `session.json` 标记为 `running`，进程运行时持续写入 stdout/stderr，并镜像 Codex
+Rollout；这份实时视图尚未封存。进程回收后，Core 会丢弃实时视图，用有界捕获重建完整终态目录，
+再交给 Runtime 封存 Artifact。Coding Agent 不能预先创建或重定向 Runtime 选定的 Session 路径。
 
 ## 工程循环
 

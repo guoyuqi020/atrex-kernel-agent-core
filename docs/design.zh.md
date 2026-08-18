@@ -95,12 +95,14 @@ Runtime。规范客户端还负责 Candidate 打包、Request/Response 大小限
 Event 与 Token Usage；启动层使用显式环境、隔离 Backend Home、进程组、Timeout/Reaping 和有界
 stdout/stderr Capture。
 
-启用 Session 捕获时，Core 只在 Agent 进程退出后创建 Runtime 选定的 Trace 目录。它保存精确 Prompt、
-捕获到的 Provider stdout/stderr，并在选择 Codex 时保存原始 Codex Rollout；这些文件不做脱敏、
-Event 过滤或文本改写。`events.jsonl` 是供 Runtime 投影使用的独立规范化用量索引，不能替代原始
-文件；`session.json` 记录捕获完整性和可信进程诊断。输出溢出、Codex Rollout 缺失、不安全的原始
-文件路径或 Agent 预建 Trace 路径都会 Fail Closed。安全上限用于阻止无界捕获，但不完整数据绝不会
-被标记为完整。
+启用 Session 捕获时，Core 在启动前创建 Runtime 选定的 Trace 目录，保存精确 Prompt，把
+`session.json` 标记为 `running`，持续写入 Provider stdout/stderr，并在选择 Codex 时周期性镜像
+原始 Rollout。这份 Workspace 视图可实时查看，但还不是权威封存结果。Agent 进程回收后，Core
+删除实时投影，并从有界捕获重建终态目录；终态文件不做脱敏、Event 过滤或文本改写。
+`events.jsonl` 是供 Runtime 投影使用的独立规范化用量索引，不能替代原始文件；终态
+`session.json` 记录捕获完整性和可信进程诊断。输出溢出、Codex Rollout 缺失、不安全的原始文件
+路径或预建/重定向 Trace 路径都会 Fail Closed。安全上限用于阻止无界捕获，但不完整数据绝不会被
+标记为完整。
 
 Input、Output、Cache Read、Cache Write Token 等权计入配额。达到 Budget 会终止完整进程组。
 Core 总是写严格 Token Report，Runtime 拒绝缺失、不完整或内部不一致的计量。Core 不包含嵌套

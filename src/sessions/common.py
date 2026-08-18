@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import uuid
@@ -13,6 +14,8 @@ from typing import Any, Protocol
 
 import backends
 from agent_config import AgentConfig
+
+_LIVE_TRACE_MARKER = ".runtime-live-session"
 
 
 class SessionContext(Protocol):
@@ -116,10 +119,70 @@ def atomic_text(path: Path, value: str) -> None:
     atomic_bytes(path, value.encode("utf-8"))
 
 
+def start_live_trace(
+    context: SessionContext,
+    prompt: str,
+    *,
+    runtime_id: str,
+    session_id: str,
+) -> bool:
+    """Create a stable, explicitly non-authoritative trace projection before launch."""
+    if context.session_trace_path is None:
+        return False
+    trace_root = context.session_trace_path
+    parent = trace_root.parent
+    workspace = context.workspace.resolve()
+    if parent.is_symlink() or not parent.is_dir() or not parent.resolve().is_relative_to(workspace):
+        raise ValueError("Session trace parent changed before launch")
+    if trace_root.exists() or trace_root.is_symlink():
+        raise ValueError("Session trace path must not exist before launch")
+    trace_root.mkdir(mode=0o700)
+    atomic_text(trace_root / _LIVE_TRACE_MARKER, "unsealed\n")
+    atomic_text(trace_root / "input/prompt.md", prompt)
+    atomic_text(trace_root / "provider/stdout.stream-json", "")
+    atomic_text(trace_root / "provider/stderr.log", "")
+    if runtime_id == "codex":
+        atomic_bytes(trace_root / "provider/codex-rollout.raw-jsonl", b"")
+    atomic_json(
+        trace_root / "session.json",
+        {
+            "schema_version": 1,
+            "runtime_id": runtime_id,
+            "session_id": session_id,
+            "state": "running",
+        },
+    )
+    return True
+
+
+def mark_live_trace_interrupted(context: SessionContext, error: BaseException) -> None:
+    """Leave a useful Workspace-only terminal marker when no final result exists."""
+    trace_root = context.session_trace_path
+    if trace_root is None or trace_root.is_symlink() or not trace_root.is_dir():
+        return
+    marker = trace_root / _LIVE_TRACE_MARKER
+    if marker.is_symlink() or not marker.is_file():
+        return
+    try:
+        session_path = trace_root / "session.json"
+        if session_path.is_symlink() or not session_path.is_file():
+            return
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        if not isinstance(session, dict):
+            session = {}
+        session["state"] = "interrupted"
+        session["error_type"] = type(error).__name__
+        atomic_json(trace_root / "session.json", session)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return
+
+
 def write_trace(
     context: SessionContext,
     result: backends.AgentRunResult,
     prompt: str,
+    *,
+    replace_live: bool = False,
 ) -> None:
     """Persist unredacted Session input and Provider files plus a normalized usage index."""
     if context.session_trace_path is None:
@@ -130,7 +193,15 @@ def write_trace(
     if parent.is_symlink() or not parent.is_dir() or not parent.resolve().is_relative_to(workspace):
         raise ValueError("Session trace parent changed after launch validation")
     if trace_root.exists() or trace_root.is_symlink():
-        raise ValueError("Session trace path must not be created by the Coding Agent")
+        marker = trace_root / _LIVE_TRACE_MARKER
+        if (
+            not replace_live
+            or trace_root.is_symlink()
+            or not trace_root.is_dir()
+            or marker.is_symlink()
+            or not marker.is_file()
+        ):
+            raise ValueError("Session trace path must not be created by the Coding Agent")
     raw_files: list[tuple[PurePosixPath, bytes]] = []
     raw_paths: set[str] = set()
     reserved_paths = {
@@ -152,6 +223,8 @@ def write_trace(
             raise ValueError("Raw Provider Session file has an unsafe path")
         raw_paths.add(normalized)
         raw_files.append((relative, raw_file.payload))
+    if trace_root.exists():
+        shutil.rmtree(trace_root)
     trace_root.mkdir(mode=0o700)
     atomic_text(trace_root / "input/prompt.md", prompt)
     atomic_text(trace_root / "provider/stdout.stream-json", result.stdout)
@@ -199,6 +272,7 @@ def write_trace(
             "schema_version": 1,
             "runtime_id": result.runtime_id,
             "session_id": result.session_id,
+            "state": "finished",
             "exit_status": result.exit_status,
             "timed_out": result.timed_out,
             "raw_provider_capture_complete": result.raw_provider_capture_complete,
@@ -218,6 +292,13 @@ def execute_agent_session(
     """Run one backend session and always persist its token report."""
     runtime = backends.build_agent_runtime(config.agent_backend)
     result: backends.AgentRunResult | None = None
+    session_id = str(uuid.uuid4())
+    live_trace = start_live_trace(
+        context,
+        prompt,
+        runtime_id=runtime.id,
+        session_id=session_id,
+    )
     try:
         result = runtime.run(
             backends.AgentRunRequest(
@@ -225,12 +306,13 @@ def execute_agent_session(
                 prompt=prompt,
                 timeout_s=max(1, int(context.timeout_seconds) - 5),
                 reasoning_effort=config.reasoning_effort,
-                session_id=str(uuid.uuid4()),
+                session_id=session_id,
                 session_settings=config.session_settings,
                 token_budget=context.token_budget,
+                live_trace_path=context.session_trace_path if live_trace else None,
             )
         )
-        write_trace(context, result, prompt)
+        write_trace(context, result, prompt, replace_live=live_trace)
         if not result.raw_provider_capture_complete:
             return 126
         if result.budget_exhausted:
@@ -240,6 +322,9 @@ def execute_agent_session(
         if result.exit_status == 0 and on_success is not None:
             on_success()
         return result.exit_status
+    except BaseException as error:
+        mark_live_trace_interrupted(context, error)
+        raise
     finally:
         atomic_json(context.token_usage_path, usage_report(context, result))
 

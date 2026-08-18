@@ -168,6 +168,60 @@ def test_codex_rollout_is_captured_before_temporary_home_cleanup(tmp_path: Path)
         observer.capture_raw_rollout(thread_id, max_bytes=1)
 
 
+def test_core_projects_provider_streams_while_session_is_running(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    stdout = json.dumps(
+        {
+            "type": "result",
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 2,
+                "cache_creation_input_tokens": 1,
+            },
+        }
+    ) + "\n"
+    stderr = "live provider diagnostic\n"
+
+    def fake_runner(
+        command: list[str],
+        cwd: Path,
+        timeout: int | None,
+        env: dict[str, str] | None = None,
+        observer: ProcessObserver | None = None,
+    ) -> ProcessResult:
+        del command, cwd, timeout, env
+        trace = sessions / "core"
+        assert json.loads((trace / "session.json").read_text())["state"] == "running"
+        assert observer is not None
+        assert observer.on_stdout_line(stdout) is False
+        assert observer.on_stderr_line(stderr) is False
+        assert (trace / "provider/stdout.stream-json").read_text() == stdout
+        assert (trace / "provider/stderr.log").read_text() == stderr
+        return ProcessResult(stdout, stderr, 0, False, False, ())
+
+    runtime = CliAgentRuntime(ClaudeAdapter(), process_runner=fake_runner)
+    monkeypatch.setattr(backends, "build_agent_runtime", lambda _backend: runtime)
+    context = _Context(
+        workspace=tmp_path,
+        token_usage_path=tmp_path / "scratch/token-usage.json",
+        session_trace_path=sessions / "core",
+        manifest={},
+    )
+
+    assert execute_agent_session(context, AgentConfig("claude", "max", "", {}), "prompt") == 0
+
+    trace = sessions / "core"
+    assert json.loads((trace / "session.json").read_text())["state"] == "finished"
+    assert not (trace / ".runtime-live-session").exists()
+    assert (trace / "provider/stdout.stream-json").read_text() == stdout
+    assert (trace / "provider/stderr.log").read_text() == stderr
+
+
 def test_codex_ledger_normalizes_current_usage_without_cache_write(tmp_path: Path) -> None:
     thread_id = "01234567-89ab-cdef-0123-456789abcdef"
     rollout = tmp_path / "sessions/2026" / f"rollout-test-{thread_id}.jsonl"

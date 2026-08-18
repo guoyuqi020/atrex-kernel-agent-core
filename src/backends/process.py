@@ -37,6 +37,10 @@ class ProcessObserver(Protocol):
         """Return true when the complete process group must be terminated."""
         ...
 
+    def on_stderr_line(self, line: str) -> bool:
+        """Return true when the complete process group must be terminated."""
+        ...
+
     def poll(self) -> bool:
         """Check out-of-band state and return true when execution must stop."""
         ...
@@ -406,7 +410,10 @@ def run_bounded(
                     observation_stop.set()
                     return
                 stderr_parts.append(chunk[:remaining])
-                captured += min(len(chunk), remaining)
+                accepted = chunk[:remaining]
+                captured += len(accepted)
+                if observer is not None and observer.on_stderr_line(accepted):
+                    observation_stop.set()
                 if len(chunk) > remaining:
                     output_limit_exceeded.set()
                     observation_stop.set()

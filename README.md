@@ -92,8 +92,11 @@ Prompt and Provider files are captured without redaction, event filtering, or te
 reasoning, tool arguments/results, command output, and any sensitive values emitted by the Provider
 remain present. Core does not proactively copy credentials that the Provider never emitted. A
 bounded-output overflow or incomplete Codex rollout capture fails the phase instead of silently
-claiming a complete Trace. The Coding Agent may not pre-create or redirect the Runtime-selected
-Session path.
+claiming a complete Trace. Before launch, Core creates this fixed directory with `session.json`
+marked `running`, then streams stdout/stderr and mirrors the Codex rollout while the process is
+alive. This live view is explicitly unsealed. After reaping the process, Core discards it and
+rebuilds the complete final directory from bounded captures before Runtime seals the Artifact.
+The Coding Agent may not pre-create or redirect the Runtime-selected Session path.
 
 ## Engineering loop
 
