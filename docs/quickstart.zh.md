@@ -23,7 +23,7 @@ Core 不是独立 Campaign CLI。Runtime 导入精确 Core Commit，准备 Works
 ```json
 {
   "schema_version": 2,
-  "agent_backend": "claude",
+  "agent_backend": "codex",
   "reasoning_effort": "max",
   "session_settings": "",
   "prompts": {

@@ -12,7 +12,7 @@ CORE_ROOT = Path(__file__).resolve().parents[1]
 def test_agent_config_loads_every_supported_phase() -> None:
     config = AgentConfig.load(CORE_ROOT)
 
-    assert config.agent_backend in {"claude", "codex", "pi", "qodercli"}
+    assert config.agent_backend == "codex"
     assert set(config.prompt_paths) == {
         "problem_generalization",
         "framework_baseline",

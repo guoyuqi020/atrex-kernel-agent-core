@@ -26,7 +26,7 @@ Edit `atrex-agent.json` before committing the Core Revision:
 ```json
 {
   "schema_version": 2,
-  "agent_backend": "claude",
+  "agent_backend": "codex",
   "reasoning_effort": "max",
   "session_settings": "",
   "prompts": {
