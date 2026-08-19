@@ -29,8 +29,10 @@ Two root manifests are intentionally separate:
 - [`atrex-bundle.json`](atrex-bundle.json) is the Runtime-facing import contract. It identifies this
   as an `atrex-kernel-agent-bundle-v1` Bundle and declares `src/main.py` as the only
   executable entrypoint.
-- [`atrex-agent.json`](atrex-agent.json) is evolvable Agent configuration. It selects `claude`, `codex`,
-  `pi`, or `qodercli`, sets reasoning/session options, and maps all supported phases to prompts.
+- [`atrex-agent.json`](atrex-agent.json) provides standalone Agent defaults for `claude`, `codex`,
+  `pi`, or `qodercli`, reasoning/session options, and phase Prompt mappings. Managed Runtime
+  Sessions apply an authoritative Backend/effort/settings binding while leaving Prompt and workflow
+  evolution intact.
 
 Runtime sets `ATREX_CORE_PHASE` and the corresponding strict environment/manifest protocol. The
 entrypoint supports exactly three fresh-process phases:

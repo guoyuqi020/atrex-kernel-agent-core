@@ -34,8 +34,10 @@ Core 不是独立 Campaign CLI。Runtime 导入精确 Core Commit，准备 Works
 }
 ```
 
-Runtime 不选择第二套 Optimizer Framework。修改 Backend 会产生新的 Core Revision 并接受独立
-评估。Credential 不得写进 Manifest。
+上述字段是 Bundle 独立运行时的默认值。在托管 Session 中，Runtime 会注入权威的
+`ATREX_AGENT_BACKEND`、`ATREX_AGENT_REASONING_EFFORT` 与
+`ATREX_AGENT_SESSION_SETTINGS` 三元组；Core 拒绝不完整 Binding，并使用完整 Binding 覆盖
+这些默认值。Credential 不得写进任一配置层。
 
 ## 3. 发布精确 Commit
 
@@ -54,7 +56,7 @@ Runtime 校验 Commit/Tree，拒绝不安全内容及未解析或未批准 Submo
 
 ## 4. Bootstrap Campaign
 
-使用 Campaign Bootstrap v2。公共字段只写一次，DSL Seed 与初始 Evidence 放在 `lineages`：
+使用 Campaign schema v2。公共字段只写一次，DSL Seed 与初始 Evidence 放在 `lineages`：
 
 ```json
 {
@@ -66,8 +68,10 @@ Runtime 校验 Commit/Tree，拒绝不安全内容及未解析或未批准 Submo
   "base_revision": {
     "commit": "0123456789abcdef0123456789abcdef01234567"
   },
-  "attempts_per_branch": 8,
-  "dsls": ["triton"],
+  "challenger_count": 1,
+  "challenger_start_epoch": 1,
+  "trajectories_per_branch": 1,
+  "attempts_per_trajectory": 8,
   "lineages": {
     "triton": {
       "baseline_kernel": "/trusted/inputs/triton-kernel",
@@ -83,11 +87,11 @@ Runtime 校验 Commit/Tree，拒绝不安全内容及未解析或未批准 Submo
 atrex-kernel-agent-runtime serve --config /etc/atrex/runtime.json
 atrex-kernel-agent-runtime bootstrap \
   --config /etc/atrex/runtime.json \
-  --spec /trusted/inputs/bootstrap.json
+  --campaign /trusted/inputs/campaign.json
 ```
 
-未指定 `dsls` 时使用配置中的默认 DSL，代码默认顺序为 CUDA、Triton、CuteDSL。新 Campaign 只
-运行一次 `problem_generalization`，每条选中 Lineage 运行一次 `framework_baseline`。Core 的
+`lineages` 的 Key 是权威 DSL 集合；Runtime 按标准 DSL 顺序幂等创建。新 Campaign 只运行一次
+`problem_generalization`，每条选中 Lineage 运行一次 `framework_baseline`。Core 的
 Evaluate 都是探索评测；只有 Runtime 封存最终提名并执行一次新的正确 Runtime-final 评测后，
 Lineage 才 Ready。
 

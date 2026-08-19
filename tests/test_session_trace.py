@@ -118,7 +118,8 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
         manifest={},
     )
 
-    write_trace(context, result, prompt)
+    config = AgentConfig("claude", "max", "", {})
+    write_trace(context, result, prompt, config)
 
     trace = sessions / "core"
     assert (trace / "input/prompt.md").read_text() == prompt
@@ -138,12 +139,14 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     assert all(json.loads(line)["ignorable"] is True for line in normalized[1:])
     metadata = json.loads((trace / "session.json").read_text())
     assert metadata["raw_provider_capture_complete"] is True
+    assert metadata["runtime_id"] == "claude"
+    assert metadata["reasoning_effort"] == "max"
 
     blocked = replace(context, session_trace_path=sessions / "blocked")
     assert blocked.session_trace_path is not None
     blocked.session_trace_path.mkdir()
     with pytest.raises(ValueError, match="must not be created"):
-        write_trace(blocked, result, prompt)
+        write_trace(blocked, result, prompt, config)
 
     unsafe = replace(
         result,
@@ -151,7 +154,7 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     )
     unsafe_context = replace(context, session_trace_path=sessions / "unsafe")
     with pytest.raises(ValueError, match="unsafe path"):
-        write_trace(unsafe_context, unsafe, prompt)
+        write_trace(unsafe_context, unsafe, prompt, config)
     assert not (sessions / "unsafe").exists()
 
 

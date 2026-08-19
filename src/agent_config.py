@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,9 +17,14 @@ class AgentConfig:
     reasoning_effort: str
     session_settings: str
     prompt_paths: Mapping[str, Path]
+    runtime_bound: bool = False
 
     @classmethod
-    def load(cls, repository: Path) -> AgentConfig:
+    def load(
+        cls,
+        repository: Path,
+        environment: Mapping[str, str] | None = None,
+    ) -> AgentConfig:
         config_path = repository / "atrex-agent.json"
         if config_path.is_symlink() or not config_path.is_file():
             raise ValueError("Agent config must be a regular file")
@@ -58,7 +64,31 @@ class AgentConfig:
             if prompt.is_symlink() or not prompt.is_file():
                 raise ValueError(f"Agent prompt is unavailable: {phase}")
             prompt_paths[phase] = prompt
-        return cls(backend, effort, settings, prompt_paths)
+        binding = os.environ if environment is None else environment
+        binding_keys = {
+            "ATREX_AGENT_BACKEND",
+            "ATREX_AGENT_REASONING_EFFORT",
+            "ATREX_AGENT_SESSION_SETTINGS",
+        }
+        present = binding_keys.intersection(binding)
+        if present and present != binding_keys:
+            missing = sorted(binding_keys - present)
+            raise ValueError(f"incomplete Runtime Agent binding; missing: {missing}")
+        runtime_bound = bool(present)
+        if runtime_bound:
+            backend = text_value(binding["ATREX_AGENT_BACKEND"], "Runtime agent backend")
+            if backend not in {"claude", "codex", "pi", "qodercli"}:
+                raise ValueError(f"unsupported Runtime Core agent backend: {backend}")
+            effort = text_value(
+                binding["ATREX_AGENT_REASONING_EFFORT"],
+                "Runtime reasoning effort",
+            )
+            if effort not in {"low", "medium", "high", "max"}:
+                raise ValueError(f"unsupported Runtime reasoning effort: {effort}")
+            settings = binding["ATREX_AGENT_SESSION_SETTINGS"]
+            if "\x00" in settings:
+                raise ValueError("Runtime session settings cannot contain NUL")
+        return cls(backend, effort, settings, prompt_paths, runtime_bound)
 
     def prompt_path(self, phase: str) -> Path:
         try:

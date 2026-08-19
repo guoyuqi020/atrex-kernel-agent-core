@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -125,6 +126,7 @@ def start_live_trace(
     *,
     runtime_id: str,
     session_id: str,
+    config: AgentConfig,
 ) -> bool:
     """Create a stable, explicitly non-authoritative trace projection before launch."""
     if context.session_trace_path is None:
@@ -148,6 +150,11 @@ def start_live_trace(
         {
             "schema_version": 1,
             "runtime_id": runtime_id,
+            "reasoning_effort": config.reasoning_effort,
+            "runtime_bound": config.runtime_bound,
+            "session_settings_sha256": hashlib.sha256(
+                config.session_settings.encode("utf-8")
+            ).hexdigest(),
             "session_id": session_id,
             "state": "running",
         },
@@ -181,6 +188,7 @@ def write_trace(
     context: SessionContext,
     result: backends.AgentRunResult,
     prompt: str,
+    config: AgentConfig,
     *,
     replace_live: bool = False,
 ) -> None:
@@ -271,6 +279,11 @@ def write_trace(
         {
             "schema_version": 1,
             "runtime_id": result.runtime_id,
+            "reasoning_effort": config.reasoning_effort,
+            "runtime_bound": config.runtime_bound,
+            "session_settings_sha256": hashlib.sha256(
+                config.session_settings.encode("utf-8")
+            ).hexdigest(),
             "session_id": result.session_id,
             "state": "finished",
             "exit_status": result.exit_status,
@@ -298,6 +311,7 @@ def execute_agent_session(
         prompt,
         runtime_id=runtime.id,
         session_id=session_id,
+        config=config,
     )
     try:
         result = runtime.run(
@@ -312,7 +326,7 @@ def execute_agent_session(
                 live_trace_path=context.session_trace_path if live_trace else None,
             )
         )
-        write_trace(context, result, prompt, replace_live=live_trace)
+        write_trace(context, result, prompt, config, replace_live=live_trace)
         if not result.raw_provider_capture_complete:
             return 126
         if result.budget_exhausted:

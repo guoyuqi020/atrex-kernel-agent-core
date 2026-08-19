@@ -26,7 +26,10 @@ Evolver 位于 Parent/Candidate 仓库之外，可以在私有 Candidate Copy �
 不安全路径和超限内容。
 
 `atrex-agent.json` 是可进化行为配置，版本 2 包含 Backend、Reasoning Effort、Backend-specific
-Session Settings 和三个阶段的精确 Prompt Path。Core 不选择第二入口，也不启动嵌套控制面。
+Session Settings 和三个阶段的精确 Prompt Path。这些 Backend 字段是独立运行默认值；托管
+Runtime 会为所有阶段提供不可拆分、权威的 Backend/Effort/Settings Binding。Core 校验并记录
+该 Binding，但不能覆盖它，因此 Active 与 Challenger 在同一可比较 Provider Policy 下运行。
+Core 不选择第二入口，也不启动嵌套控制面。
 
 ## 3. 阶段 Dispatcher
 

@@ -37,6 +37,11 @@ limit violations before sealing the tree.
 - backend-specific `session_settings` serialized as a string; and
 - exact Prompt paths for all supported phases.
 
+Those Backend fields are standalone defaults. A managed Runtime supplies an all-or-nothing,
+authoritative Backend/effort/settings binding for every phase. Core validates and records that
+binding but cannot override it, so Active and Challenger revisions remain on one comparable
+Provider policy while their prompts, tools, and workflows evolve.
+
 Core never selects a second entrypoint or invokes a nested control plane.
 
 ## 3. Phase dispatcher

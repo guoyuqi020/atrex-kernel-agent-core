@@ -37,9 +37,11 @@ Edit `atrex-agent.json` before committing the Core Revision:
 }
 ```
 
-Supported backend identifiers are exact. Runtime configuration does not choose a second Optimizer
-framework; changing the backend is a Core Revision change and is therefore independently evaluated.
-Keep credentials out of both manifests.
+Supported Backend identifiers are exact. These values are standalone Bundle defaults. In a managed
+Session, Runtime injects the authoritative `ATREX_AGENT_BACKEND`,
+`ATREX_AGENT_REASONING_EFFORT`, and `ATREX_AGENT_SESSION_SETTINGS` triplet; Core rejects incomplete
+bindings and applies the complete binding instead of these defaults. Keep credentials out of both
+configuration layers.
 
 ## 3. Publish or select an exact Core commit
 
@@ -60,7 +62,7 @@ the resulting Bundle. The current Core tree has no submodules.
 
 ## 4. Bootstrap a Campaign
 
-Use Runtime's Campaign Bootstrap schema v2. Common Campaign fields appear once and per-DSL seed and
+Use Runtime's Campaign schema v2. Common Campaign fields appear once and per-DSL seed and
 Evidence inputs live under `lineages`:
 
 ```json
@@ -73,8 +75,10 @@ Evidence inputs live under `lineages`:
   "base_revision": {
     "commit": "0123456789abcdef0123456789abcdef01234567"
   },
-  "attempts_per_branch": 8,
-  "dsls": ["triton"],
+  "challenger_count": 1,
+  "challenger_start_epoch": 1,
+  "trajectories_per_branch": 1,
+  "attempts_per_trajectory": 8,
   "lineages": {
     "triton": {
       "baseline_kernel": "/trusted/inputs/triton-kernel",
@@ -92,12 +96,12 @@ atrex-kernel-agent-runtime serve --config /etc/atrex/runtime.json
 # In another supervised process with the same Runtime secrets and provider credentials:
 atrex-kernel-agent-runtime bootstrap \
   --config /etc/atrex/runtime.json \
-  --spec /trusted/inputs/bootstrap.json
+  --campaign /trusted/inputs/campaign.json
 ```
 
-When request `dsls` is absent, Runtime uses `campaign.bootstrap_dsls`; its code default is CUDA,
-Triton, then CuteDSL. Selected Lineages are created sequentially and idempotently. Retry the exact
-request after interruption to reuse completed Lineages and continue the remainder.
+The keys of `lineages` are the authoritative DSL set. Runtime creates them in canonical DSL order
+and idempotently. Retry the exact Campaign definition after interruption to reuse completed
+Lineages and continue the remainder.
 
 Bootstrap runs Core once in `problem_generalization` for a new Campaign and once in
 `framework_baseline` for each selected Lineage. Core's Evaluate calls are exploratory. A Lineage
