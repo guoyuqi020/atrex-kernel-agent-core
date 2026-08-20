@@ -120,14 +120,6 @@ class TokenBudgetObserver(ProcessObserver):
         with self._lock:
             if message_id is not None and message_id in self._seen_message_ids:
                 return self._exhausted
-            if (
-                self._adapter.id == "qodercli"
-                and isinstance(message, Mapping)
-                and isinstance(usage, Mapping)
-                and credit_usage_from_mapping(usage).credits is None
-            ):
-                self._monitoring_failed = True
-                return True
             try:
                 events, _terminal = self._adapter.normalize_stream(line)
             except Exception:
