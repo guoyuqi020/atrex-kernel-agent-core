@@ -20,7 +20,8 @@ _REQUIRED_ENVIRONMENT = (
     "ATREX_GATEWAY_PROXY_URL",
     "ATREX_OPTIMIZER_REPOSITORY",
     "ATREX_SESSION_TIMEOUT_SECONDS",
-    "ATREX_TOKEN_BUDGET",
+    "ATREX_USAGE_BUDGET",
+    "ATREX_USAGE_UNIT",
     "ATREX_TOKEN_USAGE_REPORT",
 )
 _EXPECTED_PATHS = {
@@ -79,7 +80,8 @@ class RuntimeAttemptContext:
     evidence_prompt: str
     wiki_url: str | None
     wiki_capability: str | None
-    token_budget: int
+    usage_unit: str
+    usage_budget: float
     timeout_seconds: float
     manifest: Mapping[str, Any]
 
@@ -165,8 +167,7 @@ class RuntimeAttemptContext:
         if (
             evidence_view.get("schema_version") != 1
             or evidence_view.get("role") != "optimizer"
-            or evidence_view.get("lineage_checkpoint")
-            != manifest["epoch_evidence_checkpoint"]
+            or evidence_view.get("lineage_checkpoint") != manifest["epoch_evidence_checkpoint"]
             or evidence_view.get("through_completed_epoch") != context["epoch_number"] - 1
             or current_epoch
             != {
@@ -188,9 +189,7 @@ class RuntimeAttemptContext:
         prompt_bytes = prompt_path.read_bytes()
         if not prompt_bytes or len(prompt_bytes) > _MAX_EVIDENCE_PROMPT_BYTES:
             raise ValueError("Evidence Prompt Fragment is empty or exceeds its byte limit")
-        if hashlib.sha256(prompt_bytes).hexdigest() != evidence_view.get(
-            "prompt_fragment_sha256"
-        ):
+        if hashlib.sha256(prompt_bytes).hexdigest() != evidence_view.get("prompt_fragment_sha256"):
             raise ValueError("Evidence Prompt Fragment digest disagrees with the manifest")
         try:
             evidence_prompt = prompt_bytes.decode("utf-8")
@@ -221,12 +220,15 @@ class RuntimeAttemptContext:
             raise ValueError("Session trace path must be under sessions or scratch")
 
         try:
-            budget = int(os.environ["ATREX_TOKEN_BUDGET"])
+            budget = float(os.environ["ATREX_USAGE_BUDGET"])
             timeout = float(os.environ["ATREX_SESSION_TIMEOUT_SECONDS"])
         except ValueError as error:
             raise ValueError("Runtime budget and timeout must be numeric") from error
         if budget <= 0 or timeout <= 0:
             raise ValueError("Runtime budget and timeout must be positive")
+        usage_unit = os.environ["ATREX_USAGE_UNIT"]
+        if usage_unit not in {"provider_tokens", "credits"}:
+            raise ValueError("Runtime usage unit is unsupported")
         wiki_url = os.environ.get("ATREX_WIKI_PROXY_URL")
         wiki_capability = os.environ.get("ATREX_WIKI_CAPABILITY")
         if (wiki_url is None) != (wiki_capability is None):
@@ -245,7 +247,8 @@ class RuntimeAttemptContext:
             evidence_prompt=evidence_prompt,
             wiki_url=wiki_url,
             wiki_capability=wiki_capability,
-            token_budget=budget,
+            usage_unit=usage_unit,
+            usage_budget=budget,
             timeout_seconds=timeout,
             manifest=manifest,
         )

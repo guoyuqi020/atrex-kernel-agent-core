@@ -92,7 +92,8 @@ def _environment(monkeypatch: pytest.MonkeyPatch, root: Path, manifest: Path) ->
         "ATREX_GATEWAY_PROXY_URL": "http://runtime.invalid",
         "ATREX_OPTIMIZER_REPOSITORY": str(root / "agent/optimizer"),
         "ATREX_SESSION_TIMEOUT_SECONDS": "60",
-        "ATREX_TOKEN_BUDGET": "1000",
+        "ATREX_USAGE_BUDGET": "1000",
+        "ATREX_USAGE_UNIT": "provider_tokens",
         "ATREX_TOKEN_USAGE_REPORT": str(root / "scratch/token-usage.json"),
         "ATREX_SESSION_TRACE_PATH": str(root / "sessions/core"),
     }

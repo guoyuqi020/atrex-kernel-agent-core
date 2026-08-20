@@ -45,6 +45,6 @@ def test_attempt_tool_example_uses_the_trusted_lineage_dsl() -> None:
     instructions = _tool_instructions("triton")
 
     assert '"query": "triton vectorized load requirements' in instructions
-    assert "wiki-read" in instructions
-    assert "source_ref" in instructions
+    assert "wiki-read" not in instructions
+    assert "complete safe served Record" in instructions
     assert "CUDA vectorized load requirements" not in instructions

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 from collections.abc import Iterator, Mapping
@@ -157,10 +158,10 @@ class CodexTemporaryHome:
         "plugins",
         "hooks.json",
         "models_cache.json",
-        "installation_id",
         "vendor_imports",
         "mcp-oauth-locks",
     )
+    _WRITABLE_COPIES = ("installation_id",)
 
     def __init__(self, source: Path):
         self.source = source.resolve()
@@ -174,6 +175,10 @@ class CodexTemporaryHome:
             source = self.source / name
             if source.exists():
                 (self.path / name).symlink_to(source, target_is_directory=source.is_dir())
+        for name in self._WRITABLE_COPIES:
+            source = self.source / name
+            if source.is_file():
+                shutil.copyfile(source, self.path / name)
         return self.path
 
     def close(self) -> str | None:

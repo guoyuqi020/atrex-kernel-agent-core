@@ -121,8 +121,9 @@ Core 没有持久 Campaign 数据库。每次 Attempt 从不可变输入重建�
 
 Core 不携带 Wiki Corpus 或本地 Gateway。`wiki-query` 通过 Runtime 返回带 Source/Snapshot 身份的
 冻结响应；`gateway-execute` 只执行当前 Capability 授权的 Agate 等价操作。一个 Attempt 可进行
-多次探索 Evaluate，Runtime 会保留每一对 Kernel/Result。只有独立 Runtime-final Evaluate 可以进入
-Kernel 保留或 Agent 晋升比较。
+多次探索 Evaluate，Runtime 会保留每一对 Kernel/Result。只有 Runtime 配置指定的可信终评结果
+可以进入 Kernel 保留或 Agent 晋升比较；普通 A/B Evaluate 与 ABBA 都直接使用 Candidate 测量，
+不再额外终评。
 
 Bubblewrap 的 `host` 网络模式不提供目标过滤；需要同时访问 Agent Provider 与 Runtime Service 的
 生产部署必须在 Bubblewrap 之外实施 Egress Policy。`isolated` 模式完全无网络。不能把网络隔离

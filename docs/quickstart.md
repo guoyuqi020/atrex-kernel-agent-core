@@ -39,7 +39,8 @@ Edit `atrex-agent.json` before committing the Core Revision:
 
 Supported Backend identifiers are exact. These values are standalone Bundle defaults. In a managed
 Session, Runtime injects the authoritative `ATREX_AGENT_BACKEND`,
-`ATREX_AGENT_REASONING_EFFORT`, and `ATREX_AGENT_SESSION_SETTINGS` triplet; Core rejects incomplete
+`ATREX_AGENT_MODEL`, `ATREX_AGENT_REASONING_EFFORT`, and `ATREX_AGENT_SESSION_SETTINGS` binding;
+an empty model selects the Backend CLI default. Core rejects incomplete
 bindings and applies the complete binding instead of these defaults. Keep credentials out of both
 configuration layers.
 
@@ -62,12 +63,12 @@ the resulting Bundle. The current Core tree has no submodules.
 
 ## 4. Bootstrap a Campaign
 
-Use Runtime's Campaign schema v2. Common Campaign fields appear once and per-DSL seed and
+Use Runtime's Campaign schema v3. Common Campaign fields appear once and per-DSL seed and
 Evidence inputs live under `lineages`:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "creation_key": "vector-add-h100",
   "operator": "vector_add",
   "hardware_target": "nvidia-h100",
@@ -81,6 +82,7 @@ Evidence inputs live under `lineages`:
   "attempts_per_trajectory": 8,
   "lineages": {
     "triton": {
+      "models": {"optimizer": null, "evolver": null},
       "baseline_kernel": "/trusted/inputs/triton-kernel",
       "initial_evidence": "/trusted/inputs/triton-evidence"
     }
@@ -122,7 +124,9 @@ atrex-kernel-agent-runtime run-campaign \
 Each Epoch creates Active and Challenger branches from the same checkpoint. Each branch receives a
 fixed number of fresh `optimization_attempt` sessions. Within a branch, a retained Kernel becomes
 the next Attempt's incumbent; the opposite branch's intermediate results remain invisible. Runtime
-independently re-evaluates each terminal nomination before Kernel retention or Agent promotion.
+applies the configured trusted retention policy to each terminal nomination. Ordinary A/B Evaluate
+and same-allocation ABBA both use their Candidate measurements as the final Kernel Evaluation,
+without an extra standalone Eval.
 
 ## 6. What an Attempt can access
 

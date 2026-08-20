@@ -15,12 +15,14 @@ def test_runtime_binding_overrides_bundle_backend(backend: str) -> None:
         CORE_ROOT,
         {
             "ATREX_AGENT_BACKEND": backend,
+            "ATREX_AGENT_MODEL": "runtime-model",
             "ATREX_AGENT_REASONING_EFFORT": "high",
             "ATREX_AGENT_SESSION_SETTINGS": "",
         },
     )
 
     assert config.agent_backend == backend
+    assert config.model == "runtime-model"
     assert config.reasoning_effort == "high"
     assert config.runtime_bound is True
 

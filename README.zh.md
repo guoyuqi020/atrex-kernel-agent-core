@@ -28,7 +28,8 @@ Core 不能读取 Runtime 状态或评测私有输入。
   `src/main.py`；
 - [`atrex-agent.json`](atrex-agent.json) 提供 `claude`、`codex`、`pi` 或 `qodercli`、
   Reasoning/Session 选项与阶段 Prompt Mapping 的独立运行默认值。托管 Runtime Session 使用
-  权威 Backend/Effort/Settings Binding，同时保留 Prompt 与 Workflow 的进化能力。
+  权威 Backend/Model/Effort/Settings Binding，同时保留 Prompt 与 Workflow 的进化能力；空
+  Model 表示使用 Backend CLI 默认值。
 
 Runtime 必须显式设置 `ATREX_CORE_PHASE`。每次进程只执行一个全新 Agent Session：
 

@@ -60,10 +60,31 @@ def token_usage_from_mapping(usage: object) -> TokenUsage:
     )
 
 
+def credit_usage_from_mapping(usage: object) -> TokenUsage:
+    """Read Qoder's provider-native credit counter without inventing token usage."""
+    if not isinstance(usage, Mapping):
+        return TokenUsage.unavailable()
+    credits = usage.get("credits", usage.get("total_credits", usage.get("totalCredits")))
+    if (
+        isinstance(credits, bool)
+        or not isinstance(credits, (int, float))
+        or not math.isfinite(float(credits))
+        or credits < 0
+    ):
+        return TokenUsage.unavailable()
+    return TokenUsage.credit(float(credits))
+
+
 def token_usage_from_model_usage(model_usage: object) -> TokenUsage:
     if not isinstance(model_usage, Mapping):
         return TokenUsage.unavailable()
     return sum_token_usages([token_usage_from_mapping(value) for value in model_usage.values()])
+
+
+def credit_usage_from_model_usage(model_usage: object) -> TokenUsage:
+    if not isinstance(model_usage, Mapping):
+        return TokenUsage.unavailable()
+    return sum_token_usages([credit_usage_from_mapping(value) for value in model_usage.values()])
 
 
 def toml_config_value(value: object) -> str:
@@ -159,6 +180,7 @@ class AgentBackendAdapter(ABC):
         session_id: str,
         reasoning_effort: str,
         settings: str,
+        model: str | None = None,
     ) -> list[str]: ...
 
     @abstractmethod
@@ -253,6 +275,7 @@ class ClaudeAdapter(ClaudeLikeAdapter):
         session_id: str,
         reasoning_effort: str,
         settings: str,
+        model: str | None = None,
     ) -> list[str]:
         command = [
             "claude",
@@ -263,9 +286,14 @@ class ClaudeAdapter(ClaudeLikeAdapter):
             "stream-json",
             "--session-id",
             session_id,
+            "--no-session-persistence",
+            "--name",
+            f"atrex-{session_id}",
             "--effort",
             reasoning_effort,
         ]
+        if model is not None:
+            command += ["--model", model]
         if settings:
             command += ["--settings", settings]
         command.append(prompt)
@@ -277,15 +305,51 @@ class QoderAdapter(ClaudeLikeAdapter):
     settings_variable = "ATREX_QODER_SESSION_SETTINGS"
 
     def normalize_stream(self, stdout: str) -> tuple[tuple[NormalizedAgentEvent, ...], TokenUsage]:
-        events, terminal = super().normalize_stream(stdout)
-        usage_events = [event for event in events if event.usage is not None]
-        if (
-            terminal.total_tokens == 0
-            and usage_events
-            and all(event.usage.total_tokens == 0 for event in usage_events if event.usage)
-        ):
-            return (), TokenUsage.unavailable()
-        return events, terminal
+        normalized: list[NormalizedAgentEvent] = []
+        deltas: list[TokenUsage] = []
+        seen_usage_message_ids: set[str] = set()
+        terminal = TokenUsage.unavailable()
+        for event in _json_events(stdout):
+            if event.get("type") == "result":
+                terminal = credit_usage_from_mapping(event)
+                if terminal.credits is None:
+                    terminal = credit_usage_from_model_usage(event.get("modelUsage"))
+                continue
+            message = event.get("message")
+            usage: object = event.get("usage")
+            if usage is None and isinstance(message, Mapping):
+                usage = message.get("usage")
+            parsed = credit_usage_from_mapping(usage)
+            message_id = (
+                message.get("id")
+                if isinstance(message, Mapping) and isinstance(message.get("id"), str)
+                else None
+            )
+            if parsed.credits is None or (message_id and message_id in seen_usage_message_ids):
+                continue
+            deltas.append(parsed)
+            normalized.append(
+                NormalizedAgentEvent(
+                    sequence=len(normalized),
+                    kind="usage_delta",
+                    usage=parsed,
+                )
+            )
+            if message_id:
+                seen_usage_message_ids.add(message_id)
+        if terminal.credits is None:
+            terminal = sum_token_usages(deltas)
+            if terminal.credits is not None:
+                terminal = replace(terminal, measurement="partial")
+        if terminal.credits is not None and terminal.measurement == "exact":
+            normalized.append(
+                NormalizedAgentEvent(
+                    sequence=len(normalized),
+                    kind="terminal_usage",
+                    usage=terminal,
+                )
+            )
+        return tuple(normalized), terminal
 
     def build_command(
         self,
@@ -293,6 +357,7 @@ class QoderAdapter(ClaudeLikeAdapter):
         session_id: str,
         reasoning_effort: str,
         settings: str,
+        model: str | None = None,
     ) -> list[str]:
         command = [
             "qodercli",
@@ -306,6 +371,8 @@ class QoderAdapter(ClaudeLikeAdapter):
             "--reasoning-effort",
             reasoning_effort,
         ]
+        if model is not None:
+            command += ["--model", model]
         if settings:
             command += ["--settings", settings]
         command.append(prompt)
@@ -326,6 +393,7 @@ class PiAdapter(AgentBackendAdapter):
         session_id: str,
         reasoning_effort: str,
         settings: str,
+        model: str | None = None,
     ) -> list[str]:
         command = [
             "pi",
@@ -337,7 +405,12 @@ class PiAdapter(AgentBackendAdapter):
             "--thinking",
             reasoning_effort,
         ]
-        command += pi_settings_args(settings)
+        settings_args = pi_settings_args(settings)
+        if model is not None and "--model" in settings_args:
+            raise ValueError("Pi model is set by both Runtime and session settings")
+        if model is not None:
+            command += ["--model", model]
+        command += settings_args
         command.append(prompt)
         return command
 
@@ -408,6 +481,7 @@ class CodexAdapter(AgentBackendAdapter):
         session_id: str,
         reasoning_effort: str,
         settings: str,
+        model: str | None = None,
     ) -> list[str]:
         del session_id
         command = [
@@ -420,7 +494,12 @@ class CodexAdapter(AgentBackendAdapter):
             "-c",
             f'model_reasoning_effort="{reasoning_effort}"',
         ]
-        command += codex_settings_args(settings)
+        settings_args = codex_settings_args(settings)
+        if model is not None and any(value.startswith("model=") for value in settings_args):
+            raise ValueError("Codex model is set by both Runtime and session settings")
+        if model is not None:
+            command += ["-c", f"model={json.dumps(model, ensure_ascii=False)}"]
+        command += settings_args
         command.append(prompt)
         return command
 

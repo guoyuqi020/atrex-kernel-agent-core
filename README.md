@@ -31,8 +31,8 @@ Two root manifests are intentionally separate:
   executable entrypoint.
 - [`atrex-agent.json`](atrex-agent.json) provides standalone Agent defaults for `claude`, `codex`,
   `pi`, or `qodercli`, reasoning/session options, and phase Prompt mappings. Managed Runtime
-  Sessions apply an authoritative Backend/effort/settings binding while leaving Prompt and workflow
-  evolution intact.
+  Sessions apply an authoritative Backend/model/effort/settings binding while leaving Prompt and
+  workflow evolution intact. An empty model selects the Backend CLI default.
 
 Runtime sets `ATREX_CORE_PHASE` and the corresponding strict environment/manifest protocol. The
 entrypoint supports exactly three fresh-process phases:
@@ -106,8 +106,9 @@ The Coding Agent may not pre-create or redirect the Runtime-selected Session pat
 reconstruct the incumbent, profile progressively, query focused external knowledge, plan one
 falsifiable direction, edit and repair, execute one or more exploratory Evaluates, record every
 decisive experiment immediately, and publish one terminal report. A terminal outcome is
-`candidate_ready`, `pivot`, or `blocked`; Runtime independently re-evaluates the nominated exact
-Kernel and decides whether it is retained and whether its Kernel Agent Revision is promoted.
+`candidate_ready`, `pivot`, or `blocked`; Runtime applies its trusted retention policy to the
+nominated exact Kernel—either ordinary A/B Evaluate or same-allocation ABBA. The Candidate side of
+that comparison becomes the final Kernel Evaluation and also decides retention.
 
 [`prompts/framework_baseline.md`](prompts/framework_baseline.md) defines the narrower
 framework-baseline phase.

@@ -81,7 +81,7 @@ them. Stop profiling when evidence identifies an actionable mechanism and code t
 
 Query the external knowledge service with the real architecture, vendor, DSL, operator, and observed
 symptom. Ask for architecture-scoped documentation, reference Kernels, compiler behavior, and known
-pitfalls before broad advice. Preserve `source_ref` values for knowledge actually used. Keep
+pitfalls before broad advice. Preserve stable GPU Wiki Record IDs for knowledge actually used. Keep
 architecture filters when a focused query is empty, and test every adopted recommendation through
 the evaluation service.
 
@@ -103,8 +103,8 @@ trusted inputs; do not start nested Agent or reviewer sessions. The plan must in
   rejection check; and
 - a full evaluation criterion, measurable success condition, and direction-exhaustion condition.
 
-Preserve `source_ref` values for external claims and result identities for measured
-claims. Treat numeric goals as trends unless trusted task input marks them as hard thresholds. Read
+Preserve stable GPU Wiki Record IDs for external claims and result identities for measured claims.
+Treat numeric goals as trends unless trusted task input marks them as hard thresholds. Read
 the plan back and reject placeholders, unsupported targets, hidden-case reconstruction, or more than
 one optimization category before implementation.
 
@@ -126,8 +126,8 @@ evidence-based next step.
 
 Focused `dev` or `check` calls may accelerate repair, but a terminal candidate requires a completed
 `gateway-execute` call with `{"operation":"evaluate"}` on the exact current `work/kernel/` tree.
-Require all reported cases to pass, a correct result, and finite positive latency. Inspect maximum
-error and per-shape results when available.
+Require all reported cases to pass, a correct result, and finite positive latency. Use aggregate
+correctness and opaque per-shape latency only; exact inputs and failure details remain unavailable.
 
 Each `evaluate` call is an exploratory measurement of the exact candidate tree at that moment. You
 may evaluate multiple changed candidates in this Attempt, and the controller durably retains every

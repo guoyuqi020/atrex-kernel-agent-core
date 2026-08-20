@@ -16,7 +16,8 @@ _REQUIRED_ENVIRONMENT = (
     "ATREX_OPTIMIZER_REPOSITORY",
     "ATREX_PROBLEM_GENERALIZATION_MANIFEST",
     "ATREX_SESSION_TIMEOUT_SECONDS",
-    "ATREX_TOKEN_BUDGET",
+    "ATREX_USAGE_BUDGET",
+    "ATREX_USAGE_UNIT",
     "ATREX_TOKEN_USAGE_REPORT",
 )
 _EXPECTED_PATHS = {
@@ -44,7 +45,8 @@ class RuntimeProblemGeneralizationContext:
     output_path: Path
     token_usage_path: Path
     session_trace_path: Path | None
-    token_budget: int
+    usage_unit: str
+    usage_budget: float
     timeout_seconds: float
     manifest: Mapping[str, Any]
 
@@ -102,12 +104,15 @@ class RuntimeProblemGeneralizationContext:
         if trace_path is not None and not trace_path.is_relative_to(workspace / "sessions"):
             raise ValueError("Session trace path must be under sessions")
         try:
-            budget = int(os.environ["ATREX_TOKEN_BUDGET"])
+            budget = float(os.environ["ATREX_USAGE_BUDGET"])
             timeout = float(os.environ["ATREX_SESSION_TIMEOUT_SECONDS"])
         except ValueError as error:
             raise ValueError("Runtime budget and timeout must be numeric") from error
         if budget <= 0 or timeout <= 0:
             raise ValueError("Runtime budget and timeout must be positive")
+        usage_unit = os.environ["ATREX_USAGE_UNIT"]
+        if usage_unit not in {"provider_tokens", "credits"}:
+            raise ValueError("Runtime usage unit is unsupported")
         return cls(
             workspace,
             repository,
@@ -115,6 +120,7 @@ class RuntimeProblemGeneralizationContext:
             output_path,
             token_path,
             trace_path,
+            usage_unit,
             budget,
             timeout,
             manifest,

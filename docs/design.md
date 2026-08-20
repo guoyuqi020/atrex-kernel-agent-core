@@ -118,8 +118,8 @@ request. The client:
 - validates the shape of terminal baseline and Attempt reports before submission.
 
 Tool results remain Agent-visible evidence. Runtime freezes every exploratory Kernel/result pair,
-then separately evaluates a terminal nomination to create the authoritative Gateway outcome. Wiki
-interactions are frozen independently.
+then applies its trusted retention policy. Ordinary A/B Evaluate and same-allocation ABBA both use
+their Candidate measurements as final authority. Wiki interactions are frozen independently.
 
 ## 5. Agent sessions and token accounting
 

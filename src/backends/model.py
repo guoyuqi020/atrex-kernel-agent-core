@@ -17,6 +17,7 @@ class TokenUsage:
     cache_write_tokens: int | None
     total_tokens: int | None
     measurement: UsageMeasurement
+    credits: float | None = None
 
     @classmethod
     def unavailable(cls) -> TokenUsage:
@@ -33,9 +34,27 @@ class TokenUsage:
     def zero(cls) -> TokenUsage:
         return cls(0, 0, 0, 0, 0, "exact")
 
+    @classmethod
+    def credit(cls, credits: float, measurement: UsageMeasurement = "exact") -> TokenUsage:
+        if credits < 0:
+            raise ValueError("credit usage cannot be negative")
+        return cls(None, None, None, None, None, measurement, credits)
+
 
 def sum_token_usages(usages: Sequence[TokenUsage]) -> TokenUsage:
-    observed = [usage for usage in usages if usage.total_tokens is not None]
+    credit_observed = [usage for usage in usages if usage.credits is not None]
+    token_observed = [usage for usage in usages if usage.total_tokens is not None]
+    if credit_observed:
+        if token_observed:
+            raise ValueError("cannot combine token and credit usage")
+        return TokenUsage.credit(
+            sum(usage.credits or 0.0 for usage in credit_observed),
+            "exact"
+            if len(credit_observed) == len(usages)
+            and all(usage.measurement == "exact" for usage in credit_observed)
+            else "partial",
+        )
+    observed = token_observed
     if not observed:
         return TokenUsage.unavailable()
 
@@ -61,6 +80,12 @@ def sum_token_usages(usages: Sequence[TokenUsage]) -> TokenUsage:
 
 
 def token_usage_exceeds(observed: TokenUsage, terminal: TokenUsage) -> bool:
+    if observed.credits is not None or terminal.credits is not None:
+        return (
+            observed.credits is not None
+            and terminal.credits is not None
+            and observed.credits > terminal.credits
+        )
     for name in (
         "input_tokens",
         "output_tokens",
@@ -82,6 +107,13 @@ def token_usage_exceeds(observed: TokenUsage, terminal: TokenUsage) -> bool:
 def subtract_token_usage(total: TokenUsage, part: TokenUsage) -> TokenUsage:
     if token_usage_exceeds(part, total):
         raise ValueError("token usage part exceeds total")
+    if total.credits is not None or part.credits is not None:
+        if total.credits is None or part.credits is None:
+            raise ValueError("cannot subtract token usage from credit usage")
+        return TokenUsage.credit(
+            total.credits - part.credits,
+            "exact" if total.measurement == "exact" and part.measurement == "exact" else "partial",
+        )
 
     def component(name: str) -> int | None:
         left = getattr(total, name)
@@ -137,12 +169,15 @@ class AgentRunRequest:
     reasoning_effort: str = "max"
     session_id: str | None = None
     session_settings: str = ""
-    token_budget: int | None = None
+    usage_budget: float | None = None
     live_trace_path: Path | None = None
+    model: str | None = None
 
     def __post_init__(self) -> None:
-        if self.token_budget is not None and self.token_budget <= 0:
-            raise ValueError("Agent token budget must be positive")
+        if self.usage_budget is not None and self.usage_budget <= 0:
+            raise ValueError("Agent usage budget must be positive")
+        if self.model is not None and (not self.model.strip() or "\x00" in self.model):
+            raise ValueError("Agent model must be non-empty and cannot contain NUL")
 
 
 @dataclass(frozen=True)

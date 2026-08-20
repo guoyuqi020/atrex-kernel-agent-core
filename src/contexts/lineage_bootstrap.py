@@ -18,7 +18,8 @@ _REQUIRED_ENVIRONMENT = (
     "ATREX_GATEWAY_PROXY_URL",
     "ATREX_OPTIMIZER_REPOSITORY",
     "ATREX_SESSION_TIMEOUT_SECONDS",
-    "ATREX_TOKEN_BUDGET",
+    "ATREX_USAGE_BUDGET",
+    "ATREX_USAGE_UNIT",
     "ATREX_TOKEN_USAGE_REPORT",
 )
 _EXPECTED_PATHS = {
@@ -56,7 +57,8 @@ class RuntimeLineageBootstrapContext:
     gateway_capability: str
     wiki_url: str | None
     wiki_capability: str | None
-    token_budget: int
+    usage_unit: str
+    usage_budget: float
     timeout_seconds: float
     manifest: Mapping[str, Any]
 
@@ -118,12 +120,15 @@ class RuntimeLineageBootstrapContext:
         if trace_path is not None and not trace_path.is_relative_to(workspace / "sessions"):
             raise ValueError("Session trace path must be under sessions")
         try:
-            budget = int(os.environ["ATREX_TOKEN_BUDGET"])
+            budget = float(os.environ["ATREX_USAGE_BUDGET"])
             timeout = float(os.environ["ATREX_SESSION_TIMEOUT_SECONDS"])
         except ValueError as error:
             raise ValueError("Runtime budget and timeout must be numeric") from error
         if budget <= 0 or timeout <= 0:
             raise ValueError("Runtime budget and timeout must be positive")
+        usage_unit = os.environ["ATREX_USAGE_UNIT"]
+        if usage_unit not in {"provider_tokens", "credits"}:
+            raise ValueError("Runtime usage unit is unsupported")
         wiki_url = os.environ.get("ATREX_WIKI_PROXY_URL")
         wiki_capability = os.environ.get("ATREX_WIKI_CAPABILITY")
         if (wiki_url is None) != (wiki_capability is None):
@@ -141,7 +146,8 @@ class RuntimeLineageBootstrapContext:
             ),
             wiki_url=wiki_url,
             wiki_capability=wiki_capability,
-            token_budget=budget,
+            usage_unit=usage_unit,
+            usage_budget=budget,
             timeout_seconds=timeout,
             manifest=manifest,
         )

@@ -222,22 +222,6 @@ def wiki_query(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str
     )
 
 
-def wiki_read(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
-    if context.wiki_url is None or context.wiki_capability is None:
-        raise RuntimeError("GPU Wiki capability is unavailable for this Attempt")
-    unknown = set(request) - {"source_ref", "idempotency_key"}
-    if unknown:
-        raise ValueError(f"unknown Wiki read fields: {sorted(unknown)}")
-    source_ref = request.get("source_ref")
-    if not isinstance(source_ref, str) or not source_ref.strip():
-        raise ValueError("Wiki read requires a non-empty source_ref")
-    value = {"schema_version": 1, "attempt_id": context.attempt_id, **request}
-    value.setdefault("idempotency_key", _idempotency_key("wiki-read", value))
-    return _agent_knowledge(
-        _post(context.wiki_url, context.wiki_capability, "/v1/wiki/read", value)
-    )
-
-
 def _agent_knowledge(response: dict[str, Any]) -> dict[str, Any]:
     """Expose knowledge content while retaining audit identities inside Runtime."""
     content = response.get("content")
@@ -442,7 +426,6 @@ def main(argv: list[str] | None = None) -> int:
     for name in (
         "gateway-execute",
         "wiki-query",
-        "wiki-read",
         "record-experiment",
         "attempt-report",
         "lineage-bootstrap-report",
@@ -456,8 +439,6 @@ def main(argv: list[str] | None = None) -> int:
         result = gateway_execute(context, request)
     elif args.command == "wiki-query":
         result = wiki_query(context, request)
-    elif args.command == "wiki-read":
-        result = wiki_read(context, request)
     elif args.command == "record-experiment":
         if not isinstance(context, RuntimeAttemptContext):
             raise ValueError("experiment journal is available only to optimization Attempts")

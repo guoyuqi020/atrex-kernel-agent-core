@@ -29,7 +29,8 @@ class _Context:
     token_usage_path: Path
     session_trace_path: Path | None
     manifest: dict[str, Any]
-    token_budget: int = 1_000
+    usage_unit: str = "provider_tokens"
+    usage_budget: float = 1_000
     timeout_seconds: float = 60
 
 
@@ -39,41 +40,44 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     sessions = tmp_path / "sessions"
     sessions.mkdir()
     prompt = "private optimizer prompt"
-    stdout = "\n".join(
-        (
-            json.dumps(
-                {
-                    "type": "assistant",
-                    "provider_credential": "Bearer raw-provider-secret",
-                    "message": {
-                        "id": "message-1",
-                        "content": [
-                            {"type": "thinking", "thinking": "raw reasoning"},
-                            {"type": "tool_use", "input": {"token": "raw-tool-secret"}},
-                            {"type": "tool_result", "content": "raw tool result"},
-                        ],
+    stdout = (
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "provider_credential": "Bearer raw-provider-secret",
+                        "message": {
+                            "id": "message-1",
+                            "content": [
+                                {"type": "thinking", "thinking": "raw reasoning"},
+                                {"type": "tool_use", "input": {"token": "raw-tool-secret"}},
+                                {"type": "tool_result", "content": "raw tool result"},
+                            ],
+                            "usage": {
+                                "input_tokens": 20,
+                                "output_tokens": 5,
+                                "cache_read_input_tokens": 2,
+                                "cache_creation_input_tokens": 1,
+                            },
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "result",
                         "usage": {
                             "input_tokens": 20,
                             "output_tokens": 5,
                             "cache_read_input_tokens": 2,
                             "cache_creation_input_tokens": 1,
                         },
-                    },
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "result",
-                    "usage": {
-                        "input_tokens": 20,
-                        "output_tokens": 5,
-                        "cache_read_input_tokens": 2,
-                        "cache_creation_input_tokens": 1,
-                    },
-                }
-            ),
+                    }
+                ),
+            )
         )
-    ) + "\n"
+        + "\n"
+    )
 
     def fake_runner(
         command: list[str],
@@ -99,7 +103,7 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
             prompt=prompt,
             timeout_s=30,
             session_id="session-test",
-            token_budget=1_000,
+            usage_budget=1_000,
         )
     )
     result = replace(
@@ -118,7 +122,7 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
         manifest={},
     )
 
-    config = AgentConfig("claude", "max", "", {})
+    config = AgentConfig("claude", "max", "", {}, model="lineage-model")
     write_trace(context, result, prompt, config)
 
     trace = sessions / "core"
@@ -127,9 +131,7 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     assert "raw reasoning" in (trace / "provider/stdout.stream-json").read_text()
     assert "raw-tool-secret" in (trace / "provider/stdout.stream-json").read_text()
     assert "raw stderr credential" in (trace / "provider/stderr.log").read_text()
-    assert "codex reasoning" in (
-        trace / "provider/codex-rollout.raw-jsonl"
-    ).read_text()
+    assert "codex reasoning" in (trace / "provider/codex-rollout.raw-jsonl").read_text()
     normalized = (trace / "events.jsonl").read_text().splitlines()
     assert json.loads(normalized[0]) == {
         "id": "session-test",
@@ -141,6 +143,7 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     assert metadata["raw_provider_capture_complete"] is True
     assert metadata["runtime_id"] == "claude"
     assert metadata["reasoning_effort"] == "max"
+    assert metadata["model"] == "lineage-model"
 
     blocked = replace(context, session_trace_path=sessions / "blocked")
     assert blocked.session_trace_path is not None
@@ -177,17 +180,20 @@ def test_core_projects_provider_streams_while_session_is_running(
 ) -> None:
     sessions = tmp_path / "sessions"
     sessions.mkdir()
-    stdout = json.dumps(
-        {
-            "type": "result",
-            "usage": {
-                "input_tokens": 20,
-                "output_tokens": 5,
-                "cache_read_input_tokens": 2,
-                "cache_creation_input_tokens": 1,
-            },
-        }
-    ) + "\n"
+    stdout = (
+        json.dumps(
+            {
+                "type": "result",
+                "usage": {
+                    "input_tokens": 20,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 2,
+                    "cache_creation_input_tokens": 1,
+                },
+            }
+        )
+        + "\n"
+    )
     stderr = "live provider diagnostic\n"
 
     def fake_runner(

@@ -21,7 +21,6 @@ write one JSON request under `scratch/`, then run exactly one of:
 ```text
 python {tool} gateway-execute --request scratch/<request>.json
 python {tool} wiki-query --request scratch/<request>.json
-python {tool} wiki-read --request scratch/<request>.json
 python {tool} record-experiment --request scratch/<request>.json
 python {tool} attempt-report --request scratch/<request>.json
 ```
@@ -33,6 +32,11 @@ or attempt id in its request. Example profile request:
 ```json
 {{"operation": "profile", "level": "survey"}}
 ```
+
+Evaluation results identify private cases only by opaque `shape_id` and never reveal their inputs.
+After an evaluation, a profile request may add `"shape_id":"<opaque id>"` to profile that one real
+case; omitting it selects one evaluator-owned case. Do not infer or reconstruct case inputs from ids
+or measurements.
 
 Example authoritative evaluation request:
 
@@ -46,15 +50,11 @@ Example knowledge query request:
 {{"query": "{dsl} vectorized load requirements for the target architecture"}}
 ```
 
-`wiki-query` returns bounded excerpts with a `source_ref`. When an excerpt is relevant, read its
-complete source before relying on details:
-
-```json
-{{"source_ref": "the exact source_ref returned by wiki-query"}}
-```
-
-Use that request with `wiki-read`. Wiki protocol versions, snapshot identities, and integrity
-digests are retained by the service and are intentionally absent from Agent-facing results.
+`wiki-query` returns the GPU Wiki's exact `records` mapping and `notes`. Each mapping key is a
+stable Record ID; each value keeps its Store, source, type, scope, match, and isolated payload.
+The payload is the complete safe served Record; no second read step exists. Preserve the exact
+mapping keys of records that materially informed your work. Wiki protocol versions, snapshot
+identities, and integrity digests are intentionally absent from Agent-facing results.
 
 Each `record-experiment` request must contain exactly these fields:
 
@@ -83,7 +83,7 @@ exactly these fields:
   "evaluation_evidence": "authoritative evaluation result identity and outcome",
   "result_interpretation": "what the measurements establish",
   "decision": "keep",
-  "research_sources": ["source_ref values actually used"],
+  "research_sources": ["stable GPU Wiki Record IDs actually used"],
   "lessons": ["reusable positive or negative lesson"],
   "next_directions": ["evidence-backed next direction"]
 }}

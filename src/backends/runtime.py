@@ -19,6 +19,7 @@ from .adapter import (
     CodexAdapter,
     PiAdapter,
     QoderAdapter,
+    credit_usage_from_mapping,
     token_usage_from_mapping,
     token_usage_from_model_usage,
 )
@@ -45,7 +46,7 @@ MAX_CODEX_ROLLOUT_CAPTURE_BYTES = 16 * 1024 * 1024
 
 
 class TokenBudgetObserver(ProcessObserver):
-    """Stop a live coding-Agent process after its reported usage reaches quota."""
+    """Stop a live coding-Agent process after its provider-native usage reaches quota."""
 
     _TRANSIENT_CODEX_ERRORS = (
         "session ledger not found",
@@ -56,15 +57,15 @@ class TokenBudgetObserver(ProcessObserver):
     def __init__(
         self,
         adapter: AgentBackendAdapter,
-        budget: int,
+        budget: float,
         *,
         codex_home_path: Path | None = None,
     ) -> None:
         if budget <= 0:
-            raise ValueError("Agent token budget must be positive")
+            raise ValueError("Agent provider-usage budget must be positive")
         self._adapter = adapter
         self._budget = budget
-        self._used = 0
+        self._used = 0.0
         self._exhausted = False
         self._monitoring_failed = adapter.id == "codex" and codex_home_path is None
         self._seen_message_ids: set[str] = set()
@@ -86,10 +87,10 @@ class TokenBudgetObserver(ProcessObserver):
         with self._lock:
             return self._monitoring_failed
 
-    def _add(self, tokens: int | None) -> bool:
-        if tokens is None or tokens < 0:
+    def _add(self, amount: float | None) -> bool:
+        if amount is None or amount < 0:
             return self._exhausted
-        self._used += tokens
+        self._used += amount
         if self._used >= self._budget:
             self._exhausted = True
         return self._exhausted
@@ -121,8 +122,9 @@ class TokenBudgetObserver(ProcessObserver):
                 return self._exhausted
             if (
                 self._adapter.id == "qodercli"
+                and isinstance(message, Mapping)
                 and isinstance(usage, Mapping)
-                and token_usage_from_mapping(usage).total_tokens == 0
+                and credit_usage_from_mapping(usage).credits is None
             ):
                 self._monitoring_failed = True
                 return True
@@ -130,16 +132,14 @@ class TokenBudgetObserver(ProcessObserver):
                 events, _terminal = self._adapter.normalize_stream(line)
             except Exception:
                 return self._exhausted
-            deltas = [
-                event.usage.total_tokens
+            deltas: list[float | None] = [
+                event.usage.credits if self._adapter.id == "qodercli" else event.usage.total_tokens
                 for event in events
-                if event.kind == "usage_delta"
-                and event.usage is not None
-                and event.usage.total_tokens is not None
+                if event.kind == "usage_delta" and event.usage is not None
             ]
             if deltas and message_id is not None:
                 self._seen_message_ids.add(message_id)
-            return any(self._add(tokens) for tokens in deltas)
+            return any(self._add(amount) for amount in deltas)
 
     def on_stderr_line(self, line: str) -> bool:
         del line
@@ -334,12 +334,14 @@ class CliAgentRuntime:
         session_id: str,
         reasoning_effort: str,
         session_settings: str | None = None,
+        model: str | None = None,
     ) -> list[str]:
         return self._adapter.build_command(
             prompt,
             session_id,
             reasoning_effort,
             self._session_settings() if session_settings is None else session_settings,
+            model,
         )
 
     def _session_settings(self) -> str:
@@ -356,6 +358,7 @@ class CliAgentRuntime:
             session_id,
             request.reasoning_effort,
             request.session_settings,
+            request.model,
         )
         environment = build_session_environment(self.id)
         environment["IS_SANDBOX"] = "1"
@@ -388,12 +391,12 @@ class CliAgentRuntime:
         budget_observer = (
             TokenBudgetObserver(
                 self._adapter,
-                request.token_budget,
+                request.usage_budget,
                 codex_home_path=(
                     codex_temporary_home.path if codex_temporary_home is not None else None
                 ),
             )
-            if request.token_budget is not None
+            if request.usage_budget is not None
             else None
         )
         live_trace_observer = (
@@ -404,9 +407,7 @@ class CliAgentRuntime:
         if live_trace_observer is not None and codex_observer is not None:
             live_trace_observer.attach_codex(codex_observer)
         observers = tuple(
-            observer
-            for observer in (live_trace_observer, budget_observer)
-            if observer is not None
+            observer for observer in (live_trace_observer, budget_observer) if observer is not None
         )
         process_observer = (
             None
@@ -448,7 +449,7 @@ class CliAgentRuntime:
             events, terminal_usage = self._adapter.normalize_stream(stdout)
         except Exception as exc:
             # Observation parsing must not turn a completed Agent run into a failure,
-            # and the existing terminal token budget must remain available.
+            # and the existing terminal provider-usage budget must remain available.
             events = ()
             terminal_usage = terminal_usage_from_stream(stdout)
             observation_errors += (f"stream_normalization_failed:{type(exc).__name__}",)

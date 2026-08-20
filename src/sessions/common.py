@@ -32,7 +32,10 @@ class SessionContext(Protocol):
     def session_trace_path(self) -> Path | None: ...
 
     @property
-    def token_budget(self) -> int: ...
+    def usage_unit(self) -> str: ...
+
+    @property
+    def usage_budget(self) -> float: ...
 
     @property
     def timeout_seconds(self) -> float: ...
@@ -56,30 +59,37 @@ def usage_report(
         usage.cache_read_tokens,
         usage.cache_write_tokens,
     )
-    complete = all(value is not None for value in components) and (
-        usage.measurement == "exact" or (result is not None and result.budget_exhausted)
-    )
+    complete = (
+        usage.credits is not None
+        if context.usage_unit == "credits"
+        else all(value is not None for value in components)
+    ) and (usage.measurement == "exact" or (result is not None and result.budget_exhausted))
     buckets = {
         "uncached_input_tokens": _usage_value(usage.input_tokens),
         "output_tokens": _usage_value(usage.output_tokens),
         "cache_read_tokens": _usage_value(usage.cache_read_tokens),
         "cache_write_tokens": _usage_value(usage.cache_write_tokens),
     }
-    total = sum(buckets.values())
+    credits = usage.credits if context.usage_unit == "credits" else None
+    consumed = credits if credits is not None else float(sum(buckets.values()))
     request_count = (
         sum(1 for event in result.events if event.kind == "usage_delta")
         if result is not None
         else 0
     )
-    if result is not None and result.terminal_usage.total_tokens is not None:
+    if result is not None and (
+        result.terminal_usage.total_tokens is not None or result.terminal_usage.credits is not None
+    ):
         request_count = max(request_count, 1)
     return {
-        "schema_version": 1,
-        "budget_tokens": context.token_budget,
-        "usage": buckets,
-        "total_tokens": total,
+        "schema_version": 2,
+        "usage_unit": context.usage_unit,
+        "budget": context.usage_budget,
+        "consumed": consumed,
+        "token_usage": buckets,
+        "credits": credits,
         "budget_exhausted": (
-            total >= context.token_budget or (result is not None and result.budget_exhausted)
+            consumed >= context.usage_budget or (result is not None and result.budget_exhausted)
         ),
         "session_count": 1 if result is not None else 0,
         "model_request_count": request_count,
@@ -151,6 +161,7 @@ def start_live_trace(
             "schema_version": 1,
             "runtime_id": runtime_id,
             "reasoning_effort": config.reasoning_effort,
+            "model": config.model,
             "runtime_bound": config.runtime_bound,
             "session_settings_sha256": hashlib.sha256(
                 config.session_settings.encode("utf-8")
@@ -256,6 +267,8 @@ def write_trace(
                 "cache_read_tokens": event.usage.cache_read_tokens,
                 "cache_write_tokens": event.usage.cache_write_tokens,
                 "total_tokens": event.usage.total_tokens,
+                "credits": event.usage.credits,
+                "usage_unit": ("credits" if event.usage.credits is not None else "provider_tokens"),
                 "measurement": event.usage.measurement,
             }
         normalized_events.append(
@@ -280,6 +293,7 @@ def write_trace(
             "schema_version": 1,
             "runtime_id": result.runtime_id,
             "reasoning_effort": config.reasoning_effort,
+            "model": config.model,
             "runtime_bound": config.runtime_bound,
             "session_settings_sha256": hashlib.sha256(
                 config.session_settings.encode("utf-8")
@@ -302,7 +316,7 @@ def execute_agent_session(
     *,
     on_success: Callable[[], None] | None = None,
 ) -> int:
-    """Run one backend session and always persist its token report."""
+    """Run one backend session and always persist its provider-usage report."""
     runtime = backends.build_agent_runtime(config.agent_backend)
     result: backends.AgentRunResult | None = None
     session_id = str(uuid.uuid4())
@@ -322,7 +336,8 @@ def execute_agent_session(
                 reasoning_effort=config.reasoning_effort,
                 session_id=session_id,
                 session_settings=config.session_settings,
-                token_budget=context.token_budget,
+                model=config.model,
+                usage_budget=context.usage_budget,
                 live_trace_path=context.session_trace_path if live_trace else None,
             )
         )

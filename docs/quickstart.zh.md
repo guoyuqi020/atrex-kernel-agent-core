@@ -35,8 +35,9 @@ Core 不是独立 Campaign CLI。Runtime 导入精确 Core Commit，准备 Works
 ```
 
 上述字段是 Bundle 独立运行时的默认值。在托管 Session 中，Runtime 会注入权威的
-`ATREX_AGENT_BACKEND`、`ATREX_AGENT_REASONING_EFFORT` 与
-`ATREX_AGENT_SESSION_SETTINGS` 三元组；Core 拒绝不完整 Binding，并使用完整 Binding 覆盖
+`ATREX_AGENT_BACKEND`、`ATREX_AGENT_MODEL`、`ATREX_AGENT_REASONING_EFFORT` 与
+`ATREX_AGENT_SESSION_SETTINGS` Binding；空 Model 表示使用 Backend CLI 默认值。Core 拒绝不完整
+Binding，并使用完整 Binding 覆盖
 这些默认值。Credential 不得写进任一配置层。
 
 ## 3. 发布精确 Commit
@@ -56,11 +57,11 @@ Runtime 校验 Commit/Tree，拒绝不安全内容及未解析或未批准 Submo
 
 ## 4. Bootstrap Campaign
 
-使用 Campaign schema v2。公共字段只写一次，DSL Seed 与初始 Evidence 放在 `lineages`：
+使用 Campaign schema v3。公共字段只写一次，DSL Seed 与初始 Evidence 放在 `lineages`：
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "creation_key": "vector-add-h100",
   "operator": "vector_add",
   "hardware_target": "nvidia-h100",
@@ -74,6 +75,7 @@ Runtime 校验 Commit/Tree，拒绝不安全内容及未解析或未批准 Submo
   "attempts_per_trajectory": 8,
   "lineages": {
     "triton": {
+      "models": {"optimizer": null, "evolver": null},
       "baseline_kernel": "/trusted/inputs/triton-kernel",
       "initial_evidence": "/trusted/inputs/triton-evidence"
     }
@@ -106,7 +108,8 @@ atrex-kernel-agent-runtime run-campaign \
 
 每个 Epoch 从同一 Checkpoint 创建 Active/Challenger Branch，每条 Branch 获得固定数量的全新
 Attempt Session。保留 Kernel 成为同分支下一 Attempt 的 Incumbent；另一分支中间结果不可见。
-Runtime 会独立重新评测每个终止提名，再进行 Kernel 保留与 Agent 晋升。
+Runtime 会对每个终止提名应用配置指定的可信留存策略：普通 A/B Evaluate 与同 Allocation ABBA
+都直接使用其中的 Candidate 测量作为最终 Kernel Evaluation，不再额外执行单边 Eval。
 
 ## 6. Attempt 可见内容
 
@@ -165,4 +168,4 @@ PYTHONPYCACHEPREFIX=/tmp/atrex-core-pycache \
 - Gateway/Wiki Capability 被拒绝：过期、耗尽、撤销或操作未授权。
 - Token Report 不完整：Backend 没有暴露可靠 Usage；Runtime 不会估算。
 - 缺少终态 Report：Agent 退出、超时、耗尽 Budget 或输出无效。
-- Candidate 被拒绝：没有正确探索结果匹配提名，或独立 Runtime-final 评测失败。
+- Candidate 被拒绝：没有正确探索结果匹配提名，或配置指定的 Runtime 终评/ABBA 门禁失败。

@@ -18,6 +18,7 @@ class AgentConfig:
     session_settings: str
     prompt_paths: Mapping[str, Path]
     runtime_bound: bool = False
+    model: str | None = None
 
     @classmethod
     def load(
@@ -36,6 +37,7 @@ class AgentConfig:
             "agent_backend",
             "reasoning_effort",
             "session_settings",
+            "model",
             "prompts",
         }
         unknown = set(value) - allowed
@@ -50,6 +52,9 @@ class AgentConfig:
         settings = value.get("session_settings", "")
         if not isinstance(settings, str):
             raise ValueError("session_settings must be a string")
+        model_value = value.get("model")
+        if model_value is not None:
+            model_value = text_value(model_value, "model")
         prompts = object_value(value.get("prompts"), "Agent prompts")
         expected_prompts = {
             "problem_generalization",
@@ -67,6 +72,7 @@ class AgentConfig:
         binding = os.environ if environment is None else environment
         binding_keys = {
             "ATREX_AGENT_BACKEND",
+            "ATREX_AGENT_MODEL",
             "ATREX_AGENT_REASONING_EFFORT",
             "ATREX_AGENT_SESSION_SETTINGS",
         }
@@ -88,7 +94,11 @@ class AgentConfig:
             settings = binding["ATREX_AGENT_SESSION_SETTINGS"]
             if "\x00" in settings:
                 raise ValueError("Runtime session settings cannot contain NUL")
-        return cls(backend, effort, settings, prompt_paths, runtime_bound)
+            runtime_model = binding["ATREX_AGENT_MODEL"].strip()
+            if "\x00" in runtime_model:
+                raise ValueError("Runtime model cannot contain NUL")
+            model_value = runtime_model or None
+        return cls(backend, effort, settings, prompt_paths, runtime_bound, model_value)
 
     def prompt_path(self, phase: str) -> Path:
         try:
