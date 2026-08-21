@@ -77,6 +77,7 @@ Runtime Manifest 启用 Trace 时，每个阶段写出一个 Session Artifact �
 ```text
 sessions/<name>/
 ├── input/prompt.md
+├── conversation.jsonl                # 完整的可观测对话记录
 ├── provider/stdout.stream-json
 ├── provider/stderr.log
 ├── provider/codex-rollout.raw-jsonl  # 仅 Codex
@@ -84,7 +85,10 @@ sessions/<name>/
 └── session.json                      # 捕获状态与诊断
 ```
 
-Prompt 与 Provider 文件不做脱敏、Event 过滤或文本改写；Provider 实际输出的 Reasoning、工具参数与
+`conversation.jsonl` 先记录 Runtime 实际提交的 User Prompt，再嵌入每条已捕获 Provider stdout
+Event；选择 Codex 时还会包含原始 Rollout，最后记录 Runtime 捕获终态。当 CLI 不导出 Provider
+内置 System Prompt 时，文件会明确标记其不可获取，而不会伪造内容。Prompt 与 Provider 文件不做
+脱敏、Event 过滤或文本改写；Provider 实际输出的 Reasoning、工具参数与
 结果、命令输出及敏感值都会保留。Core 不会主动复制 Provider 从未输出的凭据。输出超过安全上限或
 Codex Rollout 捕获不完整时，阶段会失败，不会把不完整 Trace 伪装成完整结果。Core 在启动前创建
 该固定目录并把 `session.json` 标记为 `running`，进程运行时持续写入 stdout/stderr，并镜像 Codex

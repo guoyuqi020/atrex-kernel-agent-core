@@ -102,7 +102,10 @@ stdout/stderr Capture。
 `session.json` 标记为 `running`，持续写入 Provider stdout/stderr，并在选择 Codex 时周期性镜像
 原始 Rollout。这份 Workspace 视图可实时查看，但还不是权威封存结果。Agent 进程回收后，Core
 删除实时投影，并从有界捕获重建终态目录；终态文件不做脱敏、Event 过滤或文本改写。
-`events.jsonl` 是供 Runtime 投影使用的独立规范化用量索引，不能替代原始文件；终态
+`conversation.jsonl` 是完整的可观测 Transcript，包含 Runtime 输入、每条 Provider stdout
+Event、已捕获的 Codex 原始 Rollout 和捕获终态。CLI 未导出的 Provider 内置 System Prompt 会被
+明确标记为不可获取，不会伪造内容。`events.jsonl` 是供 Runtime 投影使用的独立规范化用量索引，
+不能替代原始文件；终态
 `session.json` 记录捕获完整性和可信进程诊断。输出溢出、Codex Rollout 缺失、不安全的原始文件
 路径或预建/重定向 Trace 路径都会 Fail Closed。安全上限用于阻止无界捕获，但不完整数据绝不会被
 标记为完整。

@@ -133,7 +133,10 @@ It records the exact Prompt, marks `session.json` as `running`, streams Provider
 periodically mirrors the raw Codex rollout when Codex is selected. This Workspace view is live but
 not authoritative or sealed. After the Agent process is reaped, Core removes the live projection
 and rebuilds the final directory from its bounded captures. The final files receive no redaction,
-event filtering, or text rewriting. `events.jsonl` is a separate normalized usage index for Runtime
+event filtering, or text rewriting. `conversation.jsonl` is the complete observable transcript: it
+contains the Runtime input, every Provider stdout event, any captured raw Codex rollout, and the
+terminal capture status. Provider-owned system instructions remain explicitly marked unavailable
+when the CLI does not export them. `events.jsonl` is a separate normalized usage index for Runtime
 projection; it does not replace the raw files. Final `session.json` records capture completeness and
 trusted process diagnostics. An output overflow, missing Codex rollout, unsafe raw-file path, or
 pre-created/redirected Trace path fails closed. Safety bounds prevent unbounded capture, but

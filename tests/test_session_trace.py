@@ -132,6 +132,22 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     assert "raw-tool-secret" in (trace / "provider/stdout.stream-json").read_text()
     assert "raw stderr credential" in (trace / "provider/stderr.log").read_text()
     assert "codex reasoning" in (trace / "provider/codex-rollout.raw-jsonl").read_text()
+    conversation = [
+        json.loads(line) for line in (trace / "conversation.jsonl").read_text().splitlines()
+    ]
+    assert conversation[0]["type"] == "session_start"
+    assert conversation[0]["provider_system_prompt"]["captured"] is False
+    assert conversation[1]["type"] == "message"
+    assert conversation[1]["role"] == "user"
+    assert conversation[1]["content"] == [{"type": "text", "text": prompt}]
+    assert conversation[2]["event"]["provider_credential"] == "Bearer raw-provider-secret"
+    assert any(
+        row.get("path") == "provider/codex-rollout.raw-jsonl"
+        and row.get("event", {}).get("raw") == "codex reasoning and tool result"
+        for row in conversation
+    )
+    assert conversation[-1]["type"] == "session_end"
+    assert conversation[-1]["raw_provider_capture_complete"] is True
     normalized = (trace / "events.jsonl").read_text().splitlines()
     assert json.loads(normalized[0]) == {
         "id": "session-test",
@@ -141,6 +157,8 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     assert all(json.loads(line)["ignorable"] is True for line in normalized[1:])
     metadata = json.loads((trace / "session.json").read_text())
     assert metadata["raw_provider_capture_complete"] is True
+    assert metadata["conversation_capture_complete"] is True
+    assert metadata["provider_system_prompt_capture"] == "provider_managed_unavailable"
     assert metadata["runtime_id"] == "claude"
     assert metadata["reasoning_effort"] == "max"
     assert metadata["model"] == "lineage-model"
@@ -211,6 +229,11 @@ def test_core_projects_provider_streams_while_session_is_running(
         assert observer.on_stderr_line(stderr) is False
         assert (trace / "provider/stdout.stream-json").read_text() == stdout
         assert (trace / "provider/stderr.log").read_text() == stderr
+        live_conversation = [
+            json.loads(line) for line in (trace / "conversation.jsonl").read_text().splitlines()
+        ]
+        assert live_conversation[1]["role"] == "user"
+        assert live_conversation[-1]["event"]["type"] == "result"
         return ProcessResult(stdout, stderr, 0, False, False, ())
 
     runtime = CliAgentRuntime(ClaudeAdapter(), process_runner=fake_runner)
@@ -229,6 +252,11 @@ def test_core_projects_provider_streams_while_session_is_running(
     assert not (trace / ".runtime-live-session").exists()
     assert (trace / "provider/stdout.stream-json").read_text() == stdout
     assert (trace / "provider/stderr.log").read_text() == stderr
+    conversation = [
+        json.loads(line) for line in (trace / "conversation.jsonl").read_text().splitlines()
+    ]
+    assert conversation[1]["content"] == [{"type": "text", "text": "prompt"}]
+    assert conversation[-1]["type"] == "session_end"
 
 
 def test_codex_ledger_normalizes_current_usage_without_cache_write(tmp_path: Path) -> None:

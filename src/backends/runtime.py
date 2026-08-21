@@ -11,6 +11,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
+from session_transcript import encode_records, provider_line_record
+
 from .adapter import (
     DEFAULT_BACKEND_REGISTRY,
     AgentBackendAdapter,
@@ -19,7 +21,6 @@ from .adapter import (
     CodexAdapter,
     PiAdapter,
     QoderAdapter,
-    credit_usage_from_mapping,
     token_usage_from_mapping,
     token_usage_from_model_usage,
 )
@@ -171,6 +172,9 @@ class _LiveSessionTraceObserver(ProcessObserver):
         self._lock = threading.Lock()
         self._stdout = (root / "provider/stdout.stream-json").open("a", encoding="utf-8")
         self._stderr = (root / "provider/stderr.log").open("a", encoding="utf-8")
+        conversation = root / "conversation.jsonl"
+        self._conversation_sequence = len(conversation.read_text(encoding="utf-8").splitlines())
+        self._conversation = conversation.open("a", encoding="utf-8")
         raw_codex = root / "provider/codex-rollout.raw-jsonl"
         self._raw_codex = raw_codex.open("r+b") if raw_codex.is_file() else None
 
@@ -188,6 +192,19 @@ class _LiveSessionTraceObserver(ProcessObserver):
     def on_stdout_line(self, line: str) -> bool:
         with self._lock:
             self._append(self._stdout, line)
+            self._append(
+                self._conversation,
+                encode_records(
+                    (
+                        provider_line_record(
+                            self._conversation_sequence,
+                            path="provider/stdout.stream-json",
+                            line=line.rstrip("\r\n"),
+                        ),
+                    )
+                ),
+            )
+            self._conversation_sequence += 1
             thread_id = codex_thread_id_from_stream(line)
             if thread_id:
                 self._codex_thread_id = thread_id
@@ -225,6 +242,7 @@ class _LiveSessionTraceObserver(ProcessObserver):
         with self._lock:
             self._stdout.close()
             self._stderr.close()
+            self._conversation.close()
             if self._raw_codex is not None:
                 self._raw_codex.close()
 

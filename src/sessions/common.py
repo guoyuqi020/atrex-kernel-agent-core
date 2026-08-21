@@ -15,6 +15,7 @@ from typing import Any, Protocol
 
 import backends
 from agent_config import AgentConfig
+from session_transcript import encode_records, initial_records, render_conversation
 
 _LIVE_TRACE_MARKER = ".runtime-live-session"
 
@@ -151,6 +152,16 @@ def start_live_trace(
     trace_root.mkdir(mode=0o700)
     atomic_text(trace_root / _LIVE_TRACE_MARKER, "unsealed\n")
     atomic_text(trace_root / "input/prompt.md", prompt)
+    atomic_text(
+        trace_root / "conversation.jsonl",
+        encode_records(
+            initial_records(
+                backend=runtime_id,
+                session_id=session_id,
+                prompt=prompt,
+            )
+        ),
+    )
     atomic_text(trace_root / "provider/stdout.stream-json", "")
     atomic_text(trace_root / "provider/stderr.log", "")
     if runtime_id == "codex":
@@ -168,6 +179,8 @@ def start_live_trace(
             ).hexdigest(),
             "session_id": session_id,
             "state": "running",
+            "conversation_capture_complete": False,
+            "provider_system_prompt_capture": "provider_managed_unavailable",
         },
     )
     return True
@@ -190,6 +203,34 @@ def mark_live_trace_interrupted(context: SessionContext, error: BaseException) -
             session = {}
         session["state"] = "interrupted"
         session["error_type"] = type(error).__name__
+        session["conversation_capture_complete"] = False
+        prompt = (trace_root / "input/prompt.md").read_text(encoding="utf-8")
+        stdout = (trace_root / "provider/stdout.stream-json").read_text(encoding="utf-8")
+        raw_provider_files = tuple(
+            (
+                path.relative_to(trace_root).as_posix(),
+                path.read_bytes(),
+            )
+            for path in sorted((trace_root / "provider").rglob("*"))
+            if path.is_file()
+            and path.name not in {"stdout.stream-json", "stderr.log"}
+            and not path.is_symlink()
+        )
+        atomic_text(
+            trace_root / "conversation.jsonl",
+            render_conversation(
+                backend=str(session.get("runtime_id", "unknown")),
+                session_id=str(session.get("session_id", "unknown")),
+                prompt=prompt,
+                stdout=stdout,
+                raw_provider_files=raw_provider_files,
+                state="interrupted",
+                exit_status=None,
+                timed_out=None,
+                raw_provider_capture_complete=False,
+                error_type=type(error).__name__,
+            ),
+        )
         atomic_json(trace_root / "session.json", session)
     except (OSError, UnicodeError, json.JSONDecodeError):
         return
@@ -250,6 +291,20 @@ def write_trace(
     atomic_text(trace_root / "provider/stderr.log", result.stderr)
     for relative, payload in raw_files:
         atomic_bytes(trace_root.joinpath(*relative.parts), payload)
+    atomic_text(
+        trace_root / "conversation.jsonl",
+        render_conversation(
+            backend=result.runtime_id,
+            session_id=result.session_id,
+            prompt=prompt,
+            stdout=result.stdout,
+            raw_provider_files=((path.as_posix(), payload) for path, payload in raw_files),
+            state="finished",
+            exit_status=result.exit_status,
+            timed_out=result.timed_out,
+            raw_provider_capture_complete=result.raw_provider_capture_complete,
+        ),
+    )
 
     normalized_events: list[dict[str, Any]] = [
         {"type": "session", "version": 0, "id": result.session_id}
@@ -303,6 +358,8 @@ def write_trace(
             "exit_status": result.exit_status,
             "timed_out": result.timed_out,
             "raw_provider_capture_complete": result.raw_provider_capture_complete,
+            "conversation_capture_complete": result.raw_provider_capture_complete,
+            "provider_system_prompt_capture": "provider_managed_unavailable",
             "observation_errors": list(result.observation_errors),
             "policy_diagnostics": list(result.policy_diagnostics),
         },
