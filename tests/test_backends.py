@@ -110,22 +110,53 @@ def test_codex_installation_identity_is_a_writable_session_copy(tmp_path: Path) 
         assert temporary.close() is None
 
 
-def test_process_capture_is_bounded(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    import backends.process as process
-
-    monkeypatch.setattr(process, "MAX_CAPTURE_CHARS", 128)
+def test_process_stdout_capture_is_unbounded(tmp_path: Path) -> None:
     result = run_bounded(
         [sys.executable, "-c", "print('x' * 4096, flush=True)"],
         tmp_path,
         timeout=5,
     )
 
-    assert len(result.stdout) <= 128
+    assert len(result.stdout) == 4097
     assert result.stderr == ""
+    assert result.output_overflow is False
+    assert result.policy_diagnostics == ()
+    assert result.returncode == 0
+    assert result.timed_out is False
+
+
+def test_process_filters_thinking_token_events_before_stdout_capture(tmp_path: Path) -> None:
+    thinking = json.dumps({"type": "system", "subtype": "thinking_tokens"}) + "\n"
+    terminal = json.dumps({"type": "result", "usage": {"input_tokens": 3}}) + "\n"
+    payload = thinking * 1000 + terminal
+
+    result = run_bounded(
+        [sys.executable, "-c", f"import sys; sys.stdout.write({payload!r})"],
+        tmp_path,
+        timeout=5,
+    )
+
+    assert result.stdout == terminal
+    assert result.returncode == 0
+    assert result.output_overflow is False
+
+
+def test_process_stderr_capture_remains_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import backends.process as process
+
+    monkeypatch.setattr(process, "MAX_STDERR_CAPTURE_CHARS", 128)
+    result = run_bounded(
+        [sys.executable, "-c", "import sys; print('x' * 4096, file=sys.stderr, flush=True)"],
+        tmp_path,
+        timeout=5,
+    )
+
+    assert result.stdout == ""
+    assert len(result.stderr) <= 128
     assert result.output_overflow is True
-    assert "bounded capture limit" in result.policy_diagnostics[0]
+    assert "stderr exceeded the bounded capture limit" in result.policy_diagnostics[0]
     assert result.returncode != 0
     assert result.timed_out is False
