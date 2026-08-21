@@ -40,9 +40,18 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     sessions = tmp_path / "sessions"
     sessions.mkdir()
     prompt = "private optimizer prompt"
+    thinking_tokens = json.dumps(
+        {
+            "type": "system",
+            "subtype": "thinking_tokens",
+            "estimated_tokens": 18_479,
+            "session_id": "session-test",
+        }
+    )
     stdout = (
         "\n".join(
             (
+                thinking_tokens,
                 json.dumps(
                     {
                         "type": "assistant",
@@ -127,9 +136,10 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
 
     trace = sessions / "core"
     assert (trace / "input/prompt.md").read_text() == prompt
-    assert (trace / "provider/stdout.stream-json").read_text() == stdout
-    assert "raw reasoning" in (trace / "provider/stdout.stream-json").read_text()
-    assert "raw-tool-secret" in (trace / "provider/stdout.stream-json").read_text()
+    provider_stdout = (trace / "provider/stdout.stream-json").read_text()
+    assert thinking_tokens not in provider_stdout
+    assert "raw reasoning" in provider_stdout
+    assert "raw-tool-secret" in provider_stdout
     assert "raw stderr credential" in (trace / "provider/stderr.log").read_text()
     assert "codex reasoning" in (trace / "provider/codex-rollout.raw-jsonl").read_text()
     conversation = [
@@ -159,6 +169,7 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     assert metadata["raw_provider_capture_complete"] is True
     assert metadata["conversation_capture_complete"] is True
     assert metadata["provider_system_prompt_capture"] == "provider_managed_unavailable"
+    assert metadata["provider_event_filters"] == ["system/thinking_tokens"]
     assert metadata["runtime_id"] == "claude"
     assert metadata["reasoning_effort"] == "max"
     assert metadata["model"] == "lineage-model"
@@ -213,6 +224,16 @@ def test_core_projects_provider_streams_while_session_is_running(
         + "\n"
     )
     stderr = "live provider diagnostic\n"
+    thinking_tokens = (
+        json.dumps(
+            {
+                "type": "system",
+                "subtype": "thinking_tokens",
+                "estimated_tokens": 1_024,
+            }
+        )
+        + "\n"
+    )
 
     def fake_runner(
         command: list[str],
@@ -225,6 +246,7 @@ def test_core_projects_provider_streams_while_session_is_running(
         trace = sessions / "core"
         assert json.loads((trace / "session.json").read_text())["state"] == "running"
         assert observer is not None
+        assert observer.on_stdout_line(thinking_tokens) is False
         assert observer.on_stdout_line(stdout) is False
         assert observer.on_stderr_line(stderr) is False
         assert (trace / "provider/stdout.stream-json").read_text() == stdout
@@ -234,7 +256,7 @@ def test_core_projects_provider_streams_while_session_is_running(
         ]
         assert live_conversation[1]["role"] == "user"
         assert live_conversation[-1]["event"]["type"] == "result"
-        return ProcessResult(stdout, stderr, 0, False, False, ())
+        return ProcessResult(thinking_tokens + stdout, stderr, 0, False, False, ())
 
     runtime = CliAgentRuntime(ClaudeAdapter(), process_runner=fake_runner)
     monkeypatch.setattr(backends, "build_agent_runtime", lambda _backend: runtime)
@@ -251,6 +273,7 @@ def test_core_projects_provider_streams_while_session_is_running(
     assert json.loads((trace / "session.json").read_text())["state"] == "finished"
     assert not (trace / ".runtime-live-session").exists()
     assert (trace / "provider/stdout.stream-json").read_text() == stdout
+    assert "thinking_tokens" not in (trace / "conversation.jsonl").read_text()
     assert (trace / "provider/stderr.log").read_text() == stderr
     conversation = [
         json.loads(line) for line in (trace / "conversation.jsonl").read_text().splitlines()

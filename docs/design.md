@@ -132,9 +132,12 @@ When Session capture is enabled, Core creates the Runtime-selected Trace directo
 It records the exact Prompt, marks `session.json` as `running`, streams Provider stdout/stderr, and
 periodically mirrors the raw Codex rollout when Codex is selected. This Workspace view is live but
 not authoritative or sealed. After the Agent process is reaped, Core removes the live projection
-and rebuilds the final directory from its bounded captures. The final files receive no redaction,
-event filtering, or text rewriting. `conversation.jsonl` is the complete observable transcript: it
-contains the Runtime input, every Provider stdout event, any captured raw Codex rollout, and the
+and rebuilds the final directory from its bounded captures. The retained files receive no redaction
+or text rewriting. Core omits only the high-frequency Claude `system/thinking_tokens` estimate
+event from Provider stdout and `conversation.jsonl`; `session.json.provider_event_filters` makes
+that selection explicit, while final authoritative usage remains in `events.jsonl`.
+`conversation.jsonl` contains the Runtime input, every retained Provider stdout event, any captured
+raw Codex rollout, and the
 terminal capture status. Provider-owned system instructions remain explicitly marked unavailable
 when the CLI does not export them. `events.jsonl` is a separate normalized usage index for Runtime
 projection; it does not replace the raw files. Final `session.json` records capture completeness and

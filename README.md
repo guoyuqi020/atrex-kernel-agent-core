@@ -83,7 +83,7 @@ When enabled by the Runtime manifest, each phase writes one Session Artifact dir
 ```text
 sessions/<name>/
 ├── input/prompt.md
-├── conversation.jsonl                # complete observable transcript
+├── conversation.jsonl                # observable retained-event transcript
 ├── provider/stdout.stream-json
 ├── provider/stderr.log
 ├── provider/codex-rollout.raw-jsonl  # Codex only
@@ -91,11 +91,13 @@ sessions/<name>/
 └── session.json                      # capture status and diagnostics
 ```
 
-`conversation.jsonl` starts with the exact Runtime-supplied user Prompt, embeds every captured
+`conversation.jsonl` starts with the exact Runtime-supplied user Prompt, embeds every retained
 Provider stdout event, includes the raw Codex rollout when applicable, and ends with Runtime's
 capture status. It explicitly records that a Provider-managed system Prompt is unavailable when
-the CLI does not export it. Prompt and Provider files are captured without redaction, event
-filtering, or text rewriting;
+the CLI does not export it. Prompt and retained Provider files are captured without redaction or
+text rewriting. The high-frequency Claude `system/thinking_tokens` estimate event is omitted from
+both stdout and the conversation; `session.json.provider_event_filters` records that selection and
+the final authoritative Provider usage remains in `events.jsonl`;
 reasoning, tool arguments/results, command output, and any sensitive values emitted by the Provider
 remain present. Core does not proactively copy credentials that the Provider never emitted. A
 bounded-output overflow or incomplete Codex rollout capture fails the phase instead of silently

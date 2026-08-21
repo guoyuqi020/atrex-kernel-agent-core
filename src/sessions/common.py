@@ -15,7 +15,13 @@ from typing import Any, Protocol
 
 import backends
 from agent_config import AgentConfig
-from session_transcript import encode_records, initial_records, render_conversation
+from session_transcript import (
+    FILTERED_PROVIDER_EVENTS,
+    encode_records,
+    filter_provider_stdout,
+    initial_records,
+    render_conversation,
+)
 
 _LIVE_TRACE_MARKER = ".runtime-live-session"
 
@@ -181,6 +187,7 @@ def start_live_trace(
             "state": "running",
             "conversation_capture_complete": False,
             "provider_system_prompt_capture": "provider_managed_unavailable",
+            "provider_event_filters": list(FILTERED_PROVIDER_EVENTS),
         },
     )
     return True
@@ -286,8 +293,9 @@ def write_trace(
     if trace_root.exists():
         shutil.rmtree(trace_root)
     trace_root.mkdir(mode=0o700)
+    filtered_stdout = filter_provider_stdout(result.stdout)
     atomic_text(trace_root / "input/prompt.md", prompt)
-    atomic_text(trace_root / "provider/stdout.stream-json", result.stdout)
+    atomic_text(trace_root / "provider/stdout.stream-json", filtered_stdout)
     atomic_text(trace_root / "provider/stderr.log", result.stderr)
     for relative, payload in raw_files:
         atomic_bytes(trace_root.joinpath(*relative.parts), payload)
@@ -297,7 +305,7 @@ def write_trace(
             backend=result.runtime_id,
             session_id=result.session_id,
             prompt=prompt,
-            stdout=result.stdout,
+            stdout=filtered_stdout,
             raw_provider_files=((path.as_posix(), payload) for path, payload in raw_files),
             state="finished",
             exit_status=result.exit_status,
@@ -360,6 +368,7 @@ def write_trace(
             "raw_provider_capture_complete": result.raw_provider_capture_complete,
             "conversation_capture_complete": result.raw_provider_capture_complete,
             "provider_system_prompt_capture": "provider_managed_unavailable",
+            "provider_event_filters": list(FILTERED_PROVIDER_EVENTS),
             "observation_errors": list(result.observation_errors),
             "policy_diagnostics": list(result.policy_diagnostics),
         },

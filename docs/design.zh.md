@@ -101,8 +101,9 @@ stdout/stderr Capture。
 启用 Session 捕获时，Core 在启动前创建 Runtime 选定的 Trace 目录，保存精确 Prompt，把
 `session.json` 标记为 `running`，持续写入 Provider stdout/stderr，并在选择 Codex 时周期性镜像
 原始 Rollout。这份 Workspace 视图可实时查看，但还不是权威封存结果。Agent 进程回收后，Core
-删除实时投影，并从有界捕获重建终态目录；终态文件不做脱敏、Event 过滤或文本改写。
-`conversation.jsonl` 是完整的可观测 Transcript，包含 Runtime 输入、每条 Provider stdout
+删除实时投影，并从有界捕获重建终态目录；保留的文件不做脱敏或文本改写。Core 仅省略高频
+Claude `system/thinking_tokens` 估算事件，且在 `session.json.provider_event_filters` 明确记录；
+最终权威 Usage 仍保存在 `events.jsonl`。`conversation.jsonl` 包含 Runtime 输入、每条保留的 Provider stdout
 Event、已捕获的 Codex 原始 Rollout 和捕获终态。CLI 未导出的 Provider 内置 System Prompt 会被
 明确标记为不可获取，不会伪造内容。`events.jsonl` 是供 Runtime 投影使用的独立规范化用量索引，
 不能替代原始文件；终态

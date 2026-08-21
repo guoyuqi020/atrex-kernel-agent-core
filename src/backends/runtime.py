@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
-from session_transcript import encode_records, provider_line_record
+from session_transcript import encode_records, provider_line_record, record_provider_line
 
 from .adapter import (
     DEFAULT_BACKEND_REGISTRY,
@@ -190,6 +190,8 @@ class _LiveSessionTraceObserver(ProcessObserver):
             return
 
     def on_stdout_line(self, line: str) -> bool:
+        if not record_provider_line(line):
+            return False
         with self._lock:
             self._append(self._stdout, line)
             self._append(

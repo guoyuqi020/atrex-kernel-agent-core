@@ -7,6 +7,28 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
+FILTERED_PROVIDER_EVENTS = ("system/thinking_tokens",)
+
+
+def record_provider_line(line: str) -> bool:
+    """Drop only high-frequency Claude token-estimate telemetry from Session evidence."""
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return True
+    return not (
+        isinstance(event, dict)
+        and event.get("type") == "system"
+        and event.get("subtype") == "thinking_tokens"
+    )
+
+
+def filter_provider_stdout(stdout: str) -> str:
+    """Preserve exact retained lines and their original line endings."""
+    return "".join(
+        line for line in stdout.splitlines(keepends=True) if record_provider_line(line)
+    )
+
 
 def _record(sequence: int, record_type: str, source: str, **data: Any) -> dict[str, Any]:
     return {
@@ -147,10 +169,12 @@ def render_conversation(
     raw_provider_capture_complete: bool,
     error_type: str | None = None,
 ) -> str:
-    """Render every captured conversational input and Provider event in one JSONL file."""
+    """Render conversational input and every retained Provider event in one JSONL file."""
     records = initial_records(backend=backend, session_id=session_id, prompt=prompt)
     sequence = len(records)
     for line in stdout.splitlines():
+        if not record_provider_line(line):
+            continue
         records.append(
             provider_line_record(
                 sequence,
