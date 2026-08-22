@@ -63,13 +63,17 @@ Each `record-experiment` request must contain exactly these fields:
   "name": "short experiment name",
   "hypothesis": "falsifiable expected mechanism",
   "change": "exact candidate change, including a reverted change",
+  "candidate_artifact_digest": "sha256 digest returned for the exact tested candidate, or null",
   "evidence": "profile or evaluation result identities and observations",
   "result": "measured outcome and interpretation",
   "decision": "continue"
 }}
 ```
 
-`decision` must be `continue`, `revert`, or `pivot`. Each `attempt-report` request must contain
+Use the `candidate_artifact_digest` returned by the decisive `gateway-execute` call before changing
+or reverting the candidate. Use `null` only when no candidate-bearing Gateway operation ran.
+`decision` must be `continue`, `revert`, or `pivot`. Each
+`attempt-report` request must contain
 exactly these fields:
 
 ```json

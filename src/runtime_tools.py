@@ -37,6 +37,7 @@ _EXPERIMENT_FIELDS = {
     "evidence",
     "result",
     "decision",
+    "candidate_artifact_digest",
 }
 _REPORT_FIELDS = {
     "status",
@@ -237,11 +238,23 @@ def _journal_path(context: RuntimeAttemptContext) -> Path:
 def record_experiment(context: RuntimeAttemptContext, request: dict[str, Any]) -> dict[str, Any]:
     if set(request) != _EXPERIMENT_FIELDS:
         raise ValueError(f"Experiment fields must be exactly {sorted(_EXPERIMENT_FIELDS)}")
-    for key in _EXPERIMENT_FIELDS - {"decision"}:
+    for key in _EXPERIMENT_FIELDS - {"decision", "candidate_artifact_digest"}:
         if not isinstance(request[key], str) or not request[key].strip():
             raise ValueError(f"Experiment {key} must be non-empty text")
     if request["decision"] not in {"continue", "revert", "pivot"}:
         raise ValueError("Experiment decision is invalid")
+    digest = request["candidate_artifact_digest"]
+    if digest is not None and (
+        not isinstance(digest, str)
+        or (
+            not digest.startswith("sha256:")
+            or len(digest) != len("sha256:") + 64
+            or any(
+                character not in "0123456789abcdef" for character in digest.removeprefix("sha256:")
+            )
+        )
+    ):
+        raise ValueError("Experiment candidate_artifact_digest is invalid")
     path = _journal_path(context)
     journal = (
         _read_object(path, "Experiment journal", max_bytes=_MAX_JOURNAL_BYTES)
@@ -303,8 +316,11 @@ def _validated_experiments(context: RuntimeAttemptContext) -> list[dict[str, Any
             datetime.fromisoformat(str(experiment["recorded_at"]).replace("Z", "+00:00"))
         except ValueError as error:
             raise ValueError("Experiment recorded_at must be ISO-8601") from error
-        for field in _EXPERIMENT_FIELDS - {"decision"}:
+        for field in _EXPERIMENT_FIELDS - {"decision", "candidate_artifact_digest"}:
             _text(experiment.get(field), f"Experiment {field}")
+        digest = experiment.get("candidate_artifact_digest")
+        if digest is not None and not isinstance(digest, str):
+            raise ValueError("Experiment candidate_artifact_digest is invalid")
         if experiment.get("decision") not in {"continue", "revert", "pivot"}:
             raise ValueError("Experiment decision is invalid")
     return experiments
@@ -336,7 +352,7 @@ def attempt_report(context: RuntimeAttemptContext, request: dict[str, Any]) -> d
     _text_array(request.get("lessons"), "Attempt report lessons", required=True)
     _text_array(request.get("next_directions"), "Attempt report next_directions")
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "attempt_id": context.attempt_id,
         **request,
         "experiments": experiments,

@@ -30,6 +30,7 @@ def _experiment() -> dict[str, str]:
         "name": "vectorize load",
         "hypothesis": "one transaction replaces two",
         "change": "use a vector load",
+        "candidate_artifact_digest": "sha256:" + "a" * 64,
         "evidence": "evaluation result sha256:example",
         "result": "latency improved",
         "decision": "continue",
@@ -73,7 +74,7 @@ def test_attempt_report_validates_and_atomically_publishes_once(tmp_path: Path) 
 
     report = attempt_report(context, _report())
 
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert json.loads(context.report_path.read_text(encoding="utf-8")) == report
     with pytest.raises(FileExistsError, match="already exists"):
         attempt_report(context, _report())

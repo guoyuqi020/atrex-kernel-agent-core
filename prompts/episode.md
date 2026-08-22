@@ -148,6 +148,7 @@ Never reconstruct the journal only at session end. Include:
 - a short experiment `name`;
 - the falsifiable `hypothesis`;
 - the exact `change`, including reverted changes;
+- the exact `candidate_artifact_digest` returned by `gateway-execute` for that tested source tree;
 - structured `evidence`, including relevant result identities;
 - measured `result` and interpretation; and
 - `decision`: `continue`, `revert`, or `pivot`.
