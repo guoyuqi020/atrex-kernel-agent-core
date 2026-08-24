@@ -19,12 +19,13 @@ def _workspace(root: Path) -> tuple[Path, dict[str, object]]:
         "input/agent-problem",
         "agent/optimizer",
         "work/kernel",
+        "reference",
         "sessions",
         "scratch",
     ):
         (root / relative).mkdir(parents=True, exist_ok=True)
     manifest = {
-        "schema_version": 6,
+        "schema_version": 7,
         "attempt_id": "attempt_0123456789abcdef0123456789abcdef",
         "kernel_agent_revision_id": "agent-revision",
         "input_kernel_revision_id": "kernel-revision",
@@ -50,6 +51,7 @@ def _workspace(root: Path) -> tuple[Path, dict[str, object]]:
             "evidence": "input/evidence",
             "agent_problem": "input/agent-problem",
             "optimizer": "agent/optimizer",
+            "reference": "reference",
         },
     }
     current_attempts = root / "input/evidence/epochs/00000001/attempts"

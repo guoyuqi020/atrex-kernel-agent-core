@@ -17,6 +17,7 @@ and rollback. You own only the writable candidate in this attempt.
 | immutable unified Evidence view | `input/evidence/` |
 | immutable public problem contract | `input/agent-problem/value.json` |
 | immutable implementation and reusable Skills | `agent/optimizer/` |
+| read-only pinned upstream GPU kernel projects | `reference/` |
 | temporary plans, requests, and notes | `scratch/` |
 | GPU sandbox and evaluator | `gateway-execute` |
 | external GPU knowledge | `wiki-query` |
@@ -26,11 +27,16 @@ and rollback. You own only the writable candidate in this attempt.
 Private evaluator inputs and exact shapes are absent. The trusted task context below this Prompt is
 authoritative for the operator, hardware, DSL, and current optimization position.
 
+`reference/` holds complete upstream implementations pinned at a known commit — CUTLASS, Triton,
+FlashAttention, FlashInfer, TileLang, DeepGEMM, Composable Kernel and others. Read it to see how a
+production library expresses a layout, a pipeline stage, or an instruction selection, then write your
+own code. Copying a file wholesale into `work/kernel/` is not an optimization.
+
 ## Execution boundary
 
 - Modify only allowed candidate files under `work/kernel/`; temporary files belong in `scratch/`.
-- Never edit `input/`, `agent/`, `attempt.json`, `sessions/`, evaluator/reference material,
-  credentials, controller state, or service state.
+- Never edit `input/`, `agent/`, `reference/`, `attempt.json`, `sessions/`, evaluator/reference
+  material, credentials, controller state, or service state.
 - Never use Git refs, commits, worktrees, pushes, or chat text as the handoff mechanism.
 - Route every GPU, compiler, JIT, correctness, benchmark, profile, disassembly, and GPU-import probe
   through the `gateway-execute` CLI subcommand.

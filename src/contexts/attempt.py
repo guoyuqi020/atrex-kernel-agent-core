@@ -30,6 +30,7 @@ _EXPECTED_PATHS = {
     "evidence": "input/evidence",
     "agent_problem": "input/agent-problem",
     "optimizer": "agent/optimizer",
+    "reference": "reference",
 }
 _MANIFEST_FIELDS = {
     "schema_version",
@@ -100,7 +101,7 @@ class RuntimeAttemptContext:
         manifest = object_value(
             json.loads(manifest_path.read_text(encoding="utf-8")), "Attempt manifest"
         )
-        if manifest.get("schema_version") != 6:
+        if manifest.get("schema_version") != 7:
             raise ValueError("unsupported Attempt manifest schema_version")
         if set(manifest) != _MANIFEST_FIELDS:
             raise ValueError("Attempt manifest fields do not match the Core protocol")
@@ -260,3 +261,7 @@ class RuntimeAttemptContext:
     @property
     def working_kernel(self) -> Path:
         return self.workspace / _EXPECTED_PATHS["working_kernel"]
+
+    @property
+    def reference(self) -> Path:
+        return self.workspace / _EXPECTED_PATHS["reference"]

@@ -139,6 +139,7 @@ The selected Agent receives fixed paths:
 | unified promoted-lineage/current-Attempt Evidence view | `input/evidence` |
 | public operator contract | `input/agent-problem` |
 | immutable Core Revision | `agent/optimizer` |
+| read-only pinned upstream GPU kernel projects | `reference` |
 | requests, plan, journal, reports | `scratch` |
 | unredacted Agent Session Artifacts and normalized usage index | `sessions` |
 
