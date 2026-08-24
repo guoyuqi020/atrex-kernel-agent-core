@@ -43,7 +43,6 @@ _MANIFEST_FIELDS = {
     "optimizer_digest",
     "dsl",
     "context",
-    "paths",
 }
 _CONTEXT_FIELDS = {
     "campaign_id",
@@ -101,13 +100,10 @@ class RuntimeAttemptContext:
         manifest = object_value(
             json.loads(manifest_path.read_text(encoding="utf-8")), "Attempt manifest"
         )
-        if manifest.get("schema_version") != 7:
+        if manifest.get("schema_version") != 8:
             raise ValueError("unsupported Attempt manifest schema_version")
         if set(manifest) != _MANIFEST_FIELDS:
             raise ValueError("Attempt manifest fields do not match the Core protocol")
-        paths = object_value(manifest.get("paths"), "Attempt manifest paths")
-        if paths != _EXPECTED_PATHS:
-            raise ValueError("Attempt manifest paths do not match the Core protocol")
         for key in (
             "attempt_id",
             "kernel_agent_revision_id",
