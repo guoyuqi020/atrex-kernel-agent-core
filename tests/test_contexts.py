@@ -188,6 +188,7 @@ def test_lineage_bootstrap_context_loads_internal_problem_for_prompt_projection(
         ".runtime",
         "agent/optimizer",
         "work/kernel",
+        "reference",
         "sessions",
         "scratch",
     ):
@@ -216,6 +217,7 @@ def test_lineage_bootstrap_context_loads_internal_problem_for_prompt_projection(
             "working_kernel": "work/kernel",
             "agent_problem": ".runtime/agent-problem.json",
             "optimizer": "agent/optimizer",
+            "reference": "reference",
         },
     }
     manifest_path = tmp_path / ".runtime/lineage-bootstrap.json"

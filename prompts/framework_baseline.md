@@ -15,6 +15,7 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 | immutable reference or seed Kernel | `input/kernel/` |
 | writable baseline candidate copied from the seed | `work/kernel/` |
 | immutable Agent implementation and included Skills | `agent/optimizer/` |
+| read-only pinned upstream GPU kernel projects | `reference/` |
 | writable reusable learned Skills | `skills/` |
 | writable reusable tools and required tool index | `tools/`, `tools/README.md` |
 | temporary plans, requests, and notes | `scratch/` |
@@ -22,14 +23,20 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 Private evaluator inputs and exact cases are absent. The trusted task context below is authoritative
 for the operator, hardware, and DSL.
 
+`reference/` holds complete upstream implementations pinned at a known commit — CUTLASS, Triton,
+FlashAttention, FlashInfer, TileLang, DeepGEMM, Composable Kernel and others, with `reference/README.md`
+listing every project. Read it to see how a production library expresses a layout, a pipeline stage,
+or an instruction selection, then write your own baseline. Copying a file wholesale into
+`work/kernel/` is not a baseline.
+
 ## Execution boundary
 
 - Modify candidate files only under `work/kernel/`; temporary files belong in `scratch/`. Reusable
   methods may be saved under `skills/`, and reusable utilities under `tools/` with a synchronized
   `tools/README.md`. These directories seed every later trajectory; never store credentials or
   one-off measurements in them.
-- Never edit `input/`, `agent/`, the session manifest, session traces, evaluator/reference state,
-  credentials, controller state, or service state.
+- Never edit `input/`, `agent/`, `reference/`, the session manifest, session traces,
+  evaluator/reference state, credentials, controller state, or service state.
 - Never run a compiler, GPU import, JIT, candidate, profiler, or evaluator directly in the shell.
   Use the shared tool contract below for external work and Runtime-local reads.
 - Do not install dependencies, create Git commits or refs, or delegate computation to a third-party
