@@ -63,7 +63,7 @@ def test_attempt_tool_template_lists_exact_agent_facing_cli_commands() -> None:
     instructions = _tool_instructions(config, "triton")
     documented = tuple(
         re.findall(
-            r"^python agent/optimizer/src/runtime_tools\.py ([a-z-]+) --request",
+            r"^python3 agent/optimizer/src/runtime_tools\.py ([a-z-]+) --request",
             instructions,
             re.MULTILINE,
         )

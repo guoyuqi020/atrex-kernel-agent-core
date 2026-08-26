@@ -131,11 +131,11 @@ Runtime 会对每个终止提名应用配置指定的可信留存策略：普通
 Agent 使用 Prompt 声明的精确命令：
 
 ```bash
-python agent/optimizer/src/runtime_tools.py gateway-execute --request scratch/evaluate.json
-python agent/optimizer/src/runtime_tools.py wiki-query --request scratch/wiki.json
-python agent/optimizer/src/runtime_tools.py update-direction --request scratch/direction.json
-python agent/optimizer/src/runtime_tools.py record-experiment --request scratch/experiment.json
-python agent/optimizer/src/runtime_tools.py attempt-report --request scratch/report.json
+python3 agent/optimizer/src/runtime_tools.py gateway-execute --request scratch/evaluate.json
+python3 agent/optimizer/src/runtime_tools.py wiki-query --request scratch/wiki.json
+python3 agent/optimizer/src/runtime_tools.py update-direction --request scratch/direction.json
+python3 agent/optimizer/src/runtime_tools.py record-experiment --request scratch/experiment.json
+python3 agent/optimizer/src/runtime_tools.py attempt-report --request scratch/report.json
 ```
 
 Agent 必须先创建并启动 Direction，再记录其 Experiment。可通过

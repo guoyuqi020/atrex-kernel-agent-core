@@ -4,18 +4,18 @@ Use the following exact CLI subcommand names; there are no function-style aliase
 write one JSON request under `scratch/`, then run exactly one of:
 
 ```text
-python {{RUNTIME_TOOL}} gateway-execute --request scratch/<request>.json
-python {{RUNTIME_TOOL}} kernel-trial-show --request scratch/<request>.json
-python {{RUNTIME_TOOL}} kernel-artifact-read --request scratch/<request>.json
-python {{RUNTIME_TOOL}} gateway-result-read --request scratch/<request>.json
-python {{RUNTIME_TOOL}} wiki-query --request scratch/<request>.json
-python {{RUNTIME_TOOL}} update-direction --request scratch/<request>.json
-python {{RUNTIME_TOOL}} list-directions --request scratch/<request>.json
-python {{RUNTIME_TOOL}} load-direction --request scratch/<request>.json
-python {{RUNTIME_TOOL}} record-experiment --request scratch/<request>.json
-python {{RUNTIME_TOOL}} list-experiments --request scratch/<request>.json
-python {{RUNTIME_TOOL}} load-experiment --request scratch/<request>.json
-python {{RUNTIME_TOOL}} attempt-report --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} gateway-execute --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} kernel-trial-show --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} kernel-artifact-read --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} gateway-result-read --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} wiki-query --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} update-direction --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} list-directions --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} load-direction --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} record-experiment --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} list-experiments --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} load-experiment --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} attempt-report --request scratch/<request>.json
 ```
 
 `gateway-execute` automatically attaches the exact current `work/kernel` tree and trusted Runtime

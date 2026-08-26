@@ -151,19 +151,19 @@ The private Evaluation Contract and exact hidden cases are never placed in this 
 uses Runtime tools described in the phase Prompt:
 
 ```bash
-python agent/optimizer/src/runtime_tools.py gateway-execute \
+python3 agent/optimizer/src/runtime_tools.py gateway-execute \
   --request scratch/evaluate.json
 
-python agent/optimizer/src/runtime_tools.py wiki-query \
+python3 agent/optimizer/src/runtime_tools.py wiki-query \
   --request scratch/wiki.json
 
-python agent/optimizer/src/runtime_tools.py update-direction \
+python3 agent/optimizer/src/runtime_tools.py update-direction \
   --request scratch/direction.json
 
-python agent/optimizer/src/runtime_tools.py record-experiment \
+python3 agent/optimizer/src/runtime_tools.py record-experiment \
   --request scratch/experiment.json
 
-python agent/optimizer/src/runtime_tools.py attempt-report \
+python3 agent/optimizer/src/runtime_tools.py attempt-report \
   --request scratch/report.json
 ```
 
