@@ -19,8 +19,6 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 | writable reusable tools and required tool index | `tools/`, `tools/README.md` |
 | temporary plans, requests, and notes | `scratch/` |
 
-The exact Runtime tool commands and schemas appear once in the shared tool contract below.
-
 Private evaluator inputs and exact cases are absent. The trusted task context below is authoritative
 for the operator, hardware, and DSL.
 
@@ -33,10 +31,7 @@ for the operator, hardware, and DSL.
 - Never edit `input/`, `agent/`, the session manifest, session traces, evaluator/reference state,
   credentials, controller state, or service state.
 - Never run a compiler, GPU import, JIT, candidate, profiler, or evaluator directly in the shell.
-  Use only the supplied `gateway-execute` and `wiki-query` CLI subcommands for external work.
-- Route Runtime-local Trial, source, and result reads through their dedicated query subcommands.
-  `kernel-artifact-read` writes the selected Artifact file atomically to its required destination
-  under `scratch/`; inspect that file after success because source content is never printed.
+  Use the shared tool contract below for external work and Runtime-local reads.
 - Do not install dependencies, create Git commits or refs, or delegate computation to a third-party
   prebuilt operator.
 - The task context fixes the DSL and hardware target. Do not select another DSL.
@@ -60,10 +55,8 @@ properties but never evaluator identities, hidden input values, or reconstructed
 ### 2. Learn only what is needed
 
 After the minimal operator-contract review, choose one baseline-construction hypothesis and
-immediately use `update-direction` to propose and start its Direction. Direction covers the whole
-research and exploration path, not only later measured experiments. Register it before any
-approach-specific Wiki/reference research, Dev/Check/Evaluate, tool construction, or Kernel edit;
-a provider task entry or scratch plan does not count.
+immediately follow the shared Direction contract below to propose and start it before any
+direction-specific work.
 
 When `wiki-query` is available, query only for the actual architecture, DSL, operator, and mechanism.
 Preserve stable Record IDs for knowledge actually used. If Wiki authority is unavailable, continue

@@ -99,7 +99,7 @@ def test_bootstrap_prompt_matches_special_attempt_protocol() -> None:
     assert "Do not use `pivot` during Bootstrap" in baseline
     assert "complete private Bootstrap Gate independently" in baseline
     assert "Set `profile_evidence` to `null` unless profiling was actually" in baseline
-    assert "The exact Runtime tool commands and schemas appear once" in baseline
+    assert "Use the shared tool contract below" in baseline
     assert "provenance and decisions" not in baseline
     assert "Example exploratory evaluation request" in tools
     assert "authoritative evaluation request" not in tools
