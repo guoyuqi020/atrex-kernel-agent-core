@@ -59,6 +59,12 @@ properties but never evaluator identities, hidden input values, or reconstructed
 
 ### 2. Learn only what is needed
 
+After the minimal operator-contract review, choose one baseline-construction hypothesis and
+immediately use `update-direction` to propose and start its Direction. Direction covers the whole
+research and exploration path, not only later measured experiments. Register it before any
+approach-specific Wiki/reference research, Dev/Check/Evaluate, tool construction, or Kernel edit;
+a provider task entry or scratch plan does not count.
+
 When `wiki-query` is available, query only for the actual architecture, DSL, operator, and mechanism.
 Preserve stable Record IDs for knowledge actually used. If Wiki authority is unavailable, continue
 from the seed, included Skills, and public contract; Wiki absence alone is not a blocker. Stop once one
@@ -66,7 +72,7 @@ viable approach has adequate support and keep its actionable constraints in `scr
 
 ### 3. Establish the first self-contained DSL Kernel
 
-First propose and start one baseline-construction Direction. Inspect the writable copy under
+Under the already-started baseline-construction Direction, inspect the writable copy under
 `work/kernel/`. If it is already a complete, self-contained implementation in the bound DSL, you
 may evaluate that unchanged copy and use it as the first measured construction. Otherwise modify
 only `work/kernel/` while preserving the evaluator-facing entrypoint and metadata contract.

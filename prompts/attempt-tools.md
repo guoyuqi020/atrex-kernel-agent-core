@@ -103,7 +103,14 @@ Its `supporting_experiment_ids` automatically includes every visible Experiment 
 `direction_id` names that Direction, together with associations snapshotted internally by prior
 Direction status events.
 
-Create a Direction before starting experiments:
+A Direction is the durable unit of research and exploration for one causal hypothesis, not merely
+an Experiment container. Minimal orientation may inspect the contract, incumbent, Journal indexes,
+and generic Runtime state. Once you choose an approach, immediately `propose` and `start` its
+Direction before direction-specific Wiki/reference research, Dev/Check/Profile/Evaluate,
+disassembly, tool construction, or source edits. `TaskCreate`, scratch plans, and prose do not
+register it; never postpone registration until measurement or `record-experiment`.
+
+Propose a Direction with:
 
 ```json
 {
@@ -117,17 +124,13 @@ Create a Direction before starting experiments:
 }
 ```
 
-Then use `update-direction` with the returned `direction_id`, an action of `start`, `complete`,
-`abandon`, `block`, or `defer`, and a non-empty `analysis`. Do not provide Experiment IDs: the tool
-derives them from visible Experiments bound to the Direction. Start the Direction before recording
-its Experiments. `complete` and `abandon` require at least one associated Experiment. Direction
-updates are appended rather than overwriting prior history. One Attempt may start and advance at
-most three distinct Directions, including inherited Directions and Directions proposed in this
-Attempt. A proposal alone does not consume this limit. You may propose any number of genuinely
-necessary, non-duplicate future Directions, and the terminal report does not limit how many remain
-`proposed` or `deferred`. No Direction may remain `in_progress` at terminal handoff. If a started
-Direction has no Experiment, use `defer` or `block`; `complete` and `abandon` require supporting
-Experiments.
+Then call `update-direction` with the returned `direction_id`, an action of `start`, `complete`,
+`abandon`, `block`, or `defer`, and non-empty `analysis`. Runtime derives Experiment links; do not
+provide them. Events append to history. One Attempt may advance at most three inherited or new
+Directions; proposals do not consume the limit, and any number of useful non-duplicate future
+Directions may remain `proposed` or `deferred`. None may remain `in_progress` at handoff. A started
+Direction without an Experiment must use `defer` or `block`; `complete` and `abandon` require
+supporting Experiments.
 
 `wiki-query` returns the GPU Wiki's exact `records` mapping and `notes`. Each mapping key is a
 stable Record ID; each value keeps its Store, source, type, scope, match, and isolated payload.

@@ -138,8 +138,10 @@ python3 agent/optimizer/src/runtime_tools.py record-experiment --request scratch
 python3 agent/optimizer/src/runtime_tools.py attempt-report --request scratch/report.json
 ```
 
-Agent 必须先创建并启动 Direction，再记录其 Experiment。可通过
-`list-directions`/`load-direction` 与 `list-experiments`/`load-experiment` 查询历史。
+Agent 一旦选定一个研究或探索假设，就必须立即创建并启动 Direction，然后才能开展该
+Direction 专属的知识查询、探测、工具编写、代码修改或测量。Direction 覆盖完整探索路径，
+而不只是其中的 Experiment。可通过 `list-directions`/`load-direction` 与
+`list-experiments`/`load-experiment` 查询历史。
 Request 必须是 `scratch/` 下受限的 Regular JSON File。新内容使用新 Idempotency Key；只有完全相同
 的 Request 才能重放同一个 Key。
 
