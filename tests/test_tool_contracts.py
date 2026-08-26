@@ -126,3 +126,23 @@ def test_direction_limit_recovery_says_not_to_retry_start() -> None:
     assert "direction_advancement_limit_exceeded" in instruction
     assert "requested Direction was not started" in instruction
     assert "do not retry start in the current Attempt" in instruction
+
+
+def test_direction_concurrency_recovery_says_to_close_the_active_direction() -> None:
+    recovery = tool_recovery("update-direction")
+
+    assert recovery is not None
+    instruction = next(
+        item["instruction"]
+        for item in recovery
+        if "direction_concurrency_conflict" in item.get("instruction", "")
+    )
+    assert "continue the existing in-progress Direction" in instruction
+    assert "complete, abandon, defer, or block" in instruction
+    assert "Retry start only after no other Direction is in progress" in instruction
+
+    issue = local_validation_issue(
+        "Only one Direction may be in progress at a time: requested_direction_id=direction_b"
+    )
+    assert issue["path"] == "direction_id"
+    assert issue["code"] == "direction_concurrency_conflict"

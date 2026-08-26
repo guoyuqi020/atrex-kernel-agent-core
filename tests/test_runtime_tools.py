@@ -170,6 +170,21 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                     }
                     if direction_id not in started and len(started) >= 3:
                         raise ValueError("Direction advancement limit exceeded: maximum=3")
+                    in_progress = sorted(
+                        visible_direction_id
+                        for visible_direction_id, visible_direction in _fake_direction_views(
+                            context
+                        ).items()
+                        if visible_direction["status"] == "in_progress"
+                        and visible_direction_id != direction_id
+                    )
+                    if in_progress:
+                        raise ValueError(
+                            "Only one Direction may be in progress at a time: "
+                            f"requested_direction_id={direction_id}; "
+                            f"in_progress_direction_ids={in_progress}. "
+                            "The requested Direction was not started"
+                        )
                 if action in {"complete", "abandon"} and not direction["supporting_experiment_ids"]:
                     raise ValueError(
                         f"Direction {action} requires at least one associated Experiment"
@@ -748,6 +763,52 @@ def test_attempt_may_advance_at_most_three_distinct_directions(tmp_path: Path) -
             },
         )
 
+
+def test_attempt_may_explore_only_one_direction_at_a_time(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    first = _propose_and_start_direction(context)
+    second = update_direction(
+        context,
+        {
+            "action": "propose",
+            "name": "second hypothesis",
+            "hypothesis": "another mechanism may improve latency",
+            "rationale": "the mechanism is independent",
+            "plan": ["test the second mechanism"],
+            "success_criteria": "latency improves",
+            "stop_conditions": "the mechanism is falsified",
+        },
+    )["direction_id"]
+
+    with pytest.raises(ValueError, match="Only one Direction may be in progress at a time"):
+        update_direction(
+            context,
+            {
+                "action": "start",
+                "direction_id": second,
+                "analysis": "incorrectly interleave two explorations",
+            },
+        )
+    assert load_direction(context, {"direction_id": first})["status"] == "in_progress"
+    assert load_direction(context, {"direction_id": second})["status"] == "proposed"
+
+    update_direction(
+        context,
+        {
+            "action": "defer",
+            "direction_id": first,
+            "analysis": "pause this exploration before switching",
+        },
+    )
+    update_direction(
+        context,
+        {
+            "action": "start",
+            "direction_id": second,
+            "analysis": "begin only after the first Direction is closed",
+        },
+    )
+    assert load_direction(context, {"direction_id": second})["status"] == "in_progress"
 
 def test_attempt_report_rejects_unexperimented_direction_left_in_progress(
     tmp_path: Path,

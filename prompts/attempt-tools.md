@@ -103,12 +103,11 @@ Its `supporting_experiment_ids` automatically includes every visible Experiment 
 `direction_id` names that Direction, together with associations snapshotted internally by prior
 Direction status events.
 
-A Direction is the durable unit of research and exploration for one causal hypothesis, not merely
-an Experiment container. Minimal orientation may inspect the contract, incumbent, Journal indexes,
-and generic Runtime state. Once you choose an approach, immediately `propose` and `start` its
-Direction before direction-specific Wiki/reference research, Dev/Check/Profile/Evaluate,
-disassembly, tool construction, or source edits. `TaskCreate`, scratch plans, and prose do not
-register it; never postpone registration until measurement or `record-experiment`.
+A Direction is the durable unit of research and exploration for one causal hypothesis, not an
+Experiment container. Before choosing one, inspect only the contract, incumbent, Journal indexes,
+and generic Runtime state. Once chosen, immediately `propose` and `start` it before its Wiki/reference
+research, Dev/Check/Profile/Evaluate, disassembly, tools, or source edits. `TaskCreate`, scratch
+plans, and prose do not register it; do not wait for measurement or `record-experiment`.
 
 Propose a Direction with:
 
@@ -126,11 +125,12 @@ Propose a Direction with:
 
 Then call `update-direction` with the returned `direction_id`, an action of `start`, `complete`,
 `abandon`, `block`, or `defer`, and non-empty `analysis`. Runtime derives Experiment links; do not
-provide them. Events append to history. One Attempt may advance at most three inherited or new
-Directions; proposals do not consume the limit, and any number of useful non-duplicate future
-Directions may remain `proposed` or `deferred`. None may remain `in_progress` at handoff. A started
-Direction without an Experiment must use `defer` or `block`; `complete` and `abandon` require
-supporting Experiments.
+provide them. Events append to history. An Attempt may advance at most three inherited or new
+Directions; proposals are unlimited and do not consume this limit. Only one Direction may be
+`in_progress` at a time: do not interleave their research, tools, edits, or measurements. Before
+starting another, close the current one with `complete`, `abandon`, `defer`, or `block`. None may
+remain `in_progress` at handoff. Without an Experiment use `defer` or `block`; `complete` and
+`abandon` require supporting Experiments.
 
 `wiki-query` returns the GPU Wiki's exact `records` mapping and `notes`. Each mapping key is a
 stable Record ID; each value keeps its Store, source, type, scope, match, and isolated payload.

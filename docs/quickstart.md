@@ -170,7 +170,9 @@ python3 agent/optimizer/src/runtime_tools.py attempt-report \
 Create and start a Direction as soon as one research or exploration hypothesis is selected, before
 its direction-specific research, probes, tools, edits, or measurements. A Direction covers the
 whole exploration path rather than only its Experiments. Direction and Experiment history can be
-inspected with `list-directions`/`load-direction` and `list-experiments`/`load-experiment`.
+inspected with `list-directions`/`load-direction` and `list-experiments`/`load-experiment`. Any
+number of distinct Directions may be proposed, but only one may be `in_progress`; close it before
+starting another.
 Exact request schemas are enforced by the tool and Runtime protocols. Core assigns request identity
 for Gateway and Wiki calls; Agent requests must not provide one.
 

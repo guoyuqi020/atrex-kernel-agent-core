@@ -242,6 +242,13 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         },
         {
             "instruction": (
+                "When direction_concurrency_conflict is returned, continue the existing "
+                "in-progress Direction or close it with complete, abandon, defer, or block. "
+                "Retry start only after no other Direction is in progress"
+            )
+        },
+        {
+            "instruction": (
                 "When direction_advancement_limit_exceeded is returned, the requested Direction "
                 "was not started. Keep it proposed or deferred for a future Attempt; do not retry "
                 "start in the current Attempt"
@@ -303,6 +310,7 @@ _PATH_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"supporting_experiment_ids", re.I), "findings.supporting_experiment_ids"),
     (re.compile(r"final_candidate", re.I), "final_candidate"),
     (re.compile(r"cannot leave any Direction in progress", re.I), "direction_events"),
+    (re.compile(r"Only one Direction may be in progress", re.I), "direction_id"),
     (re.compile(r"Direction advancement limit exceeded", re.I), "direction_id"),
     (re.compile(r"Experiment Direction", re.I), "direction_id"),
     (re.compile(r"direction[_ ]id", re.I), "direction_id"),
@@ -339,6 +347,8 @@ def local_validation_issue(detail: str) -> dict[str, str]:
         code = "not_visible"
     elif "direction advancement limit exceeded" in lowered:
         code = "direction_advancement_limit_exceeded"
+    elif "only one direction may be in progress" in lowered:
+        code = "direction_concurrency_conflict"
     elif "in progress" in lowered or "status" in lowered or "transition" in lowered:
         code = "invalid_state"
     elif "exceeds" in lowered or "at most" in lowered or "byte limit" in lowered:
