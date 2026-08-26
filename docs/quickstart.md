@@ -33,6 +33,9 @@ Edit `atrex-agent.json` before committing the Core Revision:
     "problem_generalization": "prompts/generalize_agent_problem.md",
     "framework_baseline": "prompts/framework_baseline.md",
     "optimization_attempt": "prompts/episode.md"
+  },
+  "prompt_fragments": {
+    "attempt_tools": "prompts/attempt-tools.md"
   }
 }
 ```
@@ -137,9 +140,10 @@ The selected Agent receives fixed paths:
 | immutable incumbent Kernel | `input/kernel` |
 | writable candidate Kernel | `work/kernel` |
 | unified promoted-lineage/current-Attempt Evidence view | `input/evidence` |
-| public operator contract | `input/agent-problem` |
+| public operator contract | injected directly into the final Prompt |
 | immutable Core Revision | `agent/optimizer` |
 | read-only pinned upstream GPU kernel projects | `reference` |
+| reusable methods and tools | `skills`, `tools` |
 | requests, plan, journal, reports | `scratch` |
 | unredacted Agent Session Artifacts and normalized usage index | `sessions` |
 
@@ -153,6 +157,9 @@ python agent/optimizer/src/runtime_tools.py gateway-execute \
 python agent/optimizer/src/runtime_tools.py wiki-query \
   --request scratch/wiki.json
 
+python agent/optimizer/src/runtime_tools.py update-direction \
+  --request scratch/direction.json
+
 python agent/optimizer/src/runtime_tools.py record-experiment \
   --request scratch/experiment.json
 
@@ -160,12 +167,15 @@ python agent/optimizer/src/runtime_tools.py attempt-report \
   --request scratch/report.json
 ```
 
-Exact request schemas are enforced by the tool and Runtime protocols. Use a new idempotency key for
-new Gateway/Wiki content; replay the same key only with an identical request.
+Create and start a Direction before recording its Experiments. Direction and Experiment history can
+be inspected with `list-directions`/`load-direction` and `list-experiments`/`load-experiment`.
+Exact request schemas are enforced by the tool and Runtime protocols. Core assigns request identity
+for Gateway and Wiki calls; Agent requests must not provide one.
 
 Every Agent `evaluate` retains the exact candidate files and raw outcome. It does not finalize the
-Attempt. `candidate_ready` nominates the current `work/kernel`; Runtime performs the authoritative
-fresh evaluation after Core exits.
+Attempt. `candidate_ready` nominates the current `work/kernel`; Runtime applies the configured
+ordinary or ABBA retention comparison to sealed authoritative Gateway measurements without an
+unconditional extra one-sided evaluation.
 
 The Worker receives the short-lived scoped capability used by these calls, but never receives the
 upstream Agate or Wiki service credential. Runtime authorization remains authoritative for direct as
@@ -205,6 +215,6 @@ standalone optimizer. That bypasses the system boundary the Core protocol is des
   estimate it.
 - **No terminal report:** the Agent exited, timed out, or exhausted budget before publishing a valid
   phase result.
-- **Candidate rejected:** no correct exploratory result matched the nomination, or the independent
-  Runtime-final evaluation failed;
+- **Candidate rejected:** no correct exploratory result matched the nomination, or the configured
+  retention comparison rejected it;
   inspect immutable Runtime Evidence rather than local process memory.

@@ -3,100 +3,45 @@
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Mapping
 
 from agent_config import AgentConfig
 from contexts.attempt import RuntimeAttemptContext
 
-from .common import execute_agent_session, guarded_main
+from .common import execute_agent_session, guarded_main, public_operator_contract
+
+_RUNTIME_TOOL = "agent/optimizer/src/runtime_tools.py"
+_TEMPLATE_PLACEHOLDER = re.compile(r"\{\{([^{}\n]+)\}\}")
 
 
-def _tool_instructions(dsl: str) -> str:
-    tool = "agent/optimizer/src/runtime_tools.py"
-    return f"""
-## Session tools
+def _render_prompt_fragment(template: str, replacements: Mapping[str, str]) -> str:
+    placeholders = set(_TEMPLATE_PLACEHOLDER.findall(template))
+    expected = set(replacements)
+    if placeholders != expected:
+        missing = sorted(expected - placeholders)
+        unknown = sorted(placeholders - expected)
+        raise ValueError(
+            "Prompt fragment placeholder contract mismatch: "
+            f"missing={missing}, unknown={unknown}"
+        )
+    rendered = template
+    for name, value in replacements.items():
+        rendered = rendered.replace("{{" + name + "}}", value)
+    if "{{" in rendered or "}}" in rendered:
+        raise ValueError("Prompt fragment contains an invalid or unresolved placeholder")
+    return rendered.strip()
 
-Use the following exact CLI subcommand names; there are no function-style aliases. For each call,
-write one JSON request under `scratch/`, then run exactly one of:
 
-```text
-python {tool} gateway-execute --request scratch/<request>.json
-python {tool} wiki-query --request scratch/<request>.json
-python {tool} record-experiment --request scratch/<request>.json
-python {tool} attempt-report --request scratch/<request>.json
-```
-
-`gateway-execute` automatically attaches the exact current `work/kernel` tree, the trusted Attempt
-identity, and a deterministic idempotency key. Never embed a candidate, schema version, capability,
-or attempt id in its request. Example profile request:
-
-```json
-{{"operation": "profile", "level": "survey"}}
-```
-
-Evaluation results identify private cases only by opaque `shape_id` and never reveal their inputs.
-After an evaluation, a profile request may add `"shape_id":"<opaque id>"` to profile that one real
-case; omitting it selects one evaluator-owned case. Do not infer or reconstruct case inputs from ids
-or measurements.
-
-Example authoritative evaluation request:
-
-```json
-{{"operation": "evaluate"}}
-```
-
-Example knowledge query request:
-
-```json
-{{"query": "{dsl} vectorized load requirements for the target architecture"}}
-```
-
-`wiki-query` returns the GPU Wiki's exact `records` mapping and `notes`. Each mapping key is a
-stable Record ID; each value keeps its Store, source, type, scope, match, and isolated payload.
-The payload is the complete safe served Record; no second read step exists. Preserve the exact
-mapping keys of records that materially informed your work. Wiki protocol versions, snapshot
-identities, and integrity digests are intentionally absent from Agent-facing results.
-
-Each `record-experiment` request must contain exactly these fields:
-
-```json
-{{
-  "name": "short experiment name",
-  "hypothesis": "falsifiable expected mechanism",
-  "change": "exact candidate change, including a reverted change",
-  "candidate_artifact_digest": "sha256 digest returned for the exact tested candidate, or null",
-  "evidence": "profile or evaluation result identities and observations",
-  "result": "measured outcome and interpretation",
-  "decision": "continue"
-}}
-```
-
-Use the `candidate_artifact_digest` returned by the decisive `gateway-execute` call before changing
-or reverting the candidate. Use `null` only when no candidate-bearing Gateway operation ran.
-`decision` must be `continue`, `revert`, or `pivot`. Each
-`attempt-report` request must contain
-exactly these fields:
-
-```json
-{{
-  "status": "candidate_ready",
-  "hypothesis": "tested hypothesis",
-  "bottleneck": "localized bottleneck",
-  "plan": ["ordered step"],
-  "change_summary": "exact final candidate change",
-  "profile_evidence": "profile result identities or why profiling was unnecessary",
-  "evaluation_evidence": "authoritative evaluation result identity and outcome",
-  "result_interpretation": "what the measurements establish",
-  "decision": "keep",
-  "research_sources": ["stable GPU Wiki Record IDs actually used"],
-  "lessons": ["reusable positive or negative lesson"],
-  "next_directions": ["evidence-backed next direction"]
-}}
-```
-
-Use only `candidate_ready`/`keep`, `pivot`/`pivot`, or `blocked`/`blocked` as the status/decision
-pair. Do not include the experiment journal in the terminal request; the CLI attaches it. Do not run
-GPU, compiler, JIT, profiler, or evaluator work outside these bindings.
-""".strip()
+def _tool_instructions(config: AgentConfig, dsl: str) -> str:
+    template = config.prompt_fragment_path("attempt_tools").read_text(encoding="utf-8")
+    return _render_prompt_fragment(
+        template,
+        {
+            "DSL": dsl,
+            "RUNTIME_TOOL": _RUNTIME_TOOL,
+        },
+    )
 
 
 def _trusted_context(context: RuntimeAttemptContext) -> str:
@@ -123,9 +68,10 @@ def render_prompt(context: RuntimeAttemptContext, config: AgentConfig) -> str:
         "\n\n".join(
             (
                 base,
+                public_operator_contract(context.agent_problem),
                 context.evidence_prompt.rstrip(),
                 _trusted_context(context),
-                _tool_instructions(dsl),
+                _tool_instructions(config, dsl),
             )
         )
         + "\n"

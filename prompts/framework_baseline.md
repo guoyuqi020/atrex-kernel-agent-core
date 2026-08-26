@@ -1,8 +1,8 @@
 # Lineage framework baseline
 
-Own one clean, bounded `framework_baseline` session. Convert the immutable reference or seed Kernel
-into the first correct, self-contained Kernel in the lineage's fixed DSL, evaluate it through the
-supplied evaluation service, publish one terminal lineage-bootstrap report, and stop.
+Own one clean, bounded `framework_baseline` session. Establish from the immutable reference or seed
+the first correct, self-contained Kernel in the lineage's fixed DSL, evaluate it through the
+supplied evaluation service, publish one terminal Attempt report, and stop.
 
 This is framework bring-up, not an optimization epoch. A correct candidate is valid even when it is
 slower than the reference. Prefer the simplest robust implementation; do not profile broadly, chase
@@ -14,23 +14,29 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 | --- | --- |
 | immutable reference or seed Kernel | `input/kernel/` |
 | writable baseline candidate copied from the seed | `work/kernel/` |
-| immutable public problem contract | `input/agent-problem/value.json` |
-| immutable implementation and reusable Skills | `agent/optimizer/` |
+| immutable Agent implementation and included Skills | `agent/optimizer/` |
+| writable reusable learned Skills | `skills/` |
+| writable reusable tools and required tool index | `tools/`, `tools/README.md` |
 | temporary plans, requests, and notes | `scratch/` |
-| compiler, GPU, correctness, and benchmark | `gateway-execute` |
-| external GPU knowledge | `wiki-query` |
-| terminal lineage handoff | `lineage-bootstrap-report` |
+
+The exact Runtime tool commands and schemas appear once in the shared tool contract below.
 
 Private evaluator inputs and exact cases are absent. The trusted task context below is authoritative
 for the operator, hardware, and DSL.
 
 ## Execution boundary
 
-- Modify only allowed candidate files under `work/kernel/`; temporary files belong in `scratch/`.
+- Modify candidate files only under `work/kernel/`; temporary files belong in `scratch/`. Reusable
+  methods may be saved under `skills/`, and reusable utilities under `tools/` with a synchronized
+  `tools/README.md`. These directories seed every later trajectory; never store credentials or
+  one-off measurements in them.
 - Never edit `input/`, `agent/`, the session manifest, session traces, evaluator/reference state,
   credentials, controller state, or service state.
 - Never run a compiler, GPU import, JIT, candidate, profiler, or evaluator directly in the shell.
   Use only the supplied `gateway-execute` and `wiki-query` CLI subcommands for external work.
+- Route Runtime-local Trial, source, and result reads through their dedicated query subcommands.
+  `kernel-artifact-read` writes the selected Artifact file atomically to its required destination
+  under `scratch/`; inspect that file after success because source content is never printed.
 - Do not install dependencies, create Git commits or refs, or delegate computation to a third-party
   prebuilt operator.
 - The task context fixes the DSL and hardware target. Do not select another DSL.
@@ -39,10 +45,10 @@ for the operator, hardware, and DSL.
 
 ### 1. Reconstruct the operator contract
 
-Read the seed Kernel and public problem contract. Record:
+Read the seed Kernel and use the public operator contract injected into this Prompt. Record:
 
 - operator semantics and calling ABI;
-- input and output shapes and domains;
+- public input/output shape regimes and domains;
 - dtypes and accumulation rules;
 - layouts, strides, broadcasting, and masking;
 - boundary and special-value behavior;
@@ -53,21 +59,26 @@ properties but never evaluator identities, hidden input values, or reconstructed
 
 ### 2. Learn only what is needed
 
-Query the external knowledge service using the actual architecture, vendor, DSL, operator, and
-mechanism. Prefer architecture-scoped API documentation, reference Kernels, hardware constraints,
-and known pitfalls. Preserve stable GPU Wiki Record IDs for sources actually used. Stop once one viable
-implementation approach has adequate support, and record its actionable constraints in a concise
-plan under `scratch/`.
+When `wiki-query` is available, query only for the actual architecture, DSL, operator, and mechanism.
+Preserve stable Record IDs for knowledge actually used. If Wiki authority is unavailable, continue
+from the seed, included Skills, and public contract; Wiki absence alone is not a blocker. Stop once one
+viable approach has adequate support and keep its actionable constraints in `scratch/`.
 
-### 3. Implement the first self-contained DSL Kernel
+### 3. Establish the first self-contained DSL Kernel
 
-Modify only `work/kernel/`. Preserve the evaluator-facing entrypoint and metadata contract.
-Implement the complete operator in the lineage DSL, using PyTorch only for allowed plumbing or
-allocation when the evaluation contract permits it. Do not use PyTorch compute, alternate DSLs,
-hidden dispatch, external implementation downloads, or third-party prebuilt compute.
+First propose and start one baseline-construction Direction. Inspect the writable copy under
+`work/kernel/`. If it is already a complete, self-contained implementation in the bound DSL, you
+may evaluate that unchanged copy and use it as the first measured construction. Otherwise modify
+only `work/kernel/` while preserving the evaluator-facing entrypoint and metadata contract.
+Implement the complete operator in the lineage DSL, using PyTorch only for plumbing or allocation
+explicitly allowed by the public operator contract and DSL policy. Do not use PyTorch compute,
+alternate DSLs, hidden dispatch, external implementation downloads, or third-party prebuilt
+compute.
 
 Choose simple, robust tiling, launch geometry, data movement, and boundary handling. This stage does
-not need to beat the reference and must not expand into a sequence of performance experiments.
+not need to beat the reference. Use the shared Direction and Experiment Journal to preserve every
+decisive construction, repair, retained change, and reverted failure for later optimization
+Attempts, but do not expand framework bring-up into an unbounded performance search.
 
 ### 4. Validate and repair
 
@@ -76,34 +87,71 @@ compilation and correctness repair. Then evaluate the exact current candidate wi
 `gateway-execute` request containing `{"operation":"evaluate"}`.
 
 Every `evaluate` call is an exploratory measurement of the exact `work/kernel/` tree at that
-moment. You may submit multiple changed candidates, using a new idempotency key for each distinct
-tree; the controller durably retains every evaluated Kernel and raw result. Replaying the same
-request with the same key returns the same record. These Agent-visible measurements are evidence,
-not the authoritative baseline outcome.
+moment. You may measure the unchanged seed once during Bootstrap and submit multiple repaired
+candidates. Core assigns their request identities, and the controller durably retains every
+evaluated Kernel and raw result. Record each meaningful repair as an Experiment using the previous
+measured subject as `before` and the newly measured subject as `after`. These measurements are
+evidence, not the authoritative baseline outcome.
 
-Correctness must pass every reported case and every configured seed. A slower but correct baseline
-is valid. On failure, diagnose the smallest causal issue and repair it while a concrete next step
-remains. Never fabricate a measurement, weaken the evaluation contract, or claim success from a
-partial probe. If infrastructure or missing authority prevents validation, report a blocker.
+The first measured construction has no measured predecessor. Save the request below as
+`scratch/baseline-experiment.json`, then invoke `record-experiment` with that request using the
+exact CLI listed in the shared Runtime tool contract below. Record it exactly once with
+`action="baseline"`, `before=null`, and its complete measured Kernel/Trial/Result subject as `after`.
+The receipt returns an `experiment_id`; use that ID when completing the Direction and in every
+Finding supported by this construction. This creates the Experiment anchor only; it does not register `v0`.
+For later repairs use `keep_after` or `restore_before` with complete `before` and `after` subjects.
+
+```json
+{
+  "direction_id": "direction_<id>",
+  "name": "establish first measured DSL candidate",
+  "hypothesis": "the direct DSL implementation satisfies the public contract",
+  "change": "established the first measured DSL candidate; state whether the seed was unchanged",
+  "before": null,
+  "after": {
+    "kernel_artifact_digest": "sha256:<kernel>",
+    "kernel_trial_id": "gtrial_<id>",
+    "gateway_result_digests": ["sha256:<evaluate-result>"]
+  },
+  "evidence": "factual correctness and latency returned by the evaluation",
+  "analysis": "whether the first construction held and what must be repaired",
+  "action": "baseline"
+}
+```
+
+Before nomination, the Agent-visible Evaluate must pass every case and seed it reports. Runtime
+later applies the complete private Bootstrap Gate independently; do not claim that the exploratory
+Evaluate proves that final outcome. A slower but correct candidate is valid. On failure, diagnose
+the smallest causal issue and repair it while a concrete next step remains. Never fabricate a
+measurement, weaken the public contract, or claim success from a partial probe. If infrastructure
+or missing authority prevents validation, report a blocker.
 
 ## Terminal contract
 
-Invoke `lineage-bootstrap-report` exactly once with either:
+Use the shared `attempt-report` schema described below. Bootstrap permits only:
 
-- `status="baseline_ready"` after a full correct evaluation of the exact current candidate; include
-  the implementation approach, exact changed files, correctness evidence, positive latency,
-  immutable candidate and result identities, knowledge sources consumed, toolchain constraints,
-  failures and repairs, and up to three evidence-backed optimization directions; or
+- `status="candidate_ready"` after a correct Agent-visible Evaluate of the exact current candidate;
+  Runtime still owns complete Bootstrap validation; or
 - `status="blocked"` when a concrete technical or infrastructure blocker remains after exhausting
   safe in-scope repairs.
 
-`baseline_ready` nominates the exact final `work/kernel/` tree as the Candidate. The trusted
-controller seals that tree, verifies that its reported result belongs to a correct exploratory
-evaluation of the same bytes, then independently submits the sealed Candidate for a fresh final
-evaluation. Only that controller-owned final result is the authoritative baseline outcome. The
-controller validates dependency policy and the evaluation contract before creating or advancing
-the lineage. Chat text, local files, your own conclusion, or an exploratory result cannot promote
-the baseline.
+Do not use `pivot` during Bootstrap. Before terminal handoff, close every started Direction and
+record each decisive construction or repair as an Experiment. Leave any useful unstarted
+optimization ideas as `proposed` or `deferred` Directions so later optimization Attempts can load
+and advance them without reconstructing the Bootstrap session.
 
-Never try to locate the private evaluation contract or exact shapes. The evaluation service alone
-supplies those inputs during evaluation.
+A `candidate_ready` Bootstrap report requires exactly one `baseline` Experiment. A blocked report
+may omit it only when no candidate reached an identity-bearing Gateway result.
+
+Use the shared report fields with Bootstrap semantics: `diagnosis` names the bring-up or correctness
+issue, `approach` explains the construction or repair, and `expected_impact` states the expected
+correctness or compatibility effect. Set `profile_evidence` to `null` unless profiling was actually
+needed. If the nominated Kernel is unchanged from the seed, say that explicitly in
+`final_candidate.change_summary`; do not invent a change or a performance bottleneck.
+
+`candidate_ready` nominates the exact final `work/kernel/` tree as the Baseline Candidate. The
+trusted controller seals that tree, resolves the correct Evaluate result referenced by its Journal,
+and applies the Bootstrap finalization policy before creating `v0` and the Lineage. Direction and
+Experiment Journals, their Kernel/Trial/Result identities, and the backend-neutral conversation
+become immutable Lineage history. Chat text, local files, or the Agent's conclusion cannot create
+the baseline by themselves.

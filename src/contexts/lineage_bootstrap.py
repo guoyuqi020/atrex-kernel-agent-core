@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .common import object_value, text_value
+from .common import json_object_file, object_value, text_value
 
 _REQUIRED_ENVIRONMENT = (
     "ATREX_LINEAGE_BOOTSTRAP_MANIFEST",
-    "ATREX_LINEAGE_BOOTSTRAP_REPORT_PATH",
+    "ATREX_ATTEMPT_REPORT_PATH",
     "ATREX_GATEWAY_CAPABILITY",
     "ATREX_GATEWAY_PROXY_URL",
     "ATREX_OPTIMIZER_REPOSITORY",
@@ -25,12 +25,13 @@ _REQUIRED_ENVIRONMENT = (
 _EXPECTED_PATHS = {
     "input_kernel": "input/kernel",
     "working_kernel": "work/kernel",
-    "agent_problem": "input/agent-problem",
+    "agent_problem": ".runtime/agent-problem.json",
     "optimizer": "agent/optimizer",
 }
 _MANIFEST_FIELDS = {
     "schema_version",
     "bootstrap_attempt_id",
+    "lineage_id",
     "kernel_agent_revision_id",
     "input_kernel_digest",
     "optimizer_digest",
@@ -41,6 +42,7 @@ _MANIFEST_FIELDS = {
     "hardware_target",
     "paths",
 }
+_MANIFEST_RELATIVE_PATH = Path(".runtime/lineage-bootstrap.json")
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,7 @@ class RuntimeLineageBootstrapContext:
     session_trace_path: Path | None
     gateway_url: str
     gateway_capability: str
+    agent_problem: Mapping[str, Any]
     wiki_url: str | None
     wiki_capability: str | None
     usage_unit: str
@@ -73,12 +76,14 @@ class RuntimeLineageBootstrapContext:
         if manifest_value.is_symlink() or not manifest_value.is_file():
             raise ValueError("lineage bootstrap manifest must be a regular file")
         manifest_path = manifest_value.resolve()
-        workspace = manifest_path.parent.resolve()
+        workspace = manifest_path.parent.parent.resolve()
+        if manifest_path != workspace / _MANIFEST_RELATIVE_PATH:
+            raise ValueError("lineage bootstrap manifest must use the internal control path")
         manifest = object_value(
             json.loads(manifest_path.read_text(encoding="utf-8")),
             "lineage bootstrap manifest",
         )
-        if manifest.get("schema_version") != 1:
+        if manifest.get("schema_version") != 2:
             raise ValueError("unsupported lineage bootstrap manifest schema_version")
         if set(manifest) != _MANIFEST_FIELDS:
             raise ValueError("lineage bootstrap manifest fields do not match the Core protocol")
@@ -87,6 +92,7 @@ class RuntimeLineageBootstrapContext:
             raise ValueError("lineage bootstrap paths do not match the Core protocol")
         for key in (
             "bootstrap_attempt_id",
+            "lineage_id",
             "kernel_agent_revision_id",
             "input_kernel_digest",
             "optimizer_digest",
@@ -108,8 +114,12 @@ class RuntimeLineageBootstrapContext:
             path = workspace / relative
             if not path.exists() or path.is_symlink():
                 raise ValueError(f"lineage bootstrap workspace path is missing: {relative}")
+        agent_problem = json_object_file(
+            workspace / _EXPECTED_PATHS["agent_problem"],
+            "public operator contract",
+        )
 
-        report_path = Path(os.environ["ATREX_LINEAGE_BOOTSTRAP_REPORT_PATH"]).resolve()
+        report_path = Path(os.environ["ATREX_ATTEMPT_REPORT_PATH"]).resolve()
         token_path = Path(os.environ["ATREX_TOKEN_USAGE_REPORT"]).resolve()
         if not report_path.is_relative_to(workspace / "scratch"):
             raise ValueError("lineage bootstrap report must be under scratch")
@@ -144,6 +154,7 @@ class RuntimeLineageBootstrapContext:
             gateway_capability=text_value(
                 os.environ["ATREX_GATEWAY_CAPABILITY"], "Gateway capability"
             ),
+            agent_problem=agent_problem,
             wiki_url=wiki_url,
             wiki_capability=wiki_capability,
             usage_unit=usage_unit,

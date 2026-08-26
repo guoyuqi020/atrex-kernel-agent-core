@@ -13,7 +13,7 @@ Core 负责 Agent 可见的优化行为：
 - 分阶段 Prompt 和 GPU Kernel 工程流程；
 - Provider Token 的实时观测、未脱敏 Session 捕获与规范化用量索引；
 - Runtime Gateway 与外部 Wiki 的协议客户端；
-- Experiment Journal 与终态 Report；
+- Direction/Experiment Journal 与终态 Report；
 - 对结构化 Profiling Evidence 的解释。
 
 Runtime 继续负责 Campaign/Lineage 状态、Sandbox、Credential、Token 配额、Evaluation Contract、
@@ -49,20 +49,36 @@ Runtime 必须显式设置 `ATREX_CORE_PHASE`。每次进程只执行一个全�
 
 ```text
 <attempt>/
-├── attempt.json
+├── .runtime/                   # 不可变的 Runtime-to-Core 控制输入
+│   ├── attempt.json
+│   └── agent-problem.json
 ├── input/
 │   ├── kernel/                 # 不可变 incumbent
-│   ├── evidence/               # 不可变、按 Epoch 组织的统一 Evidence View
-│   │   ├── manifest.json       # 可信可见范围与来源 Digest
-│   │   ├── instructions.md     # Runtime 编写的 Prompt Fragment
+│   └── evidence/               # 不可变、按 Epoch 组织的统一 Evidence View
 │   │   ├── bootstrap/
-│   │   └── epochs/             # 晋升 Lineage 与可见当前 Attempt
-│   └── agent-problem/          # 公开算子契约
+│   │   └── epochs/             # trajectories/<n>/attempts/<n>/{report,conversation}
 ├── agent/optimizer/            # 不可变 Core Revision
 ├── work/kernel/                # 可写 candidate
 ├── sessions/                   # 未脱敏 Agent Session Artifact
-└── scratch/                    # Request、Journal、Report、Token Usage
+└── scratch/                    # 本 Attempt 独占的可写状态
+    ├── directions.json         # 仅本 Attempt 新增的 Direction 事件
+    ├── experiments.json        # 仅本 Attempt 新增的 Experiment
+    ├── directions-index.json   # 生成的可见历史 + 当前摘要
+    ├── experiments-index.json  # 生成的可见历史 + 当前摘要
+    └── ...                     # Agent-facing Request、Report 与恢复文件
 ```
+
+`.runtime/` 是 Runtime-to-Core 内部控制面。Core 通过启动环境定位它；Agent Prompt 不介绍该
+目录，也不要求 Optimizer 读取它。Core 会把校验后的 Agent Problem 作为公开算子契约直接投影
+进最终 Prompt。
+两个 Journal 文件是绑定本 Attempt 的 append-only 增量，不包含历史 Attempt 的记录。历史 Journal
+由 Runtime 按需从 Registry 与 Artifact Store 解析；只有生成的 Index 和 `load-*` 工具会把历史与本
+Attempt 内容合并展示。
+Runtime 从自身 Python 包的 `templates/evidence/` 资源加载角色专属 Prompt Fragment。Evidence
+Scope Manifest 和生成的 Prompt Fragment 是 `.runtime/` 内部控制文件，不属于 Agent-facing
+Evidence Tree。`token-usage.json` 同样不是 Agent 接口或实时计数器：Core Session Runner 在内存中
+观察 Provider 用量，仅在 Agent 进程退出后才原子写入 Core-to-Runtime 终态报告；Runtime 随后校验
+计量单位、预算、内部总数、完整性及是否耗尽预算。
 
 私有 Evaluation Contract 只以 Digest 出现，具体内容留在 Runtime/Gateway。
 Runtime 把 Evidence 结构说明注入最终 Agent Prompt；本仓库只校验并拼接受 Digest 绑定的 Fragment，
@@ -105,6 +121,10 @@ Profile、查询聚焦外部知识、规划一个可证伪方向、修改与修�
 `candidate_ready`、`pivot` 或 `blocked`；Runtime 独立重新评测被提名的准确 Kernel，再决定 Kernel
 是否保留以及产生它的 Kernel Agent Revision 是否晋升。
 
+[`prompts/episode.md`](prompts/episode.md) 只描述优化方法论；
+[`prompts/attempt-tools.md`](prompts/attempt-tools.md) 描述优化 Attempt 的准确 CLI、请求示例、
+错误修复与终态校验契约。
+
 [`prompts/framework_baseline.md`](prompts/framework_baseline.md) 定义更窄的 Framework Baseline
 流程。
 
@@ -122,6 +142,9 @@ Profile、查询聚焦外部知识、规划一个可证伪方向、修改与修�
     "problem_generalization": "prompts/generalize_agent_problem.md",
     "framework_baseline": "prompts/framework_baseline.md",
     "optimization_attempt": "prompts/episode.md"
+  },
+  "prompt_fragments": {
+    "attempt_tools": "prompts/attempt-tools.md"
   }
 }
 ```
@@ -143,7 +166,7 @@ Backend Credential 和二进制可用性属于部署责任，只能通过 Runtim
 │   ├── contexts/                     # 严格 Manifest/Workspace Reader
 │   ├── sessions/                     # Prompt、执行、Trace 与 Token Report
 │   └── backends/                     # Claude、Codex、Pi、Qoder Adapter
-├── prompts/                          # 分阶段指令
+├── prompts/                          # 分阶段方法论与协议模板
 ├── tests/                            # Core 单元与协议客户端测试
 ├── pyproject.toml                    # Ruff、mypy、pytest 策略
 └── docs/                             # 设计与 Runtime 使用文档

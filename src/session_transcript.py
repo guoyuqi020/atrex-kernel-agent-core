@@ -25,9 +25,7 @@ def record_provider_line(line: str) -> bool:
 
 def filter_provider_stdout(stdout: str) -> str:
     """Preserve exact retained lines and their original line endings."""
-    return "".join(
-        line for line in stdout.splitlines(keepends=True) if record_provider_line(line)
-    )
+    return "".join(line for line in stdout.splitlines(keepends=True) if record_provider_line(line))
 
 
 def _record(sequence: int, record_type: str, source: str, **data: Any) -> dict[str, Any]:

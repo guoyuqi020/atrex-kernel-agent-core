@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .common import object_value, text_value, within
+from .common import json_object_file, object_value, text_value, within
 
 _REQUIRED_ENVIRONMENT = (
     "ATREX_ATTEMPT_MANIFEST",
@@ -28,7 +28,7 @@ _EXPECTED_PATHS = {
     "input_kernel": "input/kernel",
     "working_kernel": "work/kernel",
     "evidence": "input/evidence",
-    "agent_problem": "input/agent-problem",
+    "agent_problem": ".runtime/agent-problem.json",
     "optimizer": "agent/optimizer",
     "reference": "reference",
 }
@@ -65,6 +65,7 @@ _EVIDENCE_VIEW_FIELDS = {
     "visibility",
 }
 _MAX_EVIDENCE_PROMPT_BYTES = 32 * 1024
+_MANIFEST_RELATIVE_PATH = Path(".runtime/attempt.json")
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ class RuntimeAttemptContext:
     gateway_url: str
     gateway_capability: str
     evidence_prompt: str
+    agent_problem: Mapping[str, Any]
     wiki_url: str | None
     wiki_capability: str | None
     usage_unit: str
@@ -96,11 +98,13 @@ class RuntimeAttemptContext:
         if manifest_value.is_symlink() or not manifest_value.is_file():
             raise ValueError("Attempt manifest must be a regular file")
         manifest_path = manifest_value.resolve()
-        workspace = manifest_path.parent.resolve()
+        workspace = manifest_path.parent.parent.resolve()
+        if manifest_path != workspace / _MANIFEST_RELATIVE_PATH:
+            raise ValueError("Attempt manifest must use the internal Runtime control path")
         manifest = object_value(
             json.loads(manifest_path.read_text(encoding="utf-8")), "Attempt manifest"
         )
-        if manifest.get("schema_version") != 8:
+        if manifest.get("schema_version") != 9:
             raise ValueError("unsupported Attempt manifest schema_version")
         if set(manifest) != _MANIFEST_FIELDS:
             raise ValueError("Attempt manifest fields do not match the Core protocol")
@@ -143,10 +147,17 @@ class RuntimeAttemptContext:
             if unresolved.is_symlink():
                 raise ValueError(f"Attempt workspace path must not be a link: {relative}")
             path = within(workspace, relative, label)
-            if not path.is_dir():
+            if label == "agent_problem":
+                if not path.is_file():
+                    raise ValueError(f"Attempt workspace path is missing: {relative}")
+            elif not path.is_dir():
                 raise ValueError(f"Attempt workspace path is missing: {relative}")
+        agent_problem = json_object_file(
+            workspace / _EXPECTED_PATHS["agent_problem"],
+            "public operator contract",
+        )
 
-        evidence_manifest_path = workspace / _EXPECTED_PATHS["evidence"] / "manifest.json"
+        evidence_manifest_path = workspace / ".runtime/evidence-manifest.json"
         if evidence_manifest_path.is_symlink() or not evidence_manifest_path.is_file():
             raise ValueError("Evidence view manifest must be a regular file")
         evidence_view = object_value(
@@ -161,6 +172,14 @@ class RuntimeAttemptContext:
             "completed_epochs": "promoted_lineage",
             "current_attempts_before": context["attempt_ordinal"],
         }
+        trajectory_ordinal = visibility.get("current_trajectory_ordinal")
+        if (
+            not isinstance(trajectory_ordinal, int)
+            or isinstance(trajectory_ordinal, bool)
+            or trajectory_ordinal <= 0
+        ):
+            raise ValueError("Evidence visibility requires a positive current Trajectory")
+        expected_visibility["current_trajectory_ordinal"] = trajectory_ordinal
         if (
             evidence_view.get("schema_version") != 1
             or evidence_view.get("role") != "optimizer"
@@ -180,7 +199,7 @@ class RuntimeAttemptContext:
         if prompt_input.is_symlink() or not prompt_input.is_file():
             raise ValueError("Evidence Prompt Fragment must be a regular file")
         prompt_path = prompt_input.resolve()
-        expected_prompt_path = workspace / _EXPECTED_PATHS["evidence"] / "instructions.md"
+        expected_prompt_path = workspace / ".runtime/evidence-instructions.md"
         if prompt_path != expected_prompt_path:
             raise ValueError("Evidence Prompt Fragment path disagrees with the Evidence view")
         prompt_bytes = prompt_path.read_bytes()
@@ -197,6 +216,8 @@ class RuntimeAttemptContext:
             / _EXPECTED_PATHS["evidence"]
             / "epochs"
             / f"{int(context['epoch_number']):08d}"
+            / "trajectories"
+            / f"{trajectory_ordinal:08d}"
             / "attempts"
         )
         if current_attempts.is_symlink() or not current_attempts.is_dir():
@@ -242,6 +263,7 @@ class RuntimeAttemptContext:
                 os.environ["ATREX_GATEWAY_CAPABILITY"], "Gateway capability"
             ),
             evidence_prompt=evidence_prompt,
+            agent_problem=agent_problem,
             wiki_url=wiki_url,
             wiki_capability=wiki_capability,
             usage_unit=usage_unit,

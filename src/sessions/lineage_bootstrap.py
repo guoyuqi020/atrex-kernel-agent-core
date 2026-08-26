@@ -7,7 +7,8 @@ import json
 from agent_config import AgentConfig
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
 
-from .common import execute_agent_session, guarded_main
+from .attempt import _tool_instructions
+from .common import execute_agent_session, guarded_main, public_operator_contract
 
 
 def _trusted_context(context: RuntimeLineageBootstrapContext) -> str:
@@ -26,60 +27,22 @@ def _trusted_context(context: RuntimeLineageBootstrapContext) -> str:
     )
 
 
-def _tool_instructions() -> str:
-    tool = "agent/optimizer/src/runtime_tools.py"
-    return f"""
-## Session tools
-
-Use the following exact CLI subcommand names; there are no function-style aliases. Write each
-operation request as one JSON object under `scratch/`, then invoke:
-
-```text
-python {tool} gateway-execute --request scratch/<request>.json
-python {tool} wiki-query --request scratch/<request>.json
-python {tool} lineage-bootstrap-report --request scratch/<report>.json
-```
-
-`gateway-execute` attaches the exact `work/kernel` tree and trusted session identity. Never include
-a candidate, schema version, capability, or operation identity in the request. Typical requests are
-`{{"operation":"check"}}`, `{{"operation":"evaluate"}}`, and `{{"query":"focused GPU question"}}`.
-Evaluation exposes private cases only through opaque ids, aggregate correctness, and latency. A
-profile request may select one returned id with `"shape_id":"<opaque id>"`; never reconstruct its
-input values.
-`wiki-query` returns the GPU Wiki's exact `records` mapping and `notes`; every mapping key is a
-stable Record ID and every value is the complete safe served Record. Preserve the IDs of records
-that materially informed the baseline.
-Service snapshot and integrity identities remain internal and are not part of Agent-facing output.
-
-Each `lineage-bootstrap-report` request must contain exactly these fields:
-
-```json
-{{
-  "status": "baseline_ready",
-  "approach": "implementation approach",
-  "change_summary": "exact candidate files and changes",
-  "correctness_evidence": "authoritative evaluation identity and outcome",
-  "latency_us": 1.0,
-  "candidate_artifact_digest": "candidate identity returned by evaluation",
-  "gateway_result_digest": "result identity returned by evaluation",
-  "research_sources": ["stable GPU Wiki Record IDs actually used"],
-  "lessons": "framework constraints, failures, and repairs",
-  "next_directions": ["evidence-backed optimization direction"],
-  "blocker": null
-}}
-```
-
-For `status="blocked"`, set `latency_us`, `candidate_artifact_digest`, and
-`gateway_result_digest` to `null`, and set `blocker` to non-empty text. Do not add other fields.
-""".strip()
-
-
 def render_prompt(
     context: RuntimeLineageBootstrapContext,
     config: AgentConfig,
 ) -> str:
     base = config.prompt_path("framework_baseline").read_text(encoding="utf-8").rstrip()
-    return "\n\n".join((base, _trusted_context(context), _tool_instructions())) + "\n"
+    return (
+        "\n\n".join(
+            (
+                base,
+                public_operator_contract(context.agent_problem),
+                _trusted_context(context),
+                _tool_instructions(config, str(context.manifest["dsl"])),
+            )
+        )
+        + "\n"
+    )
 
 
 def run() -> int:

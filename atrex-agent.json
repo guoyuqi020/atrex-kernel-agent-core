@@ -7,5 +7,8 @@
     "problem_generalization": "prompts/generalize_agent_problem.md",
     "framework_baseline": "prompts/framework_baseline.md",
     "optimization_attempt": "prompts/episode.md"
+  },
+  "prompt_fragments": {
+    "attempt_tools": "prompts/attempt-tools.md"
   }
 }

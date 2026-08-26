@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from contexts.common import object_value, text_value, within
@@ -19,6 +19,7 @@ class AgentConfig:
     prompt_paths: Mapping[str, Path]
     runtime_bound: bool = False
     model: str | None = None
+    prompt_fragment_paths: Mapping[str, Path] = field(default_factory=dict)
 
     @classmethod
     def load(
@@ -39,6 +40,7 @@ class AgentConfig:
             "session_settings",
             "model",
             "prompts",
+            "prompt_fragments",
         }
         unknown = set(value) - allowed
         if unknown:
@@ -69,6 +71,23 @@ class AgentConfig:
             if prompt.is_symlink() or not prompt.is_file():
                 raise ValueError(f"Agent prompt is unavailable: {phase}")
             prompt_paths[phase] = prompt
+        prompt_fragments = object_value(
+            value.get("prompt_fragments"),
+            "Agent prompt fragments",
+        )
+        expected_fragments = {"attempt_tools"}
+        if set(prompt_fragments) != expected_fragments:
+            raise ValueError("Agent prompt_fragments must define every supported fragment")
+        prompt_fragment_paths: dict[str, Path] = {}
+        for name, fragment_value in prompt_fragments.items():
+            fragment = within(
+                repository,
+                text_value(fragment_value, name),
+                name,
+            )
+            if fragment.is_symlink() or not fragment.is_file():
+                raise ValueError(f"Agent prompt fragment is unavailable: {name}")
+            prompt_fragment_paths[name] = fragment
         binding = os.environ if environment is None else environment
         binding_keys = {
             "ATREX_AGENT_BACKEND",
@@ -98,10 +117,24 @@ class AgentConfig:
             if "\x00" in runtime_model:
                 raise ValueError("Runtime model cannot contain NUL")
             model_value = runtime_model or None
-        return cls(backend, effort, settings, prompt_paths, runtime_bound, model_value)
+        return cls(
+            agent_backend=backend,
+            reasoning_effort=effort,
+            session_settings=settings,
+            prompt_paths=prompt_paths,
+            runtime_bound=runtime_bound,
+            model=model_value,
+            prompt_fragment_paths=prompt_fragment_paths,
+        )
 
     def prompt_path(self, phase: str) -> Path:
         try:
             return self.prompt_paths[phase]
         except KeyError as error:
             raise ValueError(f"unsupported Core session phase: {phase}") from error
+
+    def prompt_fragment_path(self, name: str) -> Path:
+        try:
+            return self.prompt_fragment_paths[name]
+        except KeyError as error:
+            raise ValueError(f"unsupported Core prompt fragment: {name}") from error

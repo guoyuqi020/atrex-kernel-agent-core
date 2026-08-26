@@ -35,7 +35,13 @@ limit violations before sealing the tree.
 - `agent_backend`: `claude`, `codex`, `pi`, or `qodercli`;
 - `reasoning_effort`: `low`, `medium`, `high`, or `max`;
 - backend-specific `session_settings` serialized as a string; and
-- exact Prompt paths for all supported phases.
+- exact Prompt paths for all supported phases; and
+- exact Prompt Fragment paths for protocol-heavy reusable sections.
+
+The optimization methodology lives in `prompts/episode.md`. Exact Agent-facing CLI names, JSON
+request examples, repair behavior, and terminal validation live in the separately evolvable
+`prompts/attempt-tools.md` fragment. Session code renders only the strict `DSL` and `RUNTIME_TOOL`
+placeholders and rejects missing, unknown, or unresolved placeholders.
 
 Those Backend fields are standalone defaults. A managed Runtime supplies an all-or-nothing,
 authoritative Backend/effort/settings binding for every phase. Core validates and records that
@@ -80,31 +86,53 @@ authoritative result.
 Runtime supplies the incumbent Kernel, public Agent Problem, one promoted-lineage Evidence view,
 and one immutable Core Revision. The view organizes promoted history and earlier Attempts from the
 currently selected revision by Epoch without exposing Active/Challenger roles. The Agent follows one attributable engineering
-direction and uses Runtime tools for every GPU or Wiki operation. It records experiments as they
+direction and uses Runtime tools for every GPU or Wiki operation. It records an append-only
+Direction lifecycle and Direction-bound experiments as they
 happen and publishes exactly one terminal Attempt report. Candidate publication is evidence, not a
-promotion decision.
+promotion decision. Separate trusted Direction and Experiment indexes make journals from every
+completed path available through their list/load tools without changing the current Agent or Kernel
+lineage.
 
 ## 4. Workspace and authority
 
-The normal Attempt layout is fixed by manifest protocol version 6:
+The normal Attempt layout is fixed by manifest protocol version 9:
 
 ```text
-attempt.json
+.runtime/attempt.json
+.runtime/agent-problem.json
+.runtime/evidence-manifest.json
+.runtime/evidence-instructions.md
 input/kernel/
 input/evidence/
-input/evidence/manifest.json
-input/evidence/bootstrap/
+input/evidence/bootstrap/report.json
+input/evidence/bootstrap/conversation.jsonl
 input/evidence/epochs/
-input/agent-problem/
 agent/optimizer/
 work/kernel/
+skills/
+tools/README.md
 sessions/
 scratch/
 ```
 
-Only `work/kernel`, `sessions`, and `scratch` are writable. Runtime owns mount policy and may enforce
-that boundary with bubblewrap and cgroup v2. The Evaluation Contract is represented by a digest and
-never materialized for the Agent.
+Bootstrap is represented as the special pre-Epoch Attempt. Its Agent-facing Evidence retains only
+the terminal report and latest sealed backend-neutral conversation, matching the compact ordinary
+Attempt convention. It uses the same journal/query tools and terminal Attempt Report schema as an
+ordinary Attempt, with Bootstrap-specific methodology and no prior Lineage history. Its journals,
+Kernel Trials, and Gateway Results become the root history inherited by later Optimizer Attempts.
+
+The Agent Problem is an internal Core input projected into the final Agent Prompt; its workspace
+path is not advertised to the Optimizer. The Agent may write `work/kernel`, `skills/`, `tools/`, and
+`scratch/`; `sessions/` is managed by Core and the Provider, while all declared inputs are read-only.
+Runtime owns mount policy and may enforce that boundary with bubblewrap and cgroup v2. The Evaluation
+Contract is represented by a digest and never materialized for the Agent.
+
+`skills/` and `tools/` are reusable across serial Attempts in one Epoch. Runtime scopes them
+by Lineage, Agent revision, and Trajectory to avoid concurrent writers. At the next Epoch boundary,
+each Active Trajectory starts from an independent copy of the prior winner's best-Kernel Trajectory
+terminal State; each Challenger starts from its Evolver-sealed revision State. Bootstrap publishes
+the initial revision-wide seed copied into each new trajectory. Every reusable tool must be documented in
+`tools/README.md`.
 
 `runtime_tools.py` is the canonical Core client for Runtime HTTP capabilities. The delegated,
 Attempt-scoped capability is visible to the untrusted Worker, so this client is not a credential
@@ -116,6 +144,12 @@ request. The client:
 - provides live external Wiki queries without exposing the upstream Wiki credential;
 - writes an atomic, contiguous experiment journal; and
 - validates the shape of terminal baseline and Attempt reports before submission.
+
+The final Optimizer Prompt has non-overlapping layers: `episode.md` owns optimization method;
+the public operator contract supplies task semantics; the controller-injected fragment owns the
+actual Workspace, Evidence scope, and measurement trust; the trusted context supplies current DSL
+and position; and the generated Session-tools section owns exact CLI commands, JSON schemas, and
+validation rules. Environment facts and wire protocols are not duplicated in `episode.md`.
 
 Tool results remain Agent-visible evidence. Runtime freezes every exploratory Kernel/result pair,
 then applies its trusted retention policy. Ordinary A/B Evaluate and same-allocation ABBA both use
@@ -159,13 +193,22 @@ Core has no durable local campaign database. A fresh Attempt reconstructs histor
 inputs:
 
 - the unified Evidence view contains the promoted prior-Epoch Agent lineage and bounded projections;
-- the current Epoch contains only contiguous earlier Attempts from the selected revision;
+- every Epoch uses `trajectories/<ordinal>/attempts/<ordinal>`; a Trajectory is a serial
+  retained-Kernel chain, and the current Epoch contains only contiguous earlier Attempts from the
+  selected Trajectory;
+- Optimizer Epoch directories expose no aggregate summary, lessons, or measurement files; trusted
+  control state and exact results remain in Runtime and are resolved through dedicated tools;
+- Epochs are serial: Bootstrap seeds Epoch 1, then each completed Epoch independently selects the
+  next active Agent revision and the next starting Kernel, so their producers may differ;
 - the public Agent Problem describes stable operator constraints; and
 - the incumbent Kernel is the exact checkpoint selected by Runtime.
 
-The Agent-authored experiment journal is local to one Attempt until Runtime seals its terminal
-report. Core contains no second local memory manager; Runtime Evidence and the terminal report are
-the only cross-session handoff.
+The Agent-authored `scratch/directions.json` and `scratch/experiments.json` files are append-only
+deltas bound to one Attempt; neither contains records copied from prior Attempts. Runtime seals
+them with the terminal report. Frozen Journal history is resolved on demand from Runtime's Registry
+and Artifact Store, then combined with the live delta only by the list/load views. No historical
+Journal projection exists in the Workspace. Core contains no second local memory manager; Runtime
+Evidence and the terminal report are the only cross-session handoff.
 
 ## 7. Knowledge and GPU execution
 
@@ -174,8 +217,9 @@ a Runtime proxy and returns one frozen response with source identity. `gateway-e
 through Runtime and supports only the operations granted to that Attempt. GPU validation, profiling,
 compiler inspection, and development commands therefore remain observable and quota-controlled.
 
-Agent Evaluates are exploratory and may occur multiple times per Attempt. Only the independent
-Runtime-final Evaluate result can enter Runtime retention or promotion comparison.
+Agent Evaluates may occur multiple times per Attempt and every exact Kernel/Result pair is retained.
+Only the controller-configured ordinary or ABBA comparator outcome can enter retention or promotion;
+both use sealed Candidate measurements without an unconditional extra one-sided evaluation.
 
 Bubblewrap provides filesystem, process, and resource isolation. Its `host` network mode does not
 implement destination filtering; production deployments that require live Agent-provider and

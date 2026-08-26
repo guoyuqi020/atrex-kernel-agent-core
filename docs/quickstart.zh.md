@@ -30,6 +30,9 @@ Core 不是独立 Campaign CLI。Runtime 导入精确 Core Commit，准备 Works
     "problem_generalization": "prompts/generalize_agent_problem.md",
     "framework_baseline": "prompts/framework_baseline.md",
     "optimization_attempt": "prompts/episode.md"
+  },
+  "prompt_fragments": {
+    "attempt_tools": "prompts/attempt-tools.md"
   }
 }
 ```
@@ -118,8 +121,10 @@ Runtime 会对每个终止提名应用配置指定的可信留存策略：普通
 | Incumbent Kernel | `input/kernel` |
 | Candidate Kernel | `work/kernel` |
 | 统一的晋升 Lineage/当前 Attempt Evidence View | `input/evidence` |
-| 公开算子契约 | `input/agent-problem` |
+| 公开算子契约 | 直接注入最终 Prompt |
 | Core Revision | `agent/optimizer` |
+| 只读上游 GPU Kernel 项目 | `reference` |
+| 可复用方法与工具 | `skills`、`tools` |
 | Request、Plan、Journal、Report | `scratch` |
 | 未脱敏 Agent Session Artifact 与规范化用量索引 | `sessions` |
 
@@ -128,15 +133,19 @@ Agent 使用 Prompt 声明的精确命令：
 ```bash
 python agent/optimizer/src/runtime_tools.py gateway-execute --request scratch/evaluate.json
 python agent/optimizer/src/runtime_tools.py wiki-query --request scratch/wiki.json
+python agent/optimizer/src/runtime_tools.py update-direction --request scratch/direction.json
 python agent/optimizer/src/runtime_tools.py record-experiment --request scratch/experiment.json
 python agent/optimizer/src/runtime_tools.py attempt-report --request scratch/report.json
 ```
 
+Agent 必须先创建并启动 Direction，再记录其 Experiment。可通过
+`list-directions`/`load-direction` 与 `list-experiments`/`load-experiment` 查询历史。
 Request 必须是 `scratch/` 下受限的 Regular JSON File。新内容使用新 Idempotency Key；只有完全相同
 的 Request 才能重放同一个 Key。
 
 Agent 的每次 `evaluate` 都会保留准确 Candidate 文件和原始 Outcome，但不会结束 Attempt。
-`candidate_ready` 提名当前 `work/kernel`；Core 退出后由 Runtime 执行新的权威终评。
+`candidate_ready` 提名当前 `work/kernel`；Core 退出后由 Runtime 使用已封存的权威 Gateway 结果
+执行配置的普通比较或 ABBA，不会无条件追加一次单边终评。
 
 Worker 能读取短期 Scoped Capability，但拿不到上游 Agate/Wiki Credential。直接请求与规范客户端
 请求都必须通过 Runtime Authorization。Bubblewrap `host` 网络没有目标过滤，生产部署必须在网络
@@ -168,4 +177,4 @@ PYTHONPYCACHEPREFIX=/tmp/atrex-core-pycache \
 - Gateway/Wiki Capability 被拒绝：过期、耗尽、撤销或操作未授权。
 - Token Report 不完整：Backend 没有暴露可靠 Usage；Runtime 不会估算。
 - 缺少终态 Report：Agent 退出、超时、耗尽 Budget 或输出无效。
-- Candidate 被拒绝：没有正确探索结果匹配提名，或配置指定的 Runtime 终评/ABBA 门禁失败。
+- Candidate 被拒绝：没有正确探索结果匹配提名，或配置的普通比较/ABBA 保留门禁未通过。

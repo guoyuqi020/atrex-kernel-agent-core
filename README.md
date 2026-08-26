@@ -40,8 +40,8 @@ entrypoint supports exactly three fresh-process phases:
 | Phase | Purpose | Writable result |
 | --- | --- | --- |
 | `problem_generalization` | Convert evaluator-private operator inputs into a bounded public Agent Problem. | `work/output/agent_problem.json` |
-| `framework_baseline` | Turn one DSL seed into a correct authoritative baseline through Runtime tools. | Kernel tree plus baseline report under `scratch/` |
-| `optimization_attempt` | Test one attributable optimization direction from immutable Evidence and an incumbent Kernel. | Candidate Kernel plus terminal Attempt report under `scratch/` |
+| `framework_baseline` | Run the special pre-Epoch Attempt that turns one DSL seed into a correct authoritative baseline. | Candidate Kernel plus Direction/Experiment journals and terminal Attempt report under `scratch/` |
+| `optimization_attempt` | Test one attributable optimization direction from immutable Evidence and an incumbent Kernel. | Candidate Kernel plus Direction/Experiment journals and terminal Attempt report under `scratch/` |
 
 Every phase runs in a new Agent session and produces a Runtime-validated token report. Core never
 resumes process memory between Attempts. Historical experience is supplied through one immutable,
@@ -54,20 +54,38 @@ Core validates the Runtime-owned manifest before launching an Agent. A normal At
 
 ```text
 <attempt>/
-├── attempt.json
+├── .runtime/                   # immutable Runtime-to-Core control inputs
+│   ├── attempt.json
+│   └── agent-problem.json
 ├── input/
 │   ├── kernel/                 # immutable incumbent
-│   ├── evidence/               # immutable unified, Epoch-organized Evidence view
-│   │   ├── manifest.json       # trusted scope and source digests
-│   │   ├── instructions.md     # Runtime-authored Prompt Fragment
+│   └── evidence/               # immutable unified, Epoch-organized Evidence view
 │   │   ├── bootstrap/
-│   │   └── epochs/             # promoted lineage plus visible current Attempts
-│   └── agent-problem/          # public operator contract
+│   │   └── epochs/             # trajectories/<n>/attempts/<n>/{report,conversation}
 ├── agent/optimizer/            # immutable materialized Core Revision
 ├── work/kernel/                # writable candidate
 ├── sessions/                   # unredacted Agent-session artifacts
-└── scratch/                    # requests, experiment journal, reports, token usage
+└── scratch/                    # writable state owned by this Attempt
+    ├── directions.json         # only Direction events added by this Attempt
+    ├── experiments.json        # only Experiments added by this Attempt
+    ├── directions-index.json   # generated visible history + current summary
+    ├── experiments-index.json  # generated visible history + current summary
+    └── ...                     # Agent-facing requests, reports, and recovered files
 ```
+
+`.runtime/` is an internal Runtime-to-Core control surface. Core locates it through the launch
+environment; the Agent Prompt does not advertise it or require the Optimizer to read it. Core
+projects the validated Agent Problem directly into the final Prompt as the public operator contract.
+The two Journal files are Attempt-local append-only deltas. Runtime resolves prior-Attempt Journals
+on demand from its Registry and Artifact Store; only the generated indexes and `load-*` tools
+combine that history with
+the current Attempt.
+Runtime loads the role-specific Prompt Fragment from its packaged `templates/evidence/` resources.
+The Evidence scope manifest and rendered Prompt Fragment are internal `.runtime/` control files;
+they are not part of the Agent-facing Evidence tree. `token-usage.json` is likewise not an Agent
+interface or live counter. The Core session runner tracks Provider usage in memory and atomically
+writes that Core-to-Runtime terminal report only after the Agent process exits. Runtime then
+validates its unit, budget, internal totals, completeness, and exhaustion flag.
 
 The private Evaluation Contract is referenced only by digest and remains inside Runtime/Gateway.
 Runtime injects the Evidence structure instructions into the final Agent Prompt; this repository
@@ -109,7 +127,9 @@ The Coding Agent may not pre-create or redirect the Runtime-selected Session pat
 
 ## Engineering loop
 
-[`prompts/episode.md`](prompts/episode.md) contains the complete optimization Attempt loop:
+[`prompts/episode.md`](prompts/episode.md) contains the optimization methodology, while
+[`prompts/attempt-tools.md`](prompts/attempt-tools.md) contains the exact CLI, request examples,
+repair guidance, and terminal validation contract for an optimization Attempt. Together they cover:
 reconstruct the incumbent, profile progressively, query focused external knowledge, plan one
 falsifiable direction, edit and repair, execute one or more exploratory Evaluates, record every
 decisive experiment immediately, and publish one terminal report. A terminal outcome is
@@ -134,6 +154,9 @@ Edit `atrex-agent.json` in a candidate Revision to change Core behavior. Example
     "problem_generalization": "prompts/generalize_agent_problem.md",
     "framework_baseline": "prompts/framework_baseline.md",
     "optimization_attempt": "prompts/episode.md"
+  },
+  "prompt_fragments": {
+    "attempt_tools": "prompts/attempt-tools.md"
   }
 }
 ```
@@ -156,7 +179,7 @@ an invalid/incomplete accounting outcome rather than guessed.
 │   ├── contexts/                     # strict Runtime manifest and workspace readers
 │   ├── sessions/                     # phase prompts, execution, trace, and token reports
 │   └── backends/                     # Claude, Codex, Pi, and Qoder adapters
-├── prompts/                          # phase instructions
+├── prompts/                          # phase methodology and protocol templates
 ├── tests/                            # Core-owned unit and protocol-client tests
 ├── pyproject.toml                    # standalone Ruff, mypy, and pytest policy
 └── docs/                             # Core design and Runtime-oriented usage

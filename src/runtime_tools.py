@@ -8,6 +8,7 @@ import base64
 import errno
 import hashlib
 import json
+import math
 import os
 import stat
 import tempfile
@@ -16,54 +17,95 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+from uuid import uuid4
 
 from contexts.attempt import RuntimeAttemptContext
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
+from tool_contracts import local_validation_issue, tool_recovery, tool_request_schema
 
 _CANDIDATE_OPERATIONS = {
     "evaluate",
-    "submit",
     "profile",
     "dev",
     "check",
-    "sol",
     "disassemble",
 }
-_RESERVED_REQUEST_FIELDS = {"schema_version", "attempt_id", "candidate"}
+_GATEWAY_EXECUTE_OPERATIONS = _CANDIDATE_OPERATIONS | {
+    "poll",
+    "jobs",
+    "cancel",
+    "env",
+    "health",
+    "config",
+}
+_PUBLIC_RUNTIME_QUERY_COMMANDS = {
+    "kernel-trial-show": "kernel_trial_show",
+    "kernel-artifact-read": "kernel_artifact_read",
+    "gateway-result-read": "gateway_result_read",
+}
+_INTERNAL_RUNTIME_QUERY_COMMANDS = {
+    "_direction-history": "direction_history",
+    "_experiment-history": "experiment_history",
+}
+_RUNTIME_QUERY_COMMANDS = {
+    **_PUBLIC_RUNTIME_QUERY_COMMANDS,
+    **_INTERNAL_RUNTIME_QUERY_COMMANDS,
+}
+_RUNTIME_QUERY_OPERATIONS = frozenset(_RUNTIME_QUERY_COMMANDS.values())
+_ATTEMPT_COMMANDS = (
+    "gateway-execute",
+    *_PUBLIC_RUNTIME_QUERY_COMMANDS,
+    "wiki-query",
+    "update-direction",
+    "list-directions",
+    "load-direction",
+    "record-experiment",
+    "list-experiments",
+    "load-experiment",
+    "attempt-report",
+)
+_RESERVED_REQUEST_FIELDS = {"schema_version", "attempt_id", "candidate", "idempotency_key"}
 _EXPERIMENT_FIELDS = {
+    "direction_id",
     "name",
     "hypothesis",
     "change",
+    "before",
+    "after",
     "evidence",
-    "result",
-    "decision",
-    "candidate_artifact_digest",
+    "analysis",
+    "action",
+}
+_DIRECTION_PROPOSAL_FIELDS = {
+    "action",
+    "name",
+    "hypothesis",
+    "rationale",
+    "plan",
+    "success_criteria",
+    "stop_conditions",
+}
+_DIRECTION_UPDATE_FIELDS = {
+    "action",
+    "direction_id",
+    "analysis",
+}
+_EXPERIMENT_SUBJECT_FIELDS = {
+    "kernel_artifact_digest",
+    "kernel_trial_id",
+    "gateway_result_digests",
 }
 _REPORT_FIELDS = {
     "status",
     "hypothesis",
-    "bottleneck",
-    "plan",
-    "change_summary",
-    "profile_evidence",
-    "evaluation_evidence",
-    "result_interpretation",
-    "decision",
-    "research_sources",
-    "lessons",
-    "next_directions",
-}
-_BOOTSTRAP_REPORT_FIELDS = {
-    "status",
+    "diagnosis",
     "approach",
-    "change_summary",
-    "correctness_evidence",
-    "latency_us",
-    "candidate_artifact_digest",
-    "gateway_result_digest",
-    "research_sources",
-    "lessons",
-    "next_directions",
+    "final_candidate",
+    "evidence_summary",
+    "profile_evidence",
+    "analysis",
+    "knowledge_used",
+    "findings",
     "blocker",
 }
 RuntimeToolContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
@@ -73,6 +115,16 @@ _MAX_JOURNAL_BYTES = 2 * 1024 * 1024
 _MAX_CANDIDATE_FILES = 4096
 _MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+_MAX_ERROR_RESPONSE_BYTES = 64 * 1024
+
+
+class RuntimeServiceError(RuntimeError):
+    """Structured non-success response returned by a trusted Runtime service."""
+
+    def __init__(self, status_code: int, payload: dict[str, Any]) -> None:
+        self.status_code = status_code
+        self.payload = payload
+        super().__init__(str(payload.get("detail", payload.get("error", "Runtime service error"))))
 
 
 def _read_object(
@@ -128,6 +180,60 @@ def _atomic_json(path: Path, value: object, *, exclusive: bool = False) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _scratch_output(
+    context: RuntimeToolContext,
+    value: object,
+    *,
+    label: str = "Kernel Artifact output",
+) -> tuple[Path, str]:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} file must be a string")
+    relative = PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or len(relative.parts) < 2
+        or relative.parts[0] != "scratch"
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError(f"{label} file must be a safe path under scratch/")
+    current = context.workspace
+    for part in relative.parent.parts:
+        current /= part
+        if current.exists():
+            metadata = current.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError(f"{label} parent must be a real directory")
+        else:
+            current.mkdir(mode=0o700)
+    destination = context.workspace.joinpath(*relative.parts)
+    if destination.exists() or destination.is_symlink():
+        metadata = destination.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"{label} must be a regular file")
+    return destination, relative.as_posix()
+
+
+def _atomic_bytes(path: Path, payload: bytes) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
+            temporary = Path(output.name)
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        temporary = None
+        descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def _post(url: str, capability: str, path: str, value: object) -> dict[str, Any]:
     payload = json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
     request = urllib.request.Request(
@@ -143,8 +249,31 @@ def _post(url: str, capability: str, path: str, value: object) -> dict[str, Any]
         with urllib.request.urlopen(request, timeout=600) as response:
             body = response.read(_MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")[:4000]
-        raise RuntimeError(f"Runtime service rejected request ({error.code}): {detail}") from error
+        body = error.read(_MAX_ERROR_RESPONSE_BYTES + 1)
+        if len(body) > _MAX_ERROR_RESPONSE_BYTES:
+            error_payload: dict[str, Any] = {
+                "error": "runtime_service_error",
+                "detail": "Runtime service error response exceeds the Core byte limit",
+            }
+        else:
+            try:
+                decoded = json.loads(body)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                detail = body.decode("utf-8", errors="replace").strip()
+                error_payload = {
+                    "error": "runtime_service_error",
+                    "detail": detail or f"Runtime service returned HTTP {error.code}",
+                }
+            else:
+                error_payload = (
+                    decoded
+                    if isinstance(decoded, dict)
+                    else {
+                        "error": "runtime_service_error",
+                        "detail": "Runtime service returned a non-object error response",
+                    }
+                )
+        raise RuntimeServiceError(error.code, error_payload) from error
     except urllib.error.URLError as error:
         raise RuntimeError(f"Runtime service is unavailable: {error.reason}") from error
     if len(body) > _MAX_RESPONSE_BYTES:
@@ -193,6 +322,194 @@ def _idempotency_key(prefix: str, value: object) -> str:
     return f"core-{prefix}-{hashlib.sha256(payload).hexdigest()[:32]}"
 
 
+def _finite_number(value: object, *, positive: bool = False) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or (positive and number <= 0):
+        return None
+    return number
+
+
+def _duration_us(kernel: dict[str, Any]) -> float | None:
+    duration = _finite_number(kernel.get("duration"), positive=True)
+    unit = kernel.get("duration_unit")
+    if duration is None or not isinstance(unit, str):
+        return _finite_number(kernel.get("duration_us"), positive=True)
+    scale = {"ns": 0.001, "us": 1.0, "ms": 1_000.0, "s": 1_000_000.0}.get(unit)
+    return None if scale is None else duration * scale
+
+
+def _profile_kernel(raw: dict[str, Any]) -> dict[str, Any]:
+    """Preserve safe profiler evidence while adding stable Agent-facing aliases."""
+    kernel = dict(raw)
+    name = raw.get("name", raw.get("kernel_name"))
+    if isinstance(name, str) and name:
+        kernel["name"] = name
+    kernel.pop("kernel_name", None)
+
+    duration_us = _duration_us(raw)
+    if duration_us is not None:
+        kernel["duration_us"] = duration_us
+    kernel.pop("duration", None)
+    kernel.pop("duration_unit", None)
+
+    memory_sol = _finite_number(raw.get("memory_sol_pct"))
+    if memory_sol is None:
+        memory_sol = _finite_number(raw.get("mem_sol_pct"))
+    if memory_sol is not None:
+        kernel["memory_sol_pct"] = memory_sol
+    kernel.pop("mem_sol_pct", None)
+
+    aliases = {
+        "registers": "registers_per_thread",
+        "smem_bytes": "shared_memory_bytes",
+    }
+    for source, target in aliases.items():
+        value = _finite_number(raw.get(target))
+        if value is None:
+            value = _finite_number(raw.get(source))
+        if value is not None:
+            kernel[target] = value
+        kernel.pop(source, None)
+
+    compute_sol = _finite_number(raw.get("compute_sol_pct"))
+    bound = raw.get("bound")
+    if (
+        (not isinstance(bound, str) or not bound)
+        and compute_sol is not None
+        and memory_sol is not None
+    ):
+        kernel["bound"] = "compute" if compute_sol > memory_sol else "memory"
+    return kernel
+
+
+def _profile_result(
+    raw: dict[str, Any],
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    kernels_value = raw.get("kernels")
+    if not isinstance(kernels_value, list):
+        return raw
+    kernels = [_profile_kernel(item) for item in kernels_value if isinstance(item, dict)]
+    durations = [
+        duration
+        for kernel in kernels
+        if (duration := _finite_number(kernel.get("duration_us"), positive=True)) is not None
+    ]
+    total_duration = sum(durations)
+    if total_duration > 0:
+        for kernel in kernels:
+            duration = _finite_number(kernel.get("duration_us"), positive=True)
+            if duration is not None:
+                kernel["duration_share_pct"] = duration * 100.0 / total_duration
+
+    weighted_sol = 0.0
+    weighted_sol_duration = 0.0
+    weighted_compute = 0.0
+    weighted_memory = 0.0
+    bound_duration = 0.0
+    for kernel in kernels:
+        duration = _finite_number(kernel.get("duration_us"), positive=True)
+        compute = _finite_number(kernel.get("compute_sol_pct"))
+        memory = _finite_number(kernel.get("memory_sol_pct"))
+        if duration is None or compute is None or memory is None:
+            continue
+        weighted_sol += max(compute, memory) * duration
+        weighted_sol_duration += duration
+        weighted_compute += compute * duration
+        weighted_memory += memory * duration
+        bound_duration += duration
+
+    result: dict[str, Any] = {
+        key: value for key, value in raw.items() if key not in {"kernels", "shape_id"}
+    }
+    shape_id = request.get("shape_id", raw.get("shape_id"))
+    if isinstance(shape_id, int) and not isinstance(shape_id, bool) and shape_id >= 0:
+        result["shape_id"] = str(shape_id)
+    elif isinstance(shape_id, str) and shape_id.isdecimal():
+        result["shape_id"] = shape_id
+    level = request.get("level")
+    if isinstance(level, str) and level:
+        result["profile_level"] = level
+    result["kernel_count"] = len(kernels)
+    if total_duration > 0:
+        result["total_duration_us"] = total_duration
+        dominant = max(
+            kernels,
+            key=lambda item: _finite_number(item.get("duration_us"), positive=True) or 0.0,
+        )
+        name = dominant.get("name")
+        if isinstance(name, str) and name:
+            result["dominant_kernel"] = name
+    if weighted_sol_duration > 0:
+        result["weighted_sol_pct"] = weighted_sol / weighted_sol_duration
+    if bound_duration > 0:
+        result["dominant_bound"] = "compute" if weighted_compute > weighted_memory else "memory"
+    result["kernels"] = kernels
+    return result
+
+
+def _profile_agent_response(
+    response: dict[str, Any],
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    worker = response.get("result")
+    if not isinstance(worker, dict):
+        raise ValueError("Gateway profile response has no object result")
+    visible = {
+        "kernel_artifact_digest": response.get("kernel_artifact_digest"),
+        "kernel_trial_id": response.get("kernel_trial_id"),
+        "gateway_result_digest": response.get("gateway_result_digest"),
+        **worker,
+    }
+    raw_result = worker.get("result")
+    if isinstance(raw_result, dict):
+        visible["result"] = _profile_result(raw_result, request)
+    return visible
+
+
+def _agent_gateway_response(
+    response: dict[str, Any],
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    operation = response.get("operation")
+    if operation == "profile":
+        return _profile_agent_response(response, request)
+    if operation in {
+        "dev",
+        "disassemble",
+        "jobs",
+        "poll",
+        "cancel",
+        "env",
+        "health",
+        "config",
+    }:
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise ValueError(f"Gateway {operation} response has no object result")
+        return result
+    visible = {
+        key: item for key, item in response.items() if key not in {"schema_version", "evaluation"}
+    }
+    evaluation = response.get("evaluation")
+    if evaluation is None:
+        return visible
+    if not isinstance(evaluation, dict):
+        raise ValueError("Gateway returned an invalid evaluation")
+    result = visible.get("result")
+    if not isinstance(result, dict):
+        raise ValueError("Gateway returned an evaluation without an object result")
+    merged = dict(result)
+    merged.pop("all_pass", None)
+    merged.pop("latency_us_geomean", None)
+    merged["correct"] = evaluation.get("correct")
+    merged["latency_us"] = evaluation.get("latency_us")
+    visible["result"] = merged
+    return visible
+
+
 def gateway_execute(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
     overlap = _RESERVED_REQUEST_FIELDS.intersection(request)
     if overlap:
@@ -200,24 +517,110 @@ def gateway_execute(context: RuntimeToolContext, request: dict[str, Any]) -> dic
     operation = request.get("operation")
     if not isinstance(operation, str) or not operation:
         raise ValueError("Gateway request requires operation")
+    if operation in _RUNTIME_QUERY_OPERATIONS:
+        command = next(
+            name
+            for name, query_operation in _RUNTIME_QUERY_COMMANDS.items()
+            if query_operation == operation
+        )
+        raise ValueError(
+            f"Runtime-local operation {operation!r} must use the {command!r} subcommand"
+        )
+    if operation not in _GATEWAY_EXECUTE_OPERATIONS:
+        raise ValueError(f"unsupported gateway-execute operation: {operation}")
     value = {"schema_version": 2, "attempt_id": context.attempt_id, **request}
     if operation in _CANDIDATE_OPERATIONS:
         value["candidate"] = _candidate(context.working_kernel)
-    value.setdefault("idempotency_key", _idempotency_key("gateway", value))
-    return _post(context.gateway_url, context.gateway_capability, "/v1/operations", value)
+    value["idempotency_key"] = _idempotency_key("gateway", value)
+    response = _post(context.gateway_url, context.gateway_capability, "/v1/operations", value)
+    return _agent_gateway_response(response, request)
+
+
+def runtime_query(
+    context: RuntimeToolContext,
+    command: str,
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Execute one Runtime-local, visibility-scoped history query without Agate."""
+    try:
+        operation = _RUNTIME_QUERY_COMMANDS[command]
+    except KeyError as error:
+        raise ValueError(f"unsupported Runtime query command: {command}") from error
+    overlap = (_RESERVED_REQUEST_FIELDS | {"operation"}).intersection(request)
+    if overlap:
+        raise ValueError(f"Runtime query sets Runtime-owned fields: {sorted(overlap)}")
+    destination: Path | None = None
+    destination_name: str | None = None
+    query_request = request
+    if command == "kernel-artifact-read":
+        unknown = set(request) - {"kernel_artifact_digest", "artifact_file", "file"}
+        if unknown:
+            raise ValueError(f"unknown Kernel Artifact read fields: {sorted(unknown)}")
+        destination, destination_name = _scratch_output(context, request.get("file"))
+        artifact_file = request.get("artifact_file")
+        if artifact_file is None:
+            artifact_file = PurePosixPath(destination_name).name
+        if not isinstance(artifact_file, str):
+            raise ValueError("artifact_file must be a string")
+        query_request = {
+            "kernel_artifact_digest": request.get("kernel_artifact_digest"),
+            "file": artifact_file,
+        }
+    value = {
+        "schema_version": 2,
+        "attempt_id": context.attempt_id,
+        "operation": operation,
+        **query_request,
+    }
+    value["idempotency_key"] = _idempotency_key("runtime-query", value)
+    response = _post(
+        context.gateway_url,
+        context.gateway_capability,
+        "/v1/runtime/queries",
+        value,
+    )
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise ValueError(f"{command} returned an invalid response")
+    if command == "gateway-result-read":
+        return result
+    if command == "kernel-artifact-read":
+        if not isinstance(result, dict) or destination is None or destination_name is None:
+            raise ValueError("Kernel Artifact read returned an invalid response")
+        content = result.get("content")
+        encoding = result.get("encoding")
+        if not isinstance(content, str):
+            raise ValueError("Kernel Artifact read returned no file content")
+        if encoding == "utf-8":
+            payload = content.encode("utf-8")
+        elif encoding == "base64":
+            try:
+                payload = base64.b64decode(content, validate=True)
+            except ValueError as error:
+                raise ValueError("Kernel Artifact read returned invalid Base64") from error
+        else:
+            raise ValueError("Kernel Artifact read returned an unknown encoding")
+        _atomic_bytes(destination, payload)
+        return {
+            "status": "completed",
+            "file": destination_name,
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+    return result
 
 
 def wiki_query(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
     if context.wiki_url is None or context.wiki_capability is None:
         raise RuntimeError("GPU Wiki capability is unavailable for this Attempt")
-    unknown = set(request) - {"query", "idempotency_key"}
+    unknown = set(request) - {"query"}
     if unknown:
         raise ValueError(f"unknown Wiki request fields: {sorted(unknown)}")
     query = request.get("query")
     if not isinstance(query, str) or not query.strip():
         raise ValueError("Wiki request requires a non-empty query")
-    value = {"schema_version": 1, "attempt_id": context.attempt_id, **request}
-    value.setdefault("idempotency_key", _idempotency_key("wiki", value))
+    value = {"schema_version": 1, "attempt_id": context.attempt_id, "query": query}
+    value["idempotency_key"] = _idempotency_key("wiki", value)
     return _agent_knowledge(
         _post(context.wiki_url, context.wiki_capability, "/v1/wiki/query", value)
     )
@@ -231,53 +634,453 @@ def _agent_knowledge(response: dict[str, Any]) -> dict[str, Any]:
     return content
 
 
-def _journal_path(context: RuntimeAttemptContext) -> Path:
+def _journal_path(context: RuntimeToolContext) -> Path:
     return context.workspace / "scratch/experiments.json"
 
 
-def record_experiment(context: RuntimeAttemptContext, request: dict[str, Any]) -> dict[str, Any]:
+def _direction_journal_path(context: RuntimeToolContext) -> Path:
+    return context.workspace / "scratch/directions.json"
+
+
+def _direction_event_fields() -> set[str]:
+    return {
+        "direction_event_id",
+        "direction_id",
+        "recorded_at",
+        "action",
+        "name",
+        "hypothesis",
+        "rationale",
+        "plan",
+        "success_criteria",
+        "stop_conditions",
+        "analysis",
+        "supporting_experiment_ids",
+    }
+
+
+def _validate_direction_id(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("direction_")
+        or len(value) != len("direction_") + 32
+        or any(character not in "0123456789abcdef" for character in value[10:])
+    ):
+        raise ValueError("Direction ID is invalid")
+    return value
+
+
+def _validate_experiment_id_array(value: object, label: str) -> list[str]:
+    values = _text_array(value, label)
+    if len(values) > 32 or len(set(values)) != len(values):
+        raise ValueError(f"{label} must contain at most 32 unique IDs")
+    for experiment_id in values:
+        if (
+            not experiment_id.startswith("experiment_")
+            or len(experiment_id) != len("experiment_") + 32
+            or any(character not in "0123456789abcdef" for character in experiment_id[11:])
+        ):
+            raise ValueError(f"{label} contains an invalid Experiment ID")
+    return values
+
+
+def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, Any]]:
+    validated: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict) or set(event) != _direction_event_fields():
+            raise ValueError(f"{label} contains a malformed event")
+        _validate_direction_id(event.get("direction_id"))
+        event_id = event.get("direction_event_id")
+        if (
+            not isinstance(event_id, str)
+            or not event_id.startswith("directionevent_")
+            or len(event_id) != len("directionevent_") + 32
+            or any(character not in "0123456789abcdef" for character in event_id[15:])
+        ):
+            raise ValueError("Direction Event ID is invalid")
+        recorded_at = _text(event.get("recorded_at"), "Direction recorded_at")
+        try:
+            datetime.fromisoformat(recorded_at.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError("Direction recorded_at must be ISO-8601") from error
+        action = event.get("action")
+        if action not in {"propose", "start", "complete", "abandon", "block", "defer"}:
+            raise ValueError("Direction action is invalid")
+        supporting = _validate_experiment_id_array(
+            event.get("supporting_experiment_ids"),
+            "Direction supporting_experiment_ids",
+        )
+        if action == "propose":
+            for field in (
+                "name",
+                "hypothesis",
+                "rationale",
+                "success_criteria",
+                "stop_conditions",
+            ):
+                _text(event.get(field), f"Direction {field}")
+            _text_array(event.get("plan"), "Direction plan", required=True)
+            if event.get("analysis") is not None or supporting:
+                raise ValueError("Direction proposal cannot contain outcome evidence")
+        else:
+            if any(
+                event.get(field) is not None
+                for field in (
+                    "name",
+                    "hypothesis",
+                    "rationale",
+                    "success_criteria",
+                    "stop_conditions",
+                )
+            ) or event.get("plan") != []:
+                raise ValueError("Direction update cannot redefine its proposal")
+            _text(event.get("analysis"), "Direction analysis")
+            if action in {"complete", "abandon"} and not supporting:
+                raise ValueError(f"Direction {action} requires supporting Experiments")
+        validated.append(event)
+    return validated
+
+
+def _current_direction_events(
+    context: RuntimeToolContext,
+    *,
+    required: bool = False,
+) -> list[dict[str, Any]]:
+    path = _direction_journal_path(context)
+    if not path.exists():
+        if required:
+            raise ValueError("Attempt report requires a matching Direction journal")
+        return []
+    journal = _read_object(path, "Direction journal", max_bytes=_MAX_JOURNAL_BYTES)
+    events = journal.get("events")
+    if (
+        journal.get("schema_version") != 1
+        or journal.get("attempt_id") != context.attempt_id
+        or not isinstance(events, list)
+        or (required and not events)
+    ):
+        raise ValueError("Direction journal belongs to a different protocol or Attempt")
+    return _validate_direction_events(events, "Direction journal")
+
+
+def _visible_direction_events(context: RuntimeToolContext) -> list[dict[str, Any]]:
+    values: list[dict[str, Any]] = []
+    if not isinstance(context, RuntimeLineageBootstrapContext):
+        history = runtime_query(context, "_direction-history", {})
+        journals = history.get("journals")
+        if set(history) != {"journals"} or not isinstance(journals, list):
+            raise ValueError("Runtime returned invalid Direction history")
+        for journal in journals:
+            if not isinstance(journal, list) or not journal:
+                raise ValueError("Runtime returned an invalid Direction journal")
+            values.extend(_validate_direction_events(journal, "Historical Direction journal"))
+    values.extend(_current_direction_events(context))
+    if len(values) > 4_096:
+        raise ValueError("Visible Direction history exceeds its entry limit")
+    event_ids = [event["direction_event_id"] for event in values]
+    if len(set(event_ids)) != len(event_ids):
+        raise ValueError("Visible Direction history contains duplicate Event IDs")
+    return values
+
+
+def _direction_views(context: RuntimeToolContext) -> dict[str, dict[str, Any]]:
+    statuses = {
+        "propose": "proposed",
+        "start": "in_progress",
+        "complete": "completed",
+        "abandon": "abandoned",
+        "block": "blocked",
+        "defer": "deferred",
+    }
+    directions: dict[str, dict[str, Any]] = {}
+    for event in _visible_direction_events(context):
+        direction_id = str(event["direction_id"])
+        action = str(event["action"])
+        existing = directions.get(direction_id)
+        if action == "propose":
+            if existing is not None:
+                raise ValueError("Direction history contains duplicate proposals")
+            directions[direction_id] = {
+                "direction_id": direction_id,
+                "name": event["name"],
+                "hypothesis": event["hypothesis"],
+                "rationale": event["rationale"],
+                "plan": event["plan"],
+                "success_criteria": event["success_criteria"],
+                "stop_conditions": event["stop_conditions"],
+                "status": statuses[action],
+                "analysis": None,
+                "supporting_experiment_ids": [],
+            }
+            continue
+        if existing is None:
+            raise ValueError("Direction update precedes its proposal")
+        existing["status"] = statuses[action]
+        existing["analysis"] = event["analysis"]
+        supporting = existing["supporting_experiment_ids"]
+        assert isinstance(supporting, list)
+        for experiment_id in event["supporting_experiment_ids"]:
+            if experiment_id not in supporting:
+                supporting.append(experiment_id)
+
+    # Experiment records carry the authoritative Direction association. Project
+    # that reverse relationship into the normalized Direction view so an Agent
+    # does not have to repeat every Experiment ID in a Direction status event.
+    # Explicit status-event references remain useful for cross-Direction
+    # evidence and are retained above.
+    for experiment in _visible_experiments(context):
+        direction = directions.get(str(experiment["direction_id"]))
+        if direction is None:
+            continue
+        supporting = direction["supporting_experiment_ids"]
+        assert isinstance(supporting, list)
+        experiment_id = str(experiment["experiment_id"])
+        if experiment_id not in supporting:
+            supporting.append(experiment_id)
+    return directions
+
+
+def update_direction(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    action = request.get("action")
+    if action == "propose":
+        if set(request) != _DIRECTION_PROPOSAL_FIELDS:
+            raise ValueError(
+                f"Direction proposal fields must be exactly {sorted(_DIRECTION_PROPOSAL_FIELDS)}"
+            )
+        for field in (
+            "name",
+            "hypothesis",
+            "rationale",
+            "success_criteria",
+            "stop_conditions",
+        ):
+            _text(request.get(field), f"Direction {field}")
+        _text_array(request.get("plan"), "Direction plan", required=True)
+        direction_id = f"direction_{uuid4().hex}"
+        event = {
+            "direction_event_id": f"directionevent_{uuid4().hex}",
+            "direction_id": direction_id,
+            "recorded_at": datetime.now(UTC).isoformat(),
+            **request,
+            "analysis": None,
+            "supporting_experiment_ids": [],
+        }
+    else:
+        if set(request) != _DIRECTION_UPDATE_FIELDS:
+            raise ValueError(
+                f"Direction update fields must be exactly {sorted(_DIRECTION_UPDATE_FIELDS)}"
+            )
+        if action not in {"start", "complete", "abandon", "block", "defer"}:
+            raise ValueError("Direction update action is invalid")
+        direction_id = _validate_direction_id(request.get("direction_id"))
+        direction = _direction_views(context).get(direction_id)
+        if direction is None:
+            raise ValueError("Direction ID is outside the current Attempt's visible history")
+        _text(request.get("analysis"), "Direction analysis")
+        if action == "start":
+            started_direction_ids = {
+                str(event["direction_id"])
+                for event in _current_direction_events(context)
+                if event["action"] == "start"
+            }
+            if direction_id not in started_direction_ids and len(started_direction_ids) >= 3:
+                raise ValueError(
+                    "Attempt Direction advancement limit exceeded: maximum=3; "
+                    f"requested_direction_id={direction_id}; "
+                    f"already_advanced_direction_ids={sorted(started_direction_ids)}. "
+                    "The requested Direction was not started; keep it proposed or deferred for "
+                    "a future Attempt"
+                )
+        supporting = list(direction["supporting_experiment_ids"])
+        if action in {"complete", "abandon"} and not supporting:
+            raise ValueError(f"Direction {action} requires at least one associated Experiment")
+        event = {
+            "direction_event_id": f"directionevent_{uuid4().hex}",
+            "direction_id": direction_id,
+            "recorded_at": datetime.now(UTC).isoformat(),
+            "action": action,
+            "name": None,
+            "hypothesis": None,
+            "rationale": None,
+            "plan": [],
+            "success_criteria": None,
+            "stop_conditions": None,
+            "analysis": request["analysis"],
+            "supporting_experiment_ids": supporting,
+        }
+    _validate_direction_events([event], "Direction event")
+    path = _direction_journal_path(context)
+    journal = (
+        _read_object(path, "Direction journal", max_bytes=_MAX_JOURNAL_BYTES)
+        if path.exists()
+        else {"schema_version": 1, "attempt_id": context.attempt_id, "events": []}
+    )
+    if journal.get("schema_version") != 1 or journal.get("attempt_id") != context.attempt_id:
+        raise ValueError("Direction journal belongs to a different protocol or Attempt")
+    events = journal.get("events")
+    if not isinstance(events, list):
+        raise ValueError("Direction journal is malformed")
+    events.append(event)
+    _atomic_json(path, journal)
+    return {"status": "recorded", "direction_id": direction_id}
+
+
+def list_directions(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    if set(request) != {"file"}:
+        raise ValueError("list-directions request requires exactly file")
+    destination, destination_name = _scratch_output(
+        context,
+        request.get("file"),
+        label="Direction index output",
+    )
+    value = {
+        "directions": [
+            {
+                "direction_id": direction["direction_id"],
+                "name": direction["name"],
+                "status": direction["status"],
+            }
+            for direction in _direction_views(context).values()
+        ]
+    }
+    _atomic_json(destination, value)
+    return {
+        "status": "completed",
+        "file": destination_name,
+        "count": len(value["directions"]),
+    }
+
+
+def load_direction(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    if set(request) != {"direction_id"}:
+        raise ValueError("load-direction request requires exactly direction_id")
+    direction_id = _validate_direction_id(request.get("direction_id"))
+    try:
+        return _direction_views(context)[direction_id]
+    except KeyError as error:
+        raise ValueError("Direction ID is outside the current Attempt's visible history") from error
+
+
+def _experiment_subject(value: object, label: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != _EXPERIMENT_SUBJECT_FIELDS:
+        raise ValueError(
+            f"Experiment {label} fields must be exactly {sorted(_EXPERIMENT_SUBJECT_FIELDS)}"
+        )
+    digest = value.get("kernel_artifact_digest")
+    if (
+        not isinstance(digest, str)
+        or not digest.startswith("sha256:")
+        or len(digest) != len("sha256:") + 64
+        or any(character not in "0123456789abcdef" for character in digest[7:])
+    ):
+        raise ValueError(f"Experiment {label} kernel_artifact_digest is invalid")
+    trial_id = value.get("kernel_trial_id")
+    if (
+        not isinstance(trial_id, str)
+        or not trial_id.startswith("gtrial_")
+        or len(trial_id) != len("gtrial_") + 32
+        or any(character not in "0123456789abcdef" for character in trial_id[7:])
+    ):
+        raise ValueError(f"Experiment {label} kernel_trial_id is invalid")
+    results = value.get("gateway_result_digests")
+    if (
+        not isinstance(results, list)
+        or not results
+        or len(results) > 32
+        or len(set(item for item in results if isinstance(item, str))) != len(results)
+    ):
+        raise ValueError(
+            f"Experiment {label} gateway_result_digests must be a non-empty unique list"
+        )
+    for result in results:
+        if (
+            not isinstance(result, str)
+            or not result.startswith("sha256:")
+            or len(result) != len("sha256:") + 64
+            or any(character not in "0123456789abcdef" for character in result[7:])
+        ):
+            raise ValueError(f"Experiment {label} gateway_result_digests is invalid")
+    return value
+
+
+def _validate_experiment_comparison(
+    request: dict[str, Any],
+    *,
+    allow_baseline: bool,
+) -> None:
+    before = _experiment_subject(request.get("before"), "before")
+    after = _experiment_subject(request.get("after"), "after")
+    if request.get("action") == "baseline":
+        if not allow_baseline:
+            raise ValueError("Experiment action baseline is only valid during Bootstrap")
+        if before is not None or after is None:
+            raise ValueError("Experiment baseline requires before=null and complete after evidence")
+        return
+    if (before is None) != (after is None):
+        raise ValueError("Experiment before and after must both be present or both be null")
+    if request.get("action") in {"keep_after", "restore_before"} and before is None:
+        raise ValueError("Experiment keep_after/restore_before requires before and after evidence")
+
+
+def record_experiment(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
     if set(request) != _EXPERIMENT_FIELDS:
         raise ValueError(f"Experiment fields must be exactly {sorted(_EXPERIMENT_FIELDS)}")
-    for key in _EXPERIMENT_FIELDS - {"decision", "candidate_artifact_digest"}:
+    for key in _EXPERIMENT_FIELDS - {"action", "before", "after"}:
         if not isinstance(request[key], str) or not request[key].strip():
             raise ValueError(f"Experiment {key} must be non-empty text")
-    if request["decision"] not in {"continue", "revert", "pivot"}:
-        raise ValueError("Experiment decision is invalid")
-    digest = request["candidate_artifact_digest"]
-    if digest is not None and (
-        not isinstance(digest, str)
-        or (
-            not digest.startswith("sha256:")
-            or len(digest) != len("sha256:") + 64
-            or any(
-                character not in "0123456789abcdef" for character in digest.removeprefix("sha256:")
-            )
+    direction_id = _validate_direction_id(request.get("direction_id"))
+    direction = _direction_views(context).get(direction_id)
+    if direction is None:
+        raise ValueError("Experiment Direction is outside visible history")
+    if direction["status"] != "in_progress":
+        raise ValueError(
+            "Experiment Direction must be in progress; "
+            f"current status is {direction['status']}"
         )
-    ):
-        raise ValueError("Experiment candidate_artifact_digest is invalid")
+    allowed_actions = {"keep_after", "restore_before", "abandon_direction"}
+    if isinstance(context, RuntimeLineageBootstrapContext):
+        allowed_actions.add("baseline")
+    elif request["action"] == "baseline":
+        raise ValueError("Experiment action baseline is only valid during Bootstrap")
+    if request["action"] not in allowed_actions:
+        raise ValueError("Experiment action is invalid")
+    _validate_experiment_comparison(
+        request,
+        allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
+    )
     path = _journal_path(context)
     journal = (
         _read_object(path, "Experiment journal", max_bytes=_MAX_JOURNAL_BYTES)
         if path.exists()
         else {
-            "schema_version": 1,
+            "schema_version": 5,
             "attempt_id": context.attempt_id,
             "experiments": [],
         }
     )
-    if journal.get("schema_version") != 1 or journal.get("attempt_id") != context.attempt_id:
+    if journal.get("schema_version") != 5 or journal.get("attempt_id") != context.attempt_id:
         raise ValueError("Experiment journal belongs to a different protocol or Attempt")
     experiments = journal.get("experiments")
     if not isinstance(experiments, list):
         raise ValueError("Experiment journal is malformed")
+    if request["action"] == "baseline" and any(
+        item.get("action") == "baseline" for item in experiments if isinstance(item, dict)
+    ):
+        raise ValueError("Bootstrap Experiment journal may contain only one baseline action")
     experiment = {
+        "experiment_id": f"experiment_{uuid4().hex}",
         "sequence": len(experiments) + 1,
         "recorded_at": datetime.now(UTC).isoformat(),
         **request,
     }
     experiments.append(experiment)
     _atomic_json(path, journal)
-    return experiment
+    return {
+        "status": "recorded",
+        "experiment_id": experiment["experiment_id"],
+    }
 
 
 def _text(value: object, label: str) -> str:
@@ -296,123 +1099,408 @@ def _text_array(value: object, label: str, *, required: bool = False) -> list[st
     return value
 
 
-def _validated_experiments(context: RuntimeAttemptContext) -> list[dict[str, Any]]:
-    journal = _read_object(
-        _journal_path(context), "Experiment journal", max_bytes=_MAX_JOURNAL_BYTES
-    )
+def _exact_object(value: object, label: str, fields: set[str]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError(f"{label} fields must be exactly {sorted(fields)}")
+    return value
+
+
+def _object_array(
+    value: object,
+    label: str,
+    fields: set[str],
+    *,
+    required: bool = False,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be an array")
+    if required and not value:
+        raise ValueError(f"{label} must not be empty")
+    objects: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        entry = _exact_object(item, f"{label}[{index}]", fields)
+        for field in fields:
+            _text(entry.get(field), f"{label}[{index}].{field}")
+        objects.append(entry)
+    return objects
+
+
+def _validated_experiments(context: RuntimeToolContext) -> list[dict[str, Any]]:
+    return _current_experiments(context, required=True)
+
+
+def _current_experiments(
+    context: RuntimeToolContext,
+    *,
+    required: bool,
+) -> list[dict[str, Any]]:
+    path = _journal_path(context)
+    if not path.exists():
+        if required:
+            raise ValueError("Attempt report requires a non-empty matching Experiment journal")
+        return []
+    journal = _read_object(path, "Experiment journal", max_bytes=_MAX_JOURNAL_BYTES)
     experiments = journal.get("experiments")
-    if journal.get("schema_version") != 1 or journal.get("attempt_id") != context.attempt_id:
+    if journal.get("schema_version") != 5 or journal.get("attempt_id") != context.attempt_id:
         raise ValueError("Experiment journal belongs to a different protocol or Attempt")
-    if not isinstance(experiments, list) or not experiments:
+    if not isinstance(experiments, list) or (required and not experiments):
         raise ValueError("Attempt report requires a non-empty matching Experiment journal")
-    expected_fields = _EXPERIMENT_FIELDS | {"sequence", "recorded_at"}
+    return _validate_experiment_entries(
+        experiments,
+        "Experiment journal",
+        allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
+    )
+
+
+def _validate_experiment_entries(
+    experiments: list[Any],
+    label: str,
+    *,
+    allow_baseline: bool,
+) -> list[dict[str, Any]]:
+    expected_fields = _EXPERIMENT_FIELDS | {"experiment_id", "sequence", "recorded_at"}
+    validated: list[dict[str, Any]] = []
     for sequence, experiment in enumerate(experiments, start=1):
         if not isinstance(experiment, dict) or set(experiment) != expected_fields:
-            raise ValueError("Experiment journal contains a malformed entry")
+            raise ValueError(f"{label} contains a malformed entry")
         if experiment.get("sequence") != sequence:
-            raise ValueError("Experiment journal sequence must be contiguous")
+            raise ValueError(f"{label} sequence must be contiguous")
+        experiment_id = experiment.get("experiment_id")
+        if (
+            not isinstance(experiment_id, str)
+            or not experiment_id.startswith("experiment_")
+            or len(experiment_id) != len("experiment_") + 32
+            or any(character not in "0123456789abcdef" for character in experiment_id[11:])
+        ):
+            raise ValueError("Experiment experiment_id is invalid")
         _text(experiment.get("recorded_at"), "Experiment recorded_at")
         try:
             datetime.fromisoformat(str(experiment["recorded_at"]).replace("Z", "+00:00"))
         except ValueError as error:
             raise ValueError("Experiment recorded_at must be ISO-8601") from error
-        for field in _EXPERIMENT_FIELDS - {"decision", "candidate_artifact_digest"}:
+        for field in _EXPERIMENT_FIELDS - {"action", "before", "after"}:
             _text(experiment.get(field), f"Experiment {field}")
-        digest = experiment.get("candidate_artifact_digest")
-        if digest is not None and not isinstance(digest, str):
-            raise ValueError("Experiment candidate_artifact_digest is invalid")
-        if experiment.get("decision") not in {"continue", "revert", "pivot"}:
-            raise ValueError("Experiment decision is invalid")
-    return experiments
+        _validate_direction_id(experiment.get("direction_id"))
+        allowed_actions = {
+            "keep_after",
+            "restore_before",
+            "abandon_direction",
+        }
+        if allow_baseline:
+            allowed_actions.add("baseline")
+        if experiment.get("action") not in allowed_actions:
+            raise ValueError("Experiment action is invalid")
+        _validate_experiment_comparison(experiment, allow_baseline=allow_baseline)
+        validated.append(experiment)
+    return validated
 
 
-def attempt_report(context: RuntimeAttemptContext, request: dict[str, Any]) -> dict[str, Any]:
+def _visible_experiments(
+    context: RuntimeToolContext,
+) -> list[dict[str, Any]]:
+    """Return frozen visible history followed by the live current Attempt Journal."""
+    values: list[dict[str, Any]] = []
+    if not isinstance(context, RuntimeLineageBootstrapContext):
+        history = runtime_query(context, "_experiment-history", {})
+        journals = history.get("journals")
+        if set(history) != {"journals"} or not isinstance(journals, list):
+            raise ValueError("Runtime returned invalid Experiment history")
+        for journal in journals:
+            if not isinstance(journal, list) or not journal:
+                raise ValueError("Runtime returned an invalid Experiment journal")
+            values.extend(
+                _validate_experiment_entries(
+                    journal,
+                    "Historical branch Experiment journal",
+                    allow_baseline=True,
+                )
+            )
+    values.extend(_current_experiments(context, required=False))
+    if len(values) > 4_096:
+        raise ValueError("Visible Experiment history exceeds its entry limit")
+    experiment_ids = [experiment["experiment_id"] for experiment in values]
+    if len(set(experiment_ids)) != len(experiment_ids):
+        raise ValueError("Visible Experiment history contains duplicate Experiment IDs")
+    return values
+
+
+def list_experiments(
+    context: RuntimeToolContext,
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Write a compact index of visible historical and current Experiments."""
+    if set(request) != {"file"}:
+        raise ValueError("list-experiments request requires exactly file")
+    destination, destination_name = _scratch_output(
+        context,
+        request.get("file"),
+        label="Experiment index output",
+    )
+    experiments = _visible_experiments(context)
+    value = {
+        "experiments": [
+            {
+                "experiment_id": experiment["experiment_id"],
+                "sequence": experiment["sequence"],
+                "name": experiment["name"],
+                "action": experiment["action"],
+            }
+            for experiment in experiments
+        ]
+    }
+    _atomic_json(destination, value)
+    return {
+        "status": "completed",
+        "file": destination_name,
+        "count": len(value["experiments"]),
+    }
+
+
+def load_experiment(
+    context: RuntimeToolContext,
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Return one exact visible historical or current Experiment record."""
+    if set(request) != {"experiment_id"}:
+        raise ValueError("load-experiment request requires exactly experiment_id")
+    experiment_id = request.get("experiment_id")
+    if not isinstance(experiment_id, str) or not experiment_id:
+        raise ValueError("load-experiment experiment_id must be non-empty text")
+    for experiment in _visible_experiments(context):
+        if experiment["experiment_id"] == experiment_id:
+            return experiment
+    raise ValueError("Experiment ID is outside the current Attempt's visible history")
+
+
+def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
     if set(request) != _REPORT_FIELDS:
         raise ValueError(f"Attempt report fields must be exactly {sorted(_REPORT_FIELDS)}")
     experiments = _validated_experiments(context)
-    expected_decision = {
-        "candidate_ready": "keep",
-        "pivot": "pivot",
-        "blocked": "blocked",
-    }
+    direction_events = _current_direction_events(context, required=True)
+    directions = _direction_views(context)
+    experiment_direction_ids = {str(experiment["direction_id"]) for experiment in experiments}
+    unknown_direction_ids = sorted(experiment_direction_ids - directions.keys())
+    if unknown_direction_ids:
+        raise ValueError(
+            "Attempt report Experiment references unknown Directions: "
+            f"{unknown_direction_ids}"
+        )
+    in_progress_direction_ids = sorted(
+        direction_id
+        for direction_id, direction in directions.items()
+        if direction["status"] == "in_progress"
+    )
+    if in_progress_direction_ids:
+        raise ValueError(
+            "Attempt report cannot leave any Direction in progress: "
+            f"{in_progress_direction_ids}"
+        )
     status = request.get("status")
-    if status not in expected_decision or request.get("decision") != expected_decision[status]:
-        raise ValueError("Attempt report status and decision are inconsistent")
-    for field in (
-        "hypothesis",
-        "bottleneck",
-        "change_summary",
-        "profile_evidence",
-        "evaluation_evidence",
-        "result_interpretation",
-    ):
-        _text(request.get(field), f"Attempt report {field}")
-    _text_array(request.get("plan"), "Attempt report plan", required=True)
-    _text_array(request.get("research_sources"), "Attempt report research_sources")
-    _text_array(request.get("lessons"), "Attempt report lessons", required=True)
-    _text_array(request.get("next_directions"), "Attempt report next_directions")
+    if status not in {"candidate_ready", "pivot", "blocked"}:
+        raise ValueError("Attempt report status is invalid")
+    if isinstance(context, RuntimeLineageBootstrapContext):
+        if status == "pivot":
+            raise ValueError("Bootstrap Attempt report status must be candidate_ready or blocked")
+        baseline_count = sum(
+            experiment["action"] == "baseline" for experiment in experiments
+        )
+        if baseline_count > 1:
+            raise ValueError("Bootstrap Attempt report may contain only one baseline Experiment")
+        if status == "candidate_ready" and baseline_count != 1:
+            raise ValueError(
+                "Bootstrap candidate_ready report requires exactly one baseline Experiment"
+            )
+        has_identity_bearing_experiment = any(
+            experiment[side] is not None
+            for experiment in experiments
+            for side in ("before", "after")
+        )
+        if status == "blocked" and baseline_count == 0 and has_identity_bearing_experiment:
+            raise ValueError(
+                "Bootstrap blocked report may omit baseline only when no Experiment has "
+                "identity-bearing Gateway evidence"
+            )
+    _text(request.get("hypothesis"), "Attempt report hypothesis")
+    _text(request.get("analysis"), "Attempt report analysis")
+    diagnosis = _exact_object(
+        request.get("diagnosis"),
+        "Attempt report diagnosis",
+        {"bottleneck", "evidence"},
+    )
+    for field in diagnosis:
+        _text(diagnosis[field], f"Attempt report diagnosis.{field}")
+    approach = _exact_object(
+        request.get("approach"),
+        "Attempt report approach",
+        {"summary", "steps", "expected_impact", "risks"},
+    )
+    _text(approach.get("summary"), "Attempt report approach.summary")
+    _text(approach.get("expected_impact"), "Attempt report approach.expected_impact")
+    _text_array(approach.get("steps"), "Attempt report approach.steps", required=True)
+    _text_array(approach.get("risks"), "Attempt report approach.risks")
+    evidence_summary = _exact_object(
+        request.get("evidence_summary"),
+        "Attempt report evidence_summary",
+        {"correctness", "performance"},
+    )
+    for field in evidence_summary:
+        _text(evidence_summary[field], f"Attempt report evidence_summary.{field}")
+    profile_evidence = request.get("profile_evidence")
+    if profile_evidence is not None:
+        profile_value = _exact_object(
+            profile_evidence,
+            "Attempt report profile_evidence",
+            {
+                "tool_used",
+                "profiler",
+                "profile_level",
+                "bottleneck_type",
+                "evidence_summary",
+                "evidence_chain",
+                "supporting_results",
+            },
+        )
+        for field in (
+            "tool_used",
+            "profiler",
+            "profile_level",
+            "bottleneck_type",
+            "evidence_summary",
+            "evidence_chain",
+        ):
+            _text(profile_value[field], f"Attempt report profile_evidence.{field}")
+        supporting_results = profile_value["supporting_results"]
+        if not isinstance(supporting_results, list) or not supporting_results:
+            raise ValueError("Attempt report profile_evidence.supporting_results must be non-empty")
+        if len(supporting_results) > 32:
+            raise ValueError("Attempt report profile_evidence supports at most 32 results")
+        journal_bindings: set[tuple[str, str, str]] = set()
+        for experiment in experiments:
+            for side_name in ("before", "after"):
+                side = experiment[side_name]
+                if side is None:
+                    continue
+                for result_digest in side["gateway_result_digests"]:
+                    journal_bindings.add(
+                        (
+                            side["kernel_artifact_digest"],
+                            side["kernel_trial_id"],
+                            result_digest,
+                        )
+                    )
+        seen_results: set[str] = set()
+        has_profile = False
+        for index, item in enumerate(supporting_results):
+            reference = _exact_object(
+                item,
+                f"Attempt report profile_evidence.supporting_results[{index}]",
+                {
+                    "operation",
+                    "kernel_artifact_digest",
+                    "kernel_trial_id",
+                    "gateway_result_digest",
+                },
+            )
+            operation = reference["operation"]
+            if operation != "profile":
+                raise ValueError("Profile supporting result operation must be profile")
+            has_profile = True
+            subject = _experiment_subject(
+                {
+                    "kernel_artifact_digest": reference["kernel_artifact_digest"],
+                    "kernel_trial_id": reference["kernel_trial_id"],
+                    "gateway_result_digests": [reference["gateway_result_digest"]],
+                },
+                f"Attempt report profile_evidence.supporting_results[{index}]",
+            )
+            assert subject is not None
+            binding = (
+                subject["kernel_artifact_digest"],
+                subject["kernel_trial_id"],
+                subject["gateway_result_digests"][0],
+            )
+            if binding not in journal_bindings:
+                raise ValueError(
+                    "Profile supporting result is not referenced by the Experiment journal: "
+                    f"{binding[2]}"
+                )
+            if binding[2] in seen_results:
+                raise ValueError("Profile supporting Gateway results must be unique")
+            seen_results.add(binding[2])
+        if not has_profile:
+            raise ValueError("Profile evidence requires at least one profile result")
+    candidate = request.get("final_candidate")
+    blocker = request.get("blocker")
+    if status == "candidate_ready":
+        candidate_value = _exact_object(
+            candidate,
+            "Attempt report final_candidate",
+            {"change_summary"},
+        )
+        _text(candidate_value.get("change_summary"), "Attempt report final_candidate summary")
+        if blocker is not None:
+            raise ValueError("candidate_ready cannot declare a blocker")
+    elif status == "pivot":
+        if candidate is not None:
+            raise ValueError("pivot cannot nominate final_candidate")
+        if blocker is not None:
+            raise ValueError("pivot cannot declare a blocker")
+    else:
+        if candidate is not None:
+            raise ValueError("blocked cannot nominate final_candidate")
+        _text(blocker, "Attempt report blocker")
+    _object_array(
+        request.get("knowledge_used"),
+        "Attempt report knowledge_used",
+        {"record_id", "finding", "application"},
+    )
+    findings = request.get("findings")
+    if not isinstance(findings, list) or not findings:
+        raise ValueError("Attempt report findings must be a non-empty array")
+    journal_experiment_ids = {experiment["experiment_id"] for experiment in experiments}
+    for index, item in enumerate(findings):
+        finding = _exact_object(
+            item,
+            f"Attempt report findings[{index}]",
+            {
+                "category",
+                "observation",
+                "root_cause",
+                "resolution",
+                "lesson",
+                "supporting_experiment_ids",
+            },
+        )
+        for field in ("category", "observation", "root_cause", "resolution", "lesson"):
+            _text(finding[field], f"Attempt report findings[{index}].{field}")
+        supporting_ids = _text_array(
+            finding["supporting_experiment_ids"],
+            f"Attempt report findings[{index}].supporting_experiment_ids",
+            required=True,
+        )
+        if len(supporting_ids) > 32:
+            raise ValueError("Attempt finding supports at most 32 Experiments")
+        if len(set(supporting_ids)) != len(supporting_ids):
+            raise ValueError("Attempt finding supporting Experiment IDs must be unique")
+        unknown_experiment_ids = sorted(set(supporting_ids) - journal_experiment_ids)
+        if unknown_experiment_ids:
+            raise ValueError(
+                "Attempt finding references Experiments outside this journal: "
+                f"{unknown_experiment_ids}"
+            )
     report = {
-        "schema_version": 3,
+        "schema_version": 12,
         "attempt_id": context.attempt_id,
         **request,
         "experiments": experiments,
-    }
-    _atomic_json(context.report_path, report, exclusive=True)
-    return report
-
-
-def lineage_bootstrap_report(
-    context: RuntimeLineageBootstrapContext,
-    request: dict[str, Any],
-) -> dict[str, Any]:
-    if set(request) != _BOOTSTRAP_REPORT_FIELDS:
-        raise ValueError(
-            f"lineage bootstrap report fields must be exactly {sorted(_BOOTSTRAP_REPORT_FIELDS)}"
-        )
-    status = request.get("status")
-    if status not in {"baseline_ready", "blocked"}:
-        raise ValueError("lineage bootstrap status is invalid")
-    for field in ("approach", "change_summary", "correctness_evidence", "lessons"):
-        if not isinstance(request[field], str) or not request[field].strip():
-            raise ValueError(f"lineage bootstrap {field} must be non-empty text")
-    for field in ("research_sources", "next_directions"):
-        value = request[field]
-        if not isinstance(value, list) or any(
-            not isinstance(item, str) or not item.strip() for item in value
-        ):
-            raise ValueError(f"lineage bootstrap {field} must be a text array")
-    if len(request["next_directions"]) > 3:
-        raise ValueError("lineage bootstrap can publish at most three next directions")
-    if status == "baseline_ready":
-        latency = request["latency_us"]
-        if isinstance(latency, bool) or not isinstance(latency, (int, float)) or latency <= 0:
-            raise ValueError("a ready lineage baseline requires positive latency_us")
-        for field in ("candidate_artifact_digest", "gateway_result_digest"):
-            if not isinstance(request[field], str) or not request[field].strip():
-                raise ValueError(f"a ready lineage baseline requires {field}")
-        if request["blocker"] is not None:
-            raise ValueError("a ready lineage baseline cannot declare a blocker")
-    else:
-        if not isinstance(request["blocker"], str) or not request["blocker"].strip():
-            raise ValueError("a blocked lineage baseline requires a blocker")
-        if any(
-            request[field] is not None
-            for field in ("latency_us", "candidate_artifact_digest", "gateway_result_digest")
-        ):
-            raise ValueError("a blocked lineage baseline cannot claim a candidate result")
-    report = {
-        "schema_version": 1,
-        "bootstrap_attempt_id": context.attempt_id,
-        **request,
+        "direction_events": direction_events,
     }
     _atomic_json(context.report_path, report, exclusive=True)
     return report
 
 
 def _context(command: str) -> RuntimeToolContext:
-    if command == "lineage-bootstrap-report" or os.environ.get("ATREX_CORE_PHASE") == (
-        "framework_baseline"
-    ):
+    if os.environ.get("ATREX_CORE_PHASE") == "framework_baseline":
         return RuntimeLineageBootstrapContext.from_environment()
     return RuntimeAttemptContext.from_environment()
 
@@ -436,37 +1524,103 @@ def _request_object(
     )
 
 
+def _augment_agent_error(
+    command: str,
+    response: dict[str, Any],
+    *,
+    detail: str,
+    context: RuntimeToolContext | None = None,
+) -> dict[str, Any]:
+    """Add local repair contracts without replacing more authoritative service guidance."""
+    if command == "kernel-artifact-read" and isinstance(response.get("issues"), list):
+        normalized_issues: list[Any] = []
+        for issue in response["issues"]:
+            if isinstance(issue, dict) and issue.get("path") == "file":
+                normalized_issues.append({**issue, "path": "artifact_file"})
+            else:
+                normalized_issues.append(issue)
+        response["issues"] = normalized_issues
+    if "issues" not in response and detail:
+        response["issues"] = [local_validation_issue(detail)]
+    schema = tool_request_schema(
+        command,
+        allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
+    )
+    if schema is not None:
+        response["request_schema"] = schema
+    if "recovery" not in response:
+        recovery = tool_recovery(command)
+        if recovery is not None:
+            response["recovery"] = recovery
+    return response
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in (
-        "gateway-execute",
-        "wiki-query",
-        "record-experiment",
-        "attempt-report",
-        "lineage-bootstrap-report",
-    ):
+    for name in _ATTEMPT_COMMANDS:
         command = commands.add_parser(name)
         command.add_argument("--request", required=True, type=Path)
     args = parser.parse_args(argv)
-    context = _context(args.command)
-    request = _request_object(context, args.request, args.command)
-    if args.command == "gateway-execute":
-        result = gateway_execute(context, request)
-    elif args.command == "wiki-query":
-        result = wiki_query(context, request)
-    elif args.command == "record-experiment":
-        if not isinstance(context, RuntimeAttemptContext):
-            raise ValueError("experiment journal is available only to optimization Attempts")
-        result = record_experiment(context, request)
-    elif args.command == "attempt-report":
-        if not isinstance(context, RuntimeAttemptContext):
-            raise ValueError("Attempt report is available only to optimization Attempts")
-        result = attempt_report(context, request)
-    else:
-        if not isinstance(context, RuntimeLineageBootstrapContext):
-            raise ValueError("lineage bootstrap report requires a framework baseline session")
-        result = lineage_bootstrap_report(context, request)
+    context: RuntimeToolContext | None = None
+    try:
+        context = _context(args.command)
+        request = _request_object(context, args.request, args.command)
+        if args.command == "gateway-execute":
+            result = gateway_execute(context, request)
+        elif args.command in _RUNTIME_QUERY_COMMANDS:
+            result = runtime_query(context, args.command, request)
+        elif args.command == "wiki-query":
+            result = wiki_query(context, request)
+        elif args.command == "update-direction":
+            result = update_direction(context, request)
+        elif args.command == "list-directions":
+            result = list_directions(context, request)
+        elif args.command == "load-direction":
+            result = load_direction(context, request)
+        elif args.command == "record-experiment":
+            result = record_experiment(context, request)
+        elif args.command == "list-experiments":
+            result = list_experiments(context, request)
+        elif args.command == "load-experiment":
+            result = load_experiment(context, request)
+        elif args.command == "attempt-report":
+            result = attempt_report(context, request)
+    except RuntimeServiceError as error:
+        response = dict(error.payload)
+        response.update(
+            {
+                "status": "error",
+                "command": args.command,
+                "http_status": error.status_code,
+            }
+        )
+        if error.status_code == 400:
+            response = _augment_agent_error(
+                args.command,
+                response,
+                detail=str(response.get("detail", "invalid request")),
+                context=context,
+            )
+        print(json.dumps(response, ensure_ascii=False, allow_nan=False, sort_keys=True))
+        return 2
+    except (OSError, RuntimeError, ValueError) as error:
+        invalid_request = isinstance(error, (FileExistsError, FileNotFoundError, ValueError))
+        response = {
+            "status": "error",
+            "error": "invalid_request" if invalid_request else "tool_failed",
+            "command": args.command,
+            "detail": str(error),
+        }
+        if invalid_request:
+            response = _augment_agent_error(
+                args.command,
+                response,
+                detail=str(error),
+                context=context,
+            )
+        print(json.dumps(response, ensure_ascii=False, allow_nan=False, sort_keys=True))
+        return 2
     print(json.dumps(result, ensure_ascii=False, allow_nan=False, sort_keys=True))
     return 0
 
