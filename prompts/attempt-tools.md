@@ -30,7 +30,7 @@ do not pass `kernel_trial_show`, `kernel_artifact_read`, or
 
 An expected tool failure prints one JSON Object and exits nonzero. For request mistakes, repair the
 compact `issues` first, then use the operation-specific `request_schema`; an unknown operation
-returns `supported_operations`. Local Journal and Report errors may also return bounded `recovery`
+returns `supported_operations`. Runtime Journal and local Report errors may also return bounded `recovery`
 steps naming a visibility-safe list/load tool; execute those steps instead of guessing an ID. A
 `candidate_rejected` result created before Job execution includes safe source-validation `details`
 that should be fixed directly. A hidden-case failure deliberately omits exact inputs; repair it only
@@ -82,17 +82,19 @@ For `kernel-artifact-read`, `file` is a required destination under `scratch/`; `
 selects the source inside the Artifact and defaults to the destination basename. Source content is
 written atomically and is not printed to stdout.
 
-`scratch/experiments.json` is an append-only delta containing only Experiments recorded by this
-Session; it never embeds historical records. Invoke
-`list-experiments` with `{"file":"scratch/experiments-index.json"}`; it atomically writes compact
+`record-experiment` sends each validated Experiment to Runtime immediately. Runtime durably appends
+it to the logical Attempt before the command returns; the Journal therefore survives a crashed
+Session and a new recovery generation. Invoke `list-experiments` with
+`{"file":"scratch/experiments-index.json"}`; it asks Runtime for the authorized live-plus-history
+view, then atomically writes compact
 Experiment ID, sequence, name, and action entries to that file and returns only status, file, and
 count. Read the file, then invoke `load-experiment` with
 `{"experiment_id":"experiment_<id>"}` only for selected entries to retrieve their complete
-original records. Both commands are local, unmetered, and bounded by Runtime-authorized Lineage
+original records. Both commands are Runtime-local, unmetered, and bounded by Runtime-authorized Lineage
 history. Bootstrap starts with no earlier journal history; its current live Journal remains visible.
 
-`scratch/directions.json` likewise contains only Direction events added by this Session. Direction
-Journal reads are local and unmetered. Invoke `list-directions` with
+`update-direction` likewise persists each proposal or lifecycle event in Runtime before returning.
+Direction Journal reads are Runtime-local and unmetered. Invoke `list-directions` with
 `{"file":"scratch/directions-index.json"}`; it atomically writes Direction ID, name, and current
 status to that file and returns only status, file, and count. Read the file, then invoke
 `load-direction` with `{"direction_id":"direction_<id>"}` only for selected entries to retrieve
@@ -254,5 +256,6 @@ bind every supporting Profile result to the exact Kernel Artifact, Kernel Trial,
 Result identifiers returned by Runtime. Those exact identifiers must also occur in an Experiment
 Journal `before` or `after` subject. Include at least one `profile` result, set `profile_evidence`
 to `null` if no Profile was executed, and never invent profiler evidence. Do not include the
-experiment journal in the terminal request; the CLI attaches it. Do not run GPU, compiler, JIT,
+Journal in the terminal request; the CLI obtains the authoritative current-Attempt snapshot from
+Runtime and attaches it. Do not run GPU, compiler, JIT,
 profiler, or evaluator work outside these bindings.

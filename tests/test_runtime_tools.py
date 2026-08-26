@@ -3,10 +3,13 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
+from copy import deepcopy
+from datetime import UTC, datetime
 from email.message import Message
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -66,16 +69,197 @@ def _bootstrap_context(root: Path) -> RuntimeLineageBootstrapContext:
     )
 
 
+_FAKE_JOURNALS: dict[str, dict[str, list[dict[str, Any]]]] = {}
+_FAKE_HISTORY: dict[str, dict[str, list[dict[str, Any]]]] = {}
+
+
+def _fake_state(context: Any) -> dict[str, list[dict[str, Any]]]:
+    return _FAKE_JOURNALS.setdefault(
+        str(context.workspace),
+        {"direction_events": [], "experiments": []},
+    )
+
+
+def _fake_visible(context: Any, field: str) -> list[dict[str, Any]]:
+    history = _FAKE_HISTORY.get(str(context.workspace), {}).get(field, [])
+    return [*deepcopy(history), *deepcopy(_fake_state(context)[field])]
+
+
+def _fake_direction_views(context: Any) -> dict[str, dict[str, Any]]:
+    statuses = {
+        "propose": "proposed",
+        "start": "in_progress",
+        "complete": "completed",
+        "abandon": "abandoned",
+        "block": "blocked",
+        "defer": "deferred",
+    }
+    directions: dict[str, dict[str, Any]] = {}
+    for event in _fake_visible(context, "direction_events"):
+        direction_id = str(event["direction_id"])
+        if event["action"] == "propose":
+            directions[direction_id] = {
+                "direction_id": direction_id,
+                "name": event["name"],
+                "hypothesis": event["hypothesis"],
+                "rationale": event["rationale"],
+                "plan": event["plan"],
+                "success_criteria": event["success_criteria"],
+                "stop_conditions": event["stop_conditions"],
+                "status": "proposed",
+                "analysis": None,
+                "supporting_experiment_ids": [],
+            }
+        else:
+            directions[direction_id]["status"] = statuses[event["action"]]
+            directions[direction_id]["analysis"] = event["analysis"]
+    for experiment in _fake_visible(context, "experiments"):
+        direction = directions.get(str(experiment["direction_id"]))
+        if direction is not None:
+            direction["supporting_experiment_ids"].append(experiment["experiment_id"])
+    return directions
+
+
 @pytest.fixture(autouse=True)
-def _empty_runtime_journal_history(monkeypatch: pytest.MonkeyPatch) -> None:
-    original = runtime_tools.runtime_query
+def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
+    _FAKE_JOURNALS.clear()
+    _FAKE_HISTORY.clear()
 
-    def query(context: Any, command: str, request: dict[str, Any]) -> dict[str, Any]:
-        if command in {"_direction-history", "_experiment-history"}:
-            return {"journals": []}
-        return original(context, command, request)
+    def journal(context: Any, command: str, request: dict[str, Any]) -> dict[str, Any]:
+        state = _fake_state(context)
+        if command == "update-direction":
+            action = request.get("action")
+            if action == "propose":
+                expected = {
+                    "action",
+                    "name",
+                    "hypothesis",
+                    "rationale",
+                    "plan",
+                    "success_criteria",
+                    "stop_conditions",
+                }
+                if set(request) != expected:
+                    raise ValueError(
+                        f"Direction proposal fields must be exactly {sorted(expected)}"
+                    )
+                direction_id = f"direction_{uuid4().hex}"
+                event = {
+                    "direction_event_id": f"directionevent_{uuid4().hex}",
+                    "direction_id": direction_id,
+                    "recorded_at": datetime.now(UTC).isoformat(),
+                    **request,
+                    "analysis": None,
+                    "supporting_experiment_ids": [],
+                }
+            else:
+                expected = {"action", "direction_id", "analysis"}
+                if set(request) != expected:
+                    raise ValueError(f"Direction update fields must be exactly {sorted(expected)}")
+                direction_id = str(request["direction_id"])
+                direction = _fake_direction_views(context).get(direction_id)
+                if direction is None:
+                    raise ValueError(
+                        "Direction ID is outside the current Attempt's visible history"
+                    )
+                if action == "start":
+                    started = {
+                        event["direction_id"]
+                        for event in state["direction_events"]
+                        if event["action"] == "start"
+                    }
+                    if direction_id not in started and len(started) >= 3:
+                        raise ValueError("Direction advancement limit exceeded: maximum=3")
+                if action in {"complete", "abandon"} and not direction["supporting_experiment_ids"]:
+                    raise ValueError(
+                        f"Direction {action} requires at least one associated Experiment"
+                    )
+                event = {
+                    "direction_event_id": f"directionevent_{uuid4().hex}",
+                    "direction_id": direction_id,
+                    "recorded_at": datetime.now(UTC).isoformat(),
+                    "action": action,
+                    "name": None,
+                    "hypothesis": None,
+                    "rationale": None,
+                    "plan": [],
+                    "success_criteria": None,
+                    "stop_conditions": None,
+                    "analysis": request["analysis"],
+                    "supporting_experiment_ids": list(direction["supporting_experiment_ids"]),
+                }
+            state["direction_events"].append(event)
+            return {"status": "recorded", "direction_id": direction_id}
+        if command == "list-directions":
+            return {
+                "directions": [
+                    {
+                        "direction_id": value["direction_id"],
+                        "name": value["name"],
+                        "status": value["status"],
+                    }
+                    for value in _fake_direction_views(context).values()
+                ]
+            }
+        if command == "load-direction":
+            try:
+                return _fake_direction_views(context)[str(request["direction_id"])]
+            except KeyError as error:
+                raise ValueError(
+                    "Direction ID is outside the current Attempt's visible history"
+                ) from error
+        if command == "record-experiment":
+            if set(request) != runtime_tools._EXPERIMENT_FIELDS:
+                raise ValueError(
+                    f"Experiment fields must be exactly {sorted(runtime_tools._EXPERIMENT_FIELDS)}"
+                )
+            runtime_tools._validate_experiment_comparison(
+                request,
+                allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
+            )
+            if request["action"] == "baseline" and any(
+                value["action"] == "baseline" for value in state["experiments"]
+            ):
+                raise ValueError(
+                    "Bootstrap Experiment journal may contain only one baseline action"
+                )
+            direction = _fake_direction_views(context).get(str(request["direction_id"]))
+            if direction is None or direction["status"] != "in_progress":
+                raise ValueError("Experiment Direction must be in progress")
+            experiment = {
+                "experiment_id": f"experiment_{uuid4().hex}",
+                "sequence": len(state["experiments"]) + 1,
+                "recorded_at": datetime.now(UTC).isoformat(),
+                **request,
+            }
+            state["experiments"].append(experiment)
+            return {"status": "recorded", "experiment_id": experiment["experiment_id"]}
+        if command == "list-experiments":
+            return {
+                "experiments": [
+                    {
+                        "experiment_id": value["experiment_id"],
+                        "sequence": value["sequence"],
+                        "name": value["name"],
+                        "action": value["action"],
+                    }
+                    for value in _fake_visible(context, "experiments")
+                ]
+            }
+        if command == "load-experiment":
+            for value in _fake_visible(context, "experiments"):
+                if value["experiment_id"] == request.get("experiment_id"):
+                    return value
+            raise ValueError("Experiment ID is outside the current Attempt's visible history")
+        if command == "_journal-snapshot":
+            return {
+                "direction_events": deepcopy(state["direction_events"]),
+                "experiments": deepcopy(state["experiments"]),
+                "directions": list(_fake_direction_views(context).values()),
+            }
+        raise AssertionError(f"unexpected Runtime Journal command: {command}")
 
-    monkeypatch.setattr(runtime_tools, "runtime_query", query)
+    monkeypatch.setattr(runtime_tools, "runtime_journal", journal)
 
 
 def _propose_and_start_direction(context: Any) -> str:
@@ -296,17 +480,13 @@ def test_cli_prints_structured_runtime_error_without_traceback(
             {
                 "error": "invalid_request",
                 "detail": "dev.command: Field required",
-                "issues": [
-                    {"path": "command", "code": "missing", "message": "Field required"}
-                ],
+                "issues": [{"path": "command", "code": "missing", "message": "Field required"}],
                 "request_schema": {"operations": {"dev": {"required": ["command"]}}},
             },
         )
 
     monkeypatch.setattr(runtime_tools, "gateway_execute", reject)
-    status = runtime_tools.main(
-        ["gateway-execute", "--request", "scratch/request.json"]
-    )
+    status = runtime_tools.main(["gateway-execute", "--request", "scratch/request.json"])
 
     assert status == 2
     assert json.loads(capsys.readouterr().out) == {
@@ -330,9 +510,7 @@ def test_cli_local_validation_adds_schema_and_recovery(
         raise ValueError("Experiment Direction must be in progress")
 
     monkeypatch.setattr(runtime_tools, "_request_object", reject)
-    status = runtime_tools.main(
-        ["record-experiment", "--request", "scratch/request.json"]
-    )
+    status = runtime_tools.main(["record-experiment", "--request", "scratch/request.json"])
 
     assert status == 2
     response = json.loads(capsys.readouterr().out)
@@ -438,9 +616,9 @@ def test_direction_journal_can_be_recorded_listed_and_loaded(tmp_path: Path) -> 
         ]
     }
     experiment = record_experiment(context, _experiment(direction_id))
-    assert load_direction(context, {"direction_id": direction_id})[
-        "supporting_experiment_ids"
-    ] == [experiment["experiment_id"]]
+    assert load_direction(context, {"direction_id": direction_id})["supporting_experiment_ids"] == [
+        experiment["experiment_id"]
+    ]
     update_direction(
         context,
         {
@@ -467,19 +645,14 @@ def test_direction_journal_can_be_recorded_listed_and_loaded(tmp_path: Path) -> 
 
 def test_direction_reads_include_frozen_history_without_provenance(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _context(tmp_path / "source")
     direction_id = _propose_and_start_direction(source)
-    events = json.loads((source.workspace / "scratch/directions.json").read_text())["events"]
     reader = _context(tmp_path / "reader")
-    monkeypatch.setattr(
-        runtime_tools,
-        "runtime_query",
-        lambda _context, command, _request: (
-            {"journals": [events]} if command == "_direction-history" else {"journals": []}
-        ),
-    )
+    _FAKE_HISTORY[str(reader.workspace)] = {
+        "direction_events": deepcopy(_fake_state(source)["direction_events"]),
+        "experiments": [],
+    }
 
     assert list_directions(
         reader,
@@ -600,7 +773,6 @@ def test_attempt_report_rejects_unexperimented_direction_left_in_progress(
 
 def test_experiment_journal_can_be_listed_and_loaded_by_id(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _context(tmp_path)
     request = {"file": "scratch/experiments-index.json"}
@@ -618,15 +790,10 @@ def test_experiment_journal_can_be_listed_and_loaded_by_id(
         "recorded_at": "2026-08-24T00:00:00+00:00",
         **_experiment(),
     }
-    monkeypatch.setattr(
-        runtime_tools,
-        "runtime_query",
-        lambda _context, command, _request: (
-            {"journals": [[historical_experiment]]}
-            if command == "_experiment-history"
-            else {"journals": []}
-        ),
-    )
+    _FAKE_HISTORY[str(context.workspace)] = {
+        "direction_events": [],
+        "experiments": [historical_experiment],
+    }
     direction_id = _propose_and_start_direction(context)
     first = record_experiment(context, _experiment(direction_id))
     second_value = _experiment(direction_id)

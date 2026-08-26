@@ -14,7 +14,7 @@ import stat
 import tempfile
 import urllib.error
 import urllib.request
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
@@ -43,15 +43,17 @@ _PUBLIC_RUNTIME_QUERY_COMMANDS = {
     "kernel-artifact-read": "kernel_artifact_read",
     "gateway-result-read": "gateway_result_read",
 }
-_INTERNAL_RUNTIME_QUERY_COMMANDS = {
-    "_direction-history": "direction_history",
-    "_experiment-history": "experiment_history",
-}
-_RUNTIME_QUERY_COMMANDS = {
-    **_PUBLIC_RUNTIME_QUERY_COMMANDS,
-    **_INTERNAL_RUNTIME_QUERY_COMMANDS,
-}
+_RUNTIME_QUERY_COMMANDS = dict(_PUBLIC_RUNTIME_QUERY_COMMANDS)
 _RUNTIME_QUERY_OPERATIONS = frozenset(_RUNTIME_QUERY_COMMANDS.values())
+_RUNTIME_JOURNAL_COMMANDS = {
+    "update-direction": "direction_update",
+    "list-directions": "directions_list",
+    "load-direction": "direction_load",
+    "record-experiment": "experiment_record",
+    "list-experiments": "experiments_list",
+    "load-experiment": "experiment_load",
+    "_journal-snapshot": "journal_snapshot",
+}
 _ATTEMPT_COMMANDS = (
     "gateway-execute",
     *_PUBLIC_RUNTIME_QUERY_COMMANDS,
@@ -111,7 +113,6 @@ _REPORT_FIELDS = {
 RuntimeToolContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
 
 _MAX_REQUEST_BYTES = 256 * 1024
-_MAX_JOURNAL_BYTES = 2 * 1024 * 1024
 _MAX_CANDIDATE_FILES = 4096
 _MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -610,6 +611,44 @@ def runtime_query(
     return result
 
 
+def runtime_journal(
+    context: RuntimeToolContext,
+    command: str,
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Execute one authoritative Runtime Journal mutation or read."""
+    try:
+        operation = _RUNTIME_JOURNAL_COMMANDS[command]
+    except KeyError as error:
+        raise ValueError(f"unsupported Runtime Journal command: {command}") from error
+    value: dict[str, Any] = {
+        "schema_version": 2,
+        "attempt_id": context.attempt_id,
+        "operation": operation,
+    }
+    if command in {"update-direction", "record-experiment"}:
+        value["request"] = request
+        value["idempotency_key"] = _idempotency_key("runtime-journal", value)
+    elif command == "load-direction":
+        value["direction_id"] = request.get("direction_id")
+        value["idempotency_key"] = f"core-journal-read-{uuid4().hex}"
+    elif command == "load-experiment":
+        value["experiment_id"] = request.get("experiment_id")
+        value["idempotency_key"] = f"core-journal-read-{uuid4().hex}"
+    else:
+        value["idempotency_key"] = f"core-journal-read-{uuid4().hex}"
+    response = _post(
+        context.gateway_url,
+        context.gateway_capability,
+        "/v1/runtime/journals",
+        value,
+    )
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise ValueError(f"{command} returned an invalid Runtime Journal response")
+    return result
+
+
 def wiki_query(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
     if context.wiki_url is None or context.wiki_capability is None:
         raise RuntimeError("GPU Wiki capability is unavailable for this Attempt")
@@ -632,14 +671,6 @@ def _agent_knowledge(response: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(content, dict):
         raise RuntimeError("Runtime Wiki response has no Agent-readable content object")
     return content
-
-
-def _journal_path(context: RuntimeToolContext) -> Path:
-    return context.workspace / "scratch/experiments.json"
-
-
-def _direction_journal_path(context: RuntimeToolContext) -> Path:
-    return context.workspace / "scratch/directions.json"
 
 
 def _direction_event_fields() -> set[str]:
@@ -723,16 +754,19 @@ def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, 
             if event.get("analysis") is not None or supporting:
                 raise ValueError("Direction proposal cannot contain outcome evidence")
         else:
-            if any(
-                event.get(field) is not None
-                for field in (
-                    "name",
-                    "hypothesis",
-                    "rationale",
-                    "success_criteria",
-                    "stop_conditions",
+            if (
+                any(
+                    event.get(field) is not None
+                    for field in (
+                        "name",
+                        "hypothesis",
+                        "rationale",
+                        "success_criteria",
+                        "stop_conditions",
+                    )
                 )
-            ) or event.get("plan") != []:
+                or event.get("plan") != []
+            ):
                 raise ValueError("Direction update cannot redefine its proposal")
             _text(event.get("analysis"), "Direction analysis")
             if action in {"complete", "abandon"} and not supporting:
@@ -741,188 +775,8 @@ def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, 
     return validated
 
 
-def _current_direction_events(
-    context: RuntimeToolContext,
-    *,
-    required: bool = False,
-) -> list[dict[str, Any]]:
-    path = _direction_journal_path(context)
-    if not path.exists():
-        if required:
-            raise ValueError("Attempt report requires a matching Direction journal")
-        return []
-    journal = _read_object(path, "Direction journal", max_bytes=_MAX_JOURNAL_BYTES)
-    events = journal.get("events")
-    if (
-        journal.get("schema_version") != 1
-        or journal.get("attempt_id") != context.attempt_id
-        or not isinstance(events, list)
-        or (required and not events)
-    ):
-        raise ValueError("Direction journal belongs to a different protocol or Attempt")
-    return _validate_direction_events(events, "Direction journal")
-
-
-def _visible_direction_events(context: RuntimeToolContext) -> list[dict[str, Any]]:
-    values: list[dict[str, Any]] = []
-    if not isinstance(context, RuntimeLineageBootstrapContext):
-        history = runtime_query(context, "_direction-history", {})
-        journals = history.get("journals")
-        if set(history) != {"journals"} or not isinstance(journals, list):
-            raise ValueError("Runtime returned invalid Direction history")
-        for journal in journals:
-            if not isinstance(journal, list) or not journal:
-                raise ValueError("Runtime returned an invalid Direction journal")
-            values.extend(_validate_direction_events(journal, "Historical Direction journal"))
-    values.extend(_current_direction_events(context))
-    if len(values) > 4_096:
-        raise ValueError("Visible Direction history exceeds its entry limit")
-    event_ids = [event["direction_event_id"] for event in values]
-    if len(set(event_ids)) != len(event_ids):
-        raise ValueError("Visible Direction history contains duplicate Event IDs")
-    return values
-
-
-def _direction_views(context: RuntimeToolContext) -> dict[str, dict[str, Any]]:
-    statuses = {
-        "propose": "proposed",
-        "start": "in_progress",
-        "complete": "completed",
-        "abandon": "abandoned",
-        "block": "blocked",
-        "defer": "deferred",
-    }
-    directions: dict[str, dict[str, Any]] = {}
-    for event in _visible_direction_events(context):
-        direction_id = str(event["direction_id"])
-        action = str(event["action"])
-        existing = directions.get(direction_id)
-        if action == "propose":
-            if existing is not None:
-                raise ValueError("Direction history contains duplicate proposals")
-            directions[direction_id] = {
-                "direction_id": direction_id,
-                "name": event["name"],
-                "hypothesis": event["hypothesis"],
-                "rationale": event["rationale"],
-                "plan": event["plan"],
-                "success_criteria": event["success_criteria"],
-                "stop_conditions": event["stop_conditions"],
-                "status": statuses[action],
-                "analysis": None,
-                "supporting_experiment_ids": [],
-            }
-            continue
-        if existing is None:
-            raise ValueError("Direction update precedes its proposal")
-        existing["status"] = statuses[action]
-        existing["analysis"] = event["analysis"]
-        supporting = existing["supporting_experiment_ids"]
-        assert isinstance(supporting, list)
-        for experiment_id in event["supporting_experiment_ids"]:
-            if experiment_id not in supporting:
-                supporting.append(experiment_id)
-
-    # Experiment records carry the authoritative Direction association. Project
-    # that reverse relationship into the normalized Direction view so an Agent
-    # does not have to repeat every Experiment ID in a Direction status event.
-    # Explicit status-event references remain useful for cross-Direction
-    # evidence and are retained above.
-    for experiment in _visible_experiments(context):
-        direction = directions.get(str(experiment["direction_id"]))
-        if direction is None:
-            continue
-        supporting = direction["supporting_experiment_ids"]
-        assert isinstance(supporting, list)
-        experiment_id = str(experiment["experiment_id"])
-        if experiment_id not in supporting:
-            supporting.append(experiment_id)
-    return directions
-
-
 def update_direction(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
-    action = request.get("action")
-    if action == "propose":
-        if set(request) != _DIRECTION_PROPOSAL_FIELDS:
-            raise ValueError(
-                f"Direction proposal fields must be exactly {sorted(_DIRECTION_PROPOSAL_FIELDS)}"
-            )
-        for field in (
-            "name",
-            "hypothesis",
-            "rationale",
-            "success_criteria",
-            "stop_conditions",
-        ):
-            _text(request.get(field), f"Direction {field}")
-        _text_array(request.get("plan"), "Direction plan", required=True)
-        direction_id = f"direction_{uuid4().hex}"
-        event = {
-            "direction_event_id": f"directionevent_{uuid4().hex}",
-            "direction_id": direction_id,
-            "recorded_at": datetime.now(UTC).isoformat(),
-            **request,
-            "analysis": None,
-            "supporting_experiment_ids": [],
-        }
-    else:
-        if set(request) != _DIRECTION_UPDATE_FIELDS:
-            raise ValueError(
-                f"Direction update fields must be exactly {sorted(_DIRECTION_UPDATE_FIELDS)}"
-            )
-        if action not in {"start", "complete", "abandon", "block", "defer"}:
-            raise ValueError("Direction update action is invalid")
-        direction_id = _validate_direction_id(request.get("direction_id"))
-        direction = _direction_views(context).get(direction_id)
-        if direction is None:
-            raise ValueError("Direction ID is outside the current Attempt's visible history")
-        _text(request.get("analysis"), "Direction analysis")
-        if action == "start":
-            started_direction_ids = {
-                str(event["direction_id"])
-                for event in _current_direction_events(context)
-                if event["action"] == "start"
-            }
-            if direction_id not in started_direction_ids and len(started_direction_ids) >= 3:
-                raise ValueError(
-                    "Attempt Direction advancement limit exceeded: maximum=3; "
-                    f"requested_direction_id={direction_id}; "
-                    f"already_advanced_direction_ids={sorted(started_direction_ids)}. "
-                    "The requested Direction was not started; keep it proposed or deferred for "
-                    "a future Attempt"
-                )
-        supporting = list(direction["supporting_experiment_ids"])
-        if action in {"complete", "abandon"} and not supporting:
-            raise ValueError(f"Direction {action} requires at least one associated Experiment")
-        event = {
-            "direction_event_id": f"directionevent_{uuid4().hex}",
-            "direction_id": direction_id,
-            "recorded_at": datetime.now(UTC).isoformat(),
-            "action": action,
-            "name": None,
-            "hypothesis": None,
-            "rationale": None,
-            "plan": [],
-            "success_criteria": None,
-            "stop_conditions": None,
-            "analysis": request["analysis"],
-            "supporting_experiment_ids": supporting,
-        }
-    _validate_direction_events([event], "Direction event")
-    path = _direction_journal_path(context)
-    journal = (
-        _read_object(path, "Direction journal", max_bytes=_MAX_JOURNAL_BYTES)
-        if path.exists()
-        else {"schema_version": 1, "attempt_id": context.attempt_id, "events": []}
-    )
-    if journal.get("schema_version") != 1 or journal.get("attempt_id") != context.attempt_id:
-        raise ValueError("Direction journal belongs to a different protocol or Attempt")
-    events = journal.get("events")
-    if not isinstance(events, list):
-        raise ValueError("Direction journal is malformed")
-    events.append(event)
-    _atomic_json(path, journal)
-    return {"status": "recorded", "direction_id": direction_id}
+    return runtime_journal(context, "update-direction", request)
 
 
 def list_directions(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
@@ -933,32 +787,22 @@ def list_directions(context: RuntimeToolContext, request: dict[str, Any]) -> dic
         request.get("file"),
         label="Direction index output",
     )
-    value = {
-        "directions": [
-            {
-                "direction_id": direction["direction_id"],
-                "name": direction["name"],
-                "status": direction["status"],
-            }
-            for direction in _direction_views(context).values()
-        ]
-    }
+    value = runtime_journal(context, "list-directions", {})
+    directions = value.get("directions")
+    if set(value) != {"directions"} or not isinstance(directions, list):
+        raise ValueError("Runtime returned an invalid Direction index")
     _atomic_json(destination, value)
     return {
         "status": "completed",
         "file": destination_name,
-        "count": len(value["directions"]),
+        "count": len(directions),
     }
 
 
 def load_direction(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
     if set(request) != {"direction_id"}:
         raise ValueError("load-direction request requires exactly direction_id")
-    direction_id = _validate_direction_id(request.get("direction_id"))
-    try:
-        return _direction_views(context)[direction_id]
-    except KeyError as error:
-        raise ValueError("Direction ID is outside the current Attempt's visible history") from error
+    return runtime_journal(context, "load-direction", request)
 
 
 def _experiment_subject(value: object, label: str) -> dict[str, Any] | None:
@@ -1025,62 +869,7 @@ def _validate_experiment_comparison(
 
 
 def record_experiment(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
-    if set(request) != _EXPERIMENT_FIELDS:
-        raise ValueError(f"Experiment fields must be exactly {sorted(_EXPERIMENT_FIELDS)}")
-    for key in _EXPERIMENT_FIELDS - {"action", "before", "after"}:
-        if not isinstance(request[key], str) or not request[key].strip():
-            raise ValueError(f"Experiment {key} must be non-empty text")
-    direction_id = _validate_direction_id(request.get("direction_id"))
-    direction = _direction_views(context).get(direction_id)
-    if direction is None:
-        raise ValueError("Experiment Direction is outside visible history")
-    if direction["status"] != "in_progress":
-        raise ValueError(
-            "Experiment Direction must be in progress; "
-            f"current status is {direction['status']}"
-        )
-    allowed_actions = {"keep_after", "restore_before", "abandon_direction"}
-    if isinstance(context, RuntimeLineageBootstrapContext):
-        allowed_actions.add("baseline")
-    elif request["action"] == "baseline":
-        raise ValueError("Experiment action baseline is only valid during Bootstrap")
-    if request["action"] not in allowed_actions:
-        raise ValueError("Experiment action is invalid")
-    _validate_experiment_comparison(
-        request,
-        allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
-    )
-    path = _journal_path(context)
-    journal = (
-        _read_object(path, "Experiment journal", max_bytes=_MAX_JOURNAL_BYTES)
-        if path.exists()
-        else {
-            "schema_version": 5,
-            "attempt_id": context.attempt_id,
-            "experiments": [],
-        }
-    )
-    if journal.get("schema_version") != 5 or journal.get("attempt_id") != context.attempt_id:
-        raise ValueError("Experiment journal belongs to a different protocol or Attempt")
-    experiments = journal.get("experiments")
-    if not isinstance(experiments, list):
-        raise ValueError("Experiment journal is malformed")
-    if request["action"] == "baseline" and any(
-        item.get("action") == "baseline" for item in experiments if isinstance(item, dict)
-    ):
-        raise ValueError("Bootstrap Experiment journal may contain only one baseline action")
-    experiment = {
-        "experiment_id": f"experiment_{uuid4().hex}",
-        "sequence": len(experiments) + 1,
-        "recorded_at": datetime.now(UTC).isoformat(),
-        **request,
-    }
-    experiments.append(experiment)
-    _atomic_json(path, journal)
-    return {
-        "status": "recorded",
-        "experiment_id": experiment["experiment_id"],
-    }
+    return runtime_journal(context, "record-experiment", request)
 
 
 def _text(value: object, label: str) -> str:
@@ -1123,33 +912,6 @@ def _object_array(
             _text(entry.get(field), f"{label}[{index}].{field}")
         objects.append(entry)
     return objects
-
-
-def _validated_experiments(context: RuntimeToolContext) -> list[dict[str, Any]]:
-    return _current_experiments(context, required=True)
-
-
-def _current_experiments(
-    context: RuntimeToolContext,
-    *,
-    required: bool,
-) -> list[dict[str, Any]]:
-    path = _journal_path(context)
-    if not path.exists():
-        if required:
-            raise ValueError("Attempt report requires a non-empty matching Experiment journal")
-        return []
-    journal = _read_object(path, "Experiment journal", max_bytes=_MAX_JOURNAL_BYTES)
-    experiments = journal.get("experiments")
-    if journal.get("schema_version") != 5 or journal.get("attempt_id") != context.attempt_id:
-        raise ValueError("Experiment journal belongs to a different protocol or Attempt")
-    if not isinstance(experiments, list) or (required and not experiments):
-        raise ValueError("Attempt report requires a non-empty matching Experiment journal")
-    return _validate_experiment_entries(
-        experiments,
-        "Experiment journal",
-        allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
-    )
 
 
 def _validate_experiment_entries(
@@ -1195,35 +957,6 @@ def _validate_experiment_entries(
     return validated
 
 
-def _visible_experiments(
-    context: RuntimeToolContext,
-) -> list[dict[str, Any]]:
-    """Return frozen visible history followed by the live current Attempt Journal."""
-    values: list[dict[str, Any]] = []
-    if not isinstance(context, RuntimeLineageBootstrapContext):
-        history = runtime_query(context, "_experiment-history", {})
-        journals = history.get("journals")
-        if set(history) != {"journals"} or not isinstance(journals, list):
-            raise ValueError("Runtime returned invalid Experiment history")
-        for journal in journals:
-            if not isinstance(journal, list) or not journal:
-                raise ValueError("Runtime returned an invalid Experiment journal")
-            values.extend(
-                _validate_experiment_entries(
-                    journal,
-                    "Historical branch Experiment journal",
-                    allow_baseline=True,
-                )
-            )
-    values.extend(_current_experiments(context, required=False))
-    if len(values) > 4_096:
-        raise ValueError("Visible Experiment history exceeds its entry limit")
-    experiment_ids = [experiment["experiment_id"] for experiment in values]
-    if len(set(experiment_ids)) != len(experiment_ids):
-        raise ValueError("Visible Experiment history contains duplicate Experiment IDs")
-    return values
-
-
 def list_experiments(
     context: RuntimeToolContext,
     request: dict[str, Any],
@@ -1236,18 +969,10 @@ def list_experiments(
         request.get("file"),
         label="Experiment index output",
     )
-    experiments = _visible_experiments(context)
-    value = {
-        "experiments": [
-            {
-                "experiment_id": experiment["experiment_id"],
-                "sequence": experiment["sequence"],
-                "name": experiment["name"],
-                "action": experiment["action"],
-            }
-            for experiment in experiments
-        ]
-    }
+    value = runtime_journal(context, "list-experiments", {})
+    experiments = value.get("experiments")
+    if set(value) != {"experiments"} or not isinstance(experiments, list):
+        raise ValueError("Runtime returned an invalid Experiment index")
     _atomic_json(destination, value)
     return {
         "status": "completed",
@@ -1263,27 +988,44 @@ def load_experiment(
     """Return one exact visible historical or current Experiment record."""
     if set(request) != {"experiment_id"}:
         raise ValueError("load-experiment request requires exactly experiment_id")
-    experiment_id = request.get("experiment_id")
-    if not isinstance(experiment_id, str) or not experiment_id:
-        raise ValueError("load-experiment experiment_id must be non-empty text")
-    for experiment in _visible_experiments(context):
-        if experiment["experiment_id"] == experiment_id:
-            return experiment
-    raise ValueError("Experiment ID is outside the current Attempt's visible history")
+    return runtime_journal(context, "load-experiment", request)
 
 
 def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
     if set(request) != _REPORT_FIELDS:
         raise ValueError(f"Attempt report fields must be exactly {sorted(_REPORT_FIELDS)}")
-    experiments = _validated_experiments(context)
-    direction_events = _current_direction_events(context, required=True)
-    directions = _direction_views(context)
+    snapshot = runtime_journal(context, "_journal-snapshot", {})
+    if set(snapshot) != {"direction_events", "experiments", "directions"}:
+        raise ValueError("Runtime returned an invalid Journal snapshot")
+    experiment_values = snapshot.get("experiments")
+    direction_event_values = snapshot.get("direction_events")
+    direction_values = snapshot.get("directions")
+    if not isinstance(experiment_values, list) or not experiment_values:
+        raise ValueError("Attempt report requires at least one Runtime Experiment")
+    if not isinstance(direction_event_values, list) or not direction_event_values:
+        raise ValueError("Attempt report requires at least one Runtime Direction event")
+    if not isinstance(direction_values, list):
+        raise ValueError("Runtime returned invalid normalized Directions")
+    experiments = _validate_experiment_entries(
+        experiment_values,
+        "Runtime Experiment Journal",
+        allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
+    )
+    direction_events = _validate_direction_events(
+        direction_event_values,
+        "Runtime Direction Journal",
+    )
+    directions: dict[str, dict[str, Any]] = {}
+    for direction in direction_values:
+        if not isinstance(direction, dict):
+            raise ValueError("Runtime returned a malformed normalized Direction")
+        direction_id = _validate_direction_id(direction.get("direction_id"))
+        directions[direction_id] = direction
     experiment_direction_ids = {str(experiment["direction_id"]) for experiment in experiments}
     unknown_direction_ids = sorted(experiment_direction_ids - directions.keys())
     if unknown_direction_ids:
         raise ValueError(
-            "Attempt report Experiment references unknown Directions: "
-            f"{unknown_direction_ids}"
+            f"Attempt report Experiment references unknown Directions: {unknown_direction_ids}"
         )
     in_progress_direction_ids = sorted(
         direction_id
@@ -1292,8 +1034,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     )
     if in_progress_direction_ids:
         raise ValueError(
-            "Attempt report cannot leave any Direction in progress: "
-            f"{in_progress_direction_ids}"
+            f"Attempt report cannot leave any Direction in progress: {in_progress_direction_ids}"
         )
     status = request.get("status")
     if status not in {"candidate_ready", "pivot", "blocked"}:
@@ -1301,9 +1042,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     if isinstance(context, RuntimeLineageBootstrapContext):
         if status == "pivot":
             raise ValueError("Bootstrap Attempt report status must be candidate_ready or blocked")
-        baseline_count = sum(
-            experiment["action"] == "baseline" for experiment in experiments
-        )
+        baseline_count = sum(experiment["action"] == "baseline" for experiment in experiments)
         if baseline_count > 1:
             raise ValueError("Bootstrap Attempt report may contain only one baseline Experiment")
         if status == "candidate_ready" and baseline_count != 1:
