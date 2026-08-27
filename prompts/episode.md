@@ -13,8 +13,8 @@ workspace, Evidence view, task identity, and tool protocols.
 
 - Modify the candidate Kernel only under `work/kernel/`. Use the injected reusable directories only
   for genuinely reusable Agent methods or tools, and use `scratch/` for temporary work.
-- Give every `Model` constructor parameter a default; `check` and `disassemble` may construct
-  `Model()` bare.
+- Give every `Model` constructor parameter a default: `check` constructs `Model()` bare and reports
+  the failure as an `error` diagnostic inside a `succeeded` job.
 - Treat controller-provided inputs, the Agent implementation, references, Session capture, service
   state, credentials, and evaluation material as read-only.
 - Route GPU execution, compilation, JIT, correctness, benchmarking, profiling, disassembly, and
