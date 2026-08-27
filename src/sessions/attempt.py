@@ -9,7 +9,8 @@ from collections.abc import Mapping
 from agent_config import AgentConfig
 from contexts.attempt import RuntimeAttemptContext
 
-from .common import execute_agent_session, guarded_main, public_operator_contract
+from .common import execute_agent_session, guarded_main
+from .operator_contract import public_operator_contract
 
 _RUNTIME_TOOL = "agent/optimizer/src/runtime_tools.py"
 _TEMPLATE_PLACEHOLDER = re.compile(r"\{\{([^{}\n]+)\}\}")
@@ -22,8 +23,7 @@ def _render_prompt_fragment(template: str, replacements: Mapping[str, str]) -> s
         missing = sorted(expected - placeholders)
         unknown = sorted(placeholders - expected)
         raise ValueError(
-            "Prompt fragment placeholder contract mismatch: "
-            f"missing={missing}, unknown={unknown}"
+            f"Prompt fragment placeholder contract mismatch: missing={missing}, unknown={unknown}"
         )
     rendered = template
     for name, value in replacements.items():

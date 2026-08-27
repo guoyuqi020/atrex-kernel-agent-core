@@ -75,7 +75,16 @@ Core validates the Runtime-owned manifest before launching an Agent. A normal At
 
 `.runtime/` is an internal Runtime-to-Core control surface. Core locates it through the launch
 environment; the Agent Prompt does not advertise it or require the Optimizer to read it. Core
-projects the validated Agent Problem directly into the final Prompt as the public operator contract.
+projects the validated Agent Problem directly into the final Prompt as a concise public operator
+contract. The stored Artifact remains complete, while the Prompt projection omits generator and
+range-evidence provenance and null construction fields. `shape_domain` is the sole parameter-domain
+source: fixed parameters are direct JSON values, while variable parameters use range or multi-value
+Domain objects. Operation/category labels are supplied by the objective. The remaining
+`operator_contract` contains only non-Shape ABI semantics such as
+constructor arguments, mutation, layout, and return behavior. Simple implied invariants are omitted;
+cross-field and semantic invariants remain visible. Migration-only `atrex.agent_problem.v1` inputs
+use their flat `operator_contract` as legacy fixed-parameter data, so Core folds all of those fields
+into the same `shape_domain` before rendering the Prompt.
 The two Journal files are Attempt-local append-only deltas. Runtime resolves prior-Attempt Journals
 on demand from its Registry and Artifact Store; only the generated indexes and `load-*` tools
 combine that history with

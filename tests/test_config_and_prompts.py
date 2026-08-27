@@ -9,8 +9,147 @@ import pytest
 from agent_config import AgentConfig
 from runtime_tools import _ATTEMPT_COMMANDS
 from sessions.attempt import _render_prompt_fragment, _tool_instructions
+from sessions.operator_contract import public_operator_contract
 
 CORE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_public_operator_contract_hides_non_actionable_provenance() -> None:
+    prompt = public_operator_contract(
+        {
+            "schema_version": "atrex.shape_train.v1",
+            "generator": {
+                "name": "benchmark-converter-shape-train",
+                "version": 2,
+                "domain_policy": "trace_bounded_non_enumerating",
+            },
+            "objective": "Optimize the public domain.",
+            "operator_contract": {
+                "operation": "normalization",
+                "fixed_init_kwargs": None,
+                "fixed_parameters": {"heads": 4, "head_dim": 128},
+            },
+            "shape_domain": {
+                "tokens": {
+                    "type": "integer",
+                    "min": 1,
+                    "max": 16384,
+                    "range_evidence": {"lower": {"artifact": "private provenance"}},
+                },
+                "heads": {
+                    "type": "integer",
+                    "values": [4],
+                    "value_evidence": {"artifact": "private provenance"},
+                },
+                "head_dim": {"type": "integer", "values": [128]},
+            },
+            "invariants": [
+                "tokens >= 1",
+                "tokens <= 16384",
+                "heads == 4",
+                "head_dim == 128",
+                "preserve output layout",
+            ],
+        }
+    )
+
+    assert '"objective": "Optimize the public domain."' in prompt
+    assert '"tokens": {' in prompt
+    assert '"min": 1' in prompt
+    assert '"max": 16384' in prompt
+    assert '"preserve output layout"' in prompt
+    assert "schema_version" not in prompt
+    assert "benchmark-converter-shape-train" not in prompt
+    assert "domain_policy" not in prompt
+    assert "fixed_init_kwargs" not in prompt
+    assert '"init_kwargs": null' not in prompt
+    assert "range_evidence" not in prompt
+    assert "value_evidence" not in prompt
+    assert '"operator_contract"' not in prompt
+    assert '"fixed_parameters"' not in prompt
+    assert '"heads": 4' in prompt
+    assert '"head_dim": 128' in prompt
+    assert '"tokens >= 1"' not in prompt
+    assert '"tokens <= 16384"' not in prompt
+    assert '"heads == 4"' not in prompt
+    assert '"head_dim == 128"' not in prompt
+
+
+def test_public_operator_contract_preserves_cross_field_invariants() -> None:
+    prompt = public_operator_contract(
+        {
+            "operator_contract": {"fixed_parameters": {"heads": 4}},
+            "shape_domain": {"tokens": {"type": "integer", "min": 1, "max": 16384}},
+            "invariants": [
+                "tokens >= 1 and tokens <= 16384",
+                "packed_tokens == batch_size * sequence_length",
+                "normalize each head independently",
+            ],
+        }
+    )
+
+    assert "tokens >= 1 and tokens <= 16384" not in prompt
+    assert "packed_tokens == batch_size * sequence_length" in prompt
+    assert "normalize each head independently" in prompt
+
+
+def test_public_operator_contract_keeps_non_shape_abi_semantics() -> None:
+    prompt = public_operator_contract(
+        {
+            "objective": "Optimize an in-place update.",
+            "operator_contract": {
+                "operation": "state update",
+                "category": "UPDATE",
+                "fixed_init_kwargs": {"activation": "silu"},
+                "fixed_parameters": {"width": 128},
+                "mutates_inputs": ["state"],
+                "returns_none": True,
+            },
+            "shape_domain": {"tokens": {"type": "integer", "min": 1, "max": 4096}},
+        }
+    )
+
+    assert '"width": 128' in prompt
+    assert '"fixed_parameters"' not in prompt
+    assert '"operation"' not in prompt
+    assert '"category"' not in prompt
+    assert '"fixed_init_kwargs": {' in prompt
+    assert '"mutates_inputs": [' in prompt
+    assert '"returns_none": true' in prompt
+
+
+def test_legacy_agent_problem_uses_shape_domain_for_all_fixed_parameters() -> None:
+    prompt = public_operator_contract(
+        {
+            "schema_version": "atrex.agent_problem.v1",
+            "objective": "Optimize paired normalization while exact cases remain private.",
+            "operator_contract": {
+                "operation": "paired normalization",
+                "input_dtype": "bfloat16",
+                "output_dtype": "bfloat16",
+                "accumulation_dtype": "float32",
+                "num_heads": 16,
+                "hidden_size": 128,
+                "eps": 1e-6,
+                "input_layout": "[1, tokens, 16, 128]",
+            },
+            "shape_domain": {
+                "tokens": {"type": "integer", "min": 1, "max": 8192},
+                "num_heads": {"type": "integer", "values": [16]},
+            },
+            "invariants": ["normalize each head independently"],
+        }
+    )
+
+    assert '"operator_contract"' not in prompt
+    assert '"tokens": {' in prompt
+    assert '"num_heads": 16' in prompt
+    assert '"hidden_size": 128' in prompt
+    assert '"input_dtype": "bfloat16"' in prompt
+    assert '"accumulation_dtype": "float32"' in prompt
+    assert '"eps": 1e-06' in prompt
+    assert '"input_layout": "[1, tokens, 16, 128]"' in prompt
+    assert '"normalize each head independently"' in prompt
 
 
 def test_agent_config_loads_every_supported_phase() -> None:

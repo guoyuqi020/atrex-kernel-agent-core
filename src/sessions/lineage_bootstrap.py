@@ -8,7 +8,8 @@ from agent_config import AgentConfig
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
 
 from .attempt import _tool_instructions
-from .common import execute_agent_session, guarded_main, public_operator_contract
+from .common import execute_agent_session, guarded_main
+from .operator_contract import public_operator_contract
 
 
 def _trusted_context(context: RuntimeLineageBootstrapContext) -> str:
