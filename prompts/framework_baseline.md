@@ -37,6 +37,9 @@ or an instruction selection, then write your own baseline. Copying a file wholes
   one-off measurements in them.
 - Give every `Model` constructor parameter a default: `check` constructs `Model()` bare and reports
   the failure as an `error` diagnostic inside a `succeeded` job.
+- Candidate source importing `builtins` `cffi` `ctypes` `ftplib` `http` `importlib`
+  `marshal` `multiprocessing` `os` `pathlib` `pickle` `requests` `shutil` `smtplib`
+  `socket` `subprocess` `sys` `telnetlib` `urllib` is rejected before any job runs.
 - Never edit `input/`, `agent/`, `reference/`, the session manifest, session traces,
   evaluator/reference state, credentials, controller state, or service state.
 - Never run a compiler, GPU import, JIT, candidate, profiler, or evaluator directly in the shell.
