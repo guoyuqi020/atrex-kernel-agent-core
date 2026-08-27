@@ -52,7 +52,8 @@ def _implied_comparisons(
         literal = _literal_node(value)
         if not name.isidentifier() or literal is None:
             return
-        variable = ast.Name(id=name)
+        # ast.dump renders ctx, so the key must match what ast.parse produces.
+        variable = ast.Name(id=name, ctx=ast.Load())
         left, right = (literal, variable) if reverse else (variable, literal)
         implied.add(ast.dump(ast.Compare(left=left, ops=[comparison], comparators=[right])))
 
