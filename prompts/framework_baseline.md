@@ -35,6 +35,8 @@ or an instruction selection, then write your own baseline. Copying a file wholes
   methods may be saved under `skills/`, and reusable utilities under `tools/` with a synchronized
   `tools/README.md`. These directories seed every later trajectory; never store credentials or
   one-off measurements in them.
+- Give every `Model` constructor parameter a default; `check` and `disassemble` may construct
+  `Model()` bare.
 - Never edit `input/`, `agent/`, `reference/`, the session manifest, session traces,
   evaluator/reference state, credentials, controller state, or service state.
 - Never run a compiler, GPU import, JIT, candidate, profiler, or evaluator directly in the shell.
