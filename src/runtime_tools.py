@@ -530,11 +530,56 @@ def gateway_execute(context: RuntimeToolContext, request: dict[str, Any]) -> dic
     if operation not in _GATEWAY_EXECUTE_OPERATIONS:
         raise ValueError(f"unsupported gateway-execute operation: {operation}")
     value = {"schema_version": 2, "attempt_id": context.attempt_id, **request}
+    if operation == "dev":
+        value["files"] = _dev_files(context, value)
     if operation in _CANDIDATE_OPERATIONS:
         value["candidate"] = _candidate(context.working_kernel)
     value["idempotency_key"] = _idempotency_key("gateway", value)
     response = _post(context.gateway_url, context.gateway_capability, "/v1/operations", value)
     return _agent_gateway_response(response, request)
+
+
+def _dev_files(context: RuntimeToolContext, value: dict[str, Any]) -> list[dict[str, str]]:
+    """Resolve `file_paths` into the wire `files` field, keeping inline entries.
+
+    Naming a workspace path costs far less than inlining Base64, and it is why a
+    multi-line probe no longer has to be smuggled through `command`.
+    """
+    files: list[dict[str, str]] = []
+    seen: set[str] = set()
+    inline = value.get("files") or []
+    if not isinstance(inline, list):
+        raise ValueError("dev files must be a list")
+    for entry in inline:
+        if not isinstance(entry, dict) or "path" not in entry:
+            raise ValueError("dev file entry requires path")
+        files.append(entry)
+        seen.add(str(entry["path"]))
+    paths = value.pop("file_paths", None) or []
+    if not isinstance(paths, list):
+        raise ValueError("dev file_paths must be a list")
+    workspace = context.workspace.resolve()
+    for raw in paths:
+        if not isinstance(raw, str) or not raw:
+            raise ValueError("dev file_paths entries must be non-empty strings")
+        pure = PurePosixPath(raw)
+        if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+            raise ValueError(f"dev file path is unsafe: {raw}")
+        source = (workspace / pure).resolve()
+        if not source.is_relative_to(workspace):
+            raise ValueError(f"dev file path escapes the workspace: {raw}")
+        if source.is_symlink() or not source.is_file():
+            raise ValueError(f"dev file is missing: {raw}")
+        if pure.name in seen:
+            raise ValueError(f"dev files repeat {pure.name}")
+        seen.add(pure.name)
+        files.append(
+            {
+                "path": pure.name,
+                "content_base64": base64.b64encode(source.read_bytes()).decode("ascii"),
+            }
+        )
+    return files
 
 
 def runtime_query(

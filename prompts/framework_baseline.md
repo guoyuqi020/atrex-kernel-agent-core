@@ -40,6 +40,10 @@ or an instruction selection, then write your own baseline. Copying a file wholes
 - Candidate source importing `builtins` `cffi` `ctypes` `ftplib` `http` `importlib`
   `marshal` `multiprocessing` `os` `pathlib` `pickle` `requests` `shutil` `smtplib`
   `socket` `subprocess` `sys` `telnetlib` `urllib` is rejected before any job runs.
+- A `dev` request accepts `file_paths`: workspace-relative paths, usually under `scratch/`,
+  that are placed beside the candidate in the pod under their base names. Write a
+  multi-line probe to `scratch/` and name it there instead of encoding it into `command`;
+  a payload embedded in `command` can be truncated and cannot be reused.
 - Never edit `input/`, `agent/`, `reference/`, the session manifest, session traces,
   evaluator/reference state, credentials, controller state, or service state.
 - Never run a compiler, GPU import, JIT, candidate, profiler, or evaluator directly in the shell.

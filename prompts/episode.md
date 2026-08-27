@@ -18,6 +18,10 @@ workspace, Evidence view, task identity, and tool protocols.
 - Candidate source importing `builtins` `cffi` `ctypes` `ftplib` `http` `importlib`
   `marshal` `multiprocessing` `os` `pathlib` `pickle` `requests` `shutil` `smtplib`
   `socket` `subprocess` `sys` `telnetlib` `urllib` is rejected before any job runs.
+- A `dev` request accepts `file_paths`: workspace-relative paths, usually under `scratch/`,
+  that are placed beside the candidate in the pod under their base names. Write a
+  multi-line probe to `scratch/` and name it there instead of encoding it into `command`;
+  a payload embedded in `command` can be truncated and cannot be reused.
 - Treat controller-provided inputs, the Agent implementation, references, Session capture, service
   state, credentials, and evaluation material as read-only.
 - Route GPU execution, compilation, JIT, correctness, benchmarking, profiling, disassembly, and
