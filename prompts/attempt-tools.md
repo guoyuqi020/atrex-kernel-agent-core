@@ -80,11 +80,14 @@ from ids or measurements.
 
 Agent-visible Gateway responses follow three contracts:
 
-- `evaluate`, `profile`, and `check` retain the exact `kernel_artifact_digest`, `kernel_trial_id`,
-  and `gateway_result_digest` needed for experiment provenance;
-- `dev` and `disassemble` return their Agent-safe Job result directly and do not print those
-  identities;
+- `evaluate`, `profile`, `check`, and `disassemble` retain the exact `kernel_artifact_digest`,
+  `kernel_trial_id`, and `gateway_result_digest` needed for experiment provenance;
+- `dev` returns its Agent-safe Job result directly and does not print those identities;
 - `jobs`, `poll`, `cancel`, `env`, `health`, and `config` return their Agent-safe `result` directly.
+
+`check` and `disassemble` report only `status`, `job_id`, `error`, and the nested `result` holding
+the compile verdict; a compile-only Job never launches the Kernel, so it carries no register, spill,
+or assembly evidence. Use `evaluate` or `profile` for those.
 
 Profile additionally reports the numeric `shape_id`, normalized per-Kernel durations, resource and
 SOL evidence, safe profiler counters, and duration-weighted summary fields. Protocol versions and
@@ -200,12 +203,12 @@ Each `record-experiment` request must contain exactly these fields:
 
 `before` and `after` bind both sides of the modification to exact source and measurements. Each side
 contains one Kernel Artifact Digest, its Trial ID, and a non-empty unique list of every relevant
-Evaluate/Profile/Check Result Digest for that exact Kernel. Record the entry before changing or
-reverting the candidate. For `keep_after` and `restore_before`, both sides are required. For
-`abandon_direction` before any identity-bearing operation, set both `before` and `after` to `null`;
-never set only one side to `null`. The phase Prompt may additionally permit Bootstrap-only
-`baseline`, which requires `before=null` and a complete `after`. A `dev` or `disassemble` result
-alone supplies no identity.
+Evaluate/Profile/Check/Disassemble Result Digest for that exact Kernel. Record the entry before
+changing or reverting the candidate. For `keep_after` and `restore_before`, both sides are required.
+For `abandon_direction` before any identity-bearing operation, set both `before` and `after` to
+`null`; never set only one side to `null`. The phase Prompt may additionally permit Bootstrap-only
+`baseline`, which requires `before=null` and a complete `after`. A `dev` result alone supplies no
+identity.
 `record-experiment` persists the complete entry and prints only a compact receipt such as
 `{"status":"recorded","experiment_id":"experiment_<id>"}`; use that ID when referring to the
 experiment later. It does not echo the Agent-authored text, assigned sequence, or timestamp.

@@ -1573,7 +1573,7 @@ def test_gateway_execute_returns_dev_result_directly(
     }
 
 
-def test_gateway_execute_returns_disassemble_result_directly(
+def test_gateway_execute_keeps_disassemble_provenance_identities(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1596,6 +1596,7 @@ def test_gateway_execute_returns_disassemble_result_directly(
             "result": {
                 "job_id": "da_example",
                 "status": "succeeded",
+                "error": None,
                 "result": {"format": "sass", "assembly": "/* SASS */"},
             },
         }
@@ -1606,9 +1607,18 @@ def test_gateway_execute_returns_disassemble_result_directly(
         context,
         {"operation": "disassemble", "fmt": "sass"},
     ) == {
+        "operation": "disassemble",
+        "status": "completed",
+        "kernel_artifact_digest": "sha256:" + "4" * 64,
+        "kernel_trial_id": "gtrial_" + "5" * 32,
+        "gateway_result_digest": "sha256:" + "6" * 64,
         "job_id": "da_example",
-        "status": "succeeded",
-        "result": {"format": "sass", "assembly": "/* SASS */"},
+        "result": {
+            "job_id": "da_example",
+            "status": "succeeded",
+            "error": None,
+            "result": {"format": "sass", "assembly": "/* SASS */"},
+        },
     }
 
 

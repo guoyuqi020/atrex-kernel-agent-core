@@ -499,7 +499,6 @@ def _agent_gateway_response(
         return _profile_agent_response(response, request)
     if operation in {
         "dev",
-        "disassemble",
         "jobs",
         "poll",
         "cancel",
