@@ -347,6 +347,7 @@ class CliAgentRuntime:
         reasoning_effort: str,
         session_settings: str | None = None,
         model: str | None = None,
+        system_prompt: str = "",
     ) -> list[str]:
         return self._adapter.build_command(
             prompt,
@@ -354,6 +355,7 @@ class CliAgentRuntime:
             reasoning_effort,
             self._session_settings() if session_settings is None else session_settings,
             model,
+            system_prompt,
         )
 
     def _session_settings(self) -> str:
@@ -371,6 +373,7 @@ class CliAgentRuntime:
             request.reasoning_effort,
             request.session_settings,
             request.model,
+            request.system_prompt,
         )
         environment = build_session_environment(self.id)
         environment["IS_SANDBOX"] = "1"

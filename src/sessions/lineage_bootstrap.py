@@ -39,17 +39,29 @@ def render_prompt(
                 base,
                 public_operator_contract(context.agent_problem),
                 _trusted_context(context),
-                _tool_instructions(config, str(context.manifest["dsl"])),
             )
         )
         + "\n"
     )
 
 
+def render_system_prompt(
+    context: RuntimeLineageBootstrapContext,
+    config: AgentConfig,
+) -> str:
+    """Carry the Session-tool contract where context compaction cannot drop it."""
+    return _tool_instructions(config, str(context.manifest["dsl"]))
+
+
 def run() -> int:
     context = RuntimeLineageBootstrapContext.from_environment()
     config = AgentConfig.load(context.repository)
-    return execute_agent_session(context, config, render_prompt(context, config))
+    return execute_agent_session(
+        context,
+        config,
+        render_prompt(context, config),
+        system_prompt=render_system_prompt(context, config),
+    )
 
 
 def main() -> int:

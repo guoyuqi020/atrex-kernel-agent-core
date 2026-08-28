@@ -43,9 +43,10 @@ def initial_records(
     backend: str,
     session_id: str,
     prompt: str,
+    system_prompt: str = "",
 ) -> list[dict[str, Any]]:
     """Describe the capture boundary and the exact Runtime-supplied initial message."""
-    return [
+    records = [
         _record(
             0,
             "session_start",
@@ -56,15 +57,29 @@ def initial_records(
                 "captured": False,
                 "reason": "provider-managed system prompt is not exported by the CLI",
             },
+            runtime_system_prompt={"supplied": bool(system_prompt)},
         ),
+    ]
+    if system_prompt:
+        records.append(
+            _record(
+                len(records),
+                "message",
+                "runtime_input",
+                role="system",
+                content=[{"type": "text", "text": system_prompt}],
+            )
+        )
+    records.append(
         _record(
-            1,
+            len(records),
             "message",
             "runtime_input",
             role="user",
             content=[{"type": "text", "text": prompt}],
-        ),
-    ]
+        )
+    )
+    return records
 
 
 def provider_line_record(
@@ -166,9 +181,15 @@ def render_conversation(
     timed_out: bool | None,
     raw_provider_capture_complete: bool,
     error_type: str | None = None,
+    system_prompt: str = "",
 ) -> str:
     """Render conversational input and every retained Provider event in one JSONL file."""
-    records = initial_records(backend=backend, session_id=session_id, prompt=prompt)
+    records = initial_records(
+        backend=backend,
+        session_id=session_id,
+        prompt=prompt,
+        system_prompt=system_prompt,
+    )
     sequence = len(records)
     for line in stdout.splitlines():
         if not record_provider_line(line):

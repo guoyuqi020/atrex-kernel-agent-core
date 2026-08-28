@@ -172,10 +172,13 @@ class AgentRunRequest:
     usage_budget: float | None = None
     live_trace_path: Path | None = None
     model: str | None = None
+    system_prompt: str = ""
 
     def __post_init__(self) -> None:
         if self.usage_budget is not None and self.usage_budget <= 0:
             raise ValueError("Agent usage budget must be positive")
+        if "\x00" in self.system_prompt:
+            raise ValueError("Agent system prompt cannot contain NUL")
         if self.model is not None and (not self.model.strip() or "\x00" in self.model):
             raise ValueError("Agent model must be non-empty and cannot contain NUL")
 

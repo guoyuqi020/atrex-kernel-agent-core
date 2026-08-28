@@ -43,6 +43,32 @@ def test_every_backend_receives_the_lineage_selected_model() -> None:
     assert 'model="m"' in commands["codex"]
 
 
+def test_native_system_prompt_channel_keeps_it_out_of_the_conversation() -> None:
+    contract = "## Session tools\n\nrun the tool"
+
+    for adapter in (ClaudeAdapter(), QoderAdapter()):
+        command = adapter.build_command("prompt", "session", "high", "", None, contract)
+        index = command.index("--append-system-prompt")
+        assert command[index + 1] == contract
+        assert command[-1] == "prompt"
+
+
+def test_backends_without_a_system_prompt_flag_fold_it_into_the_prompt() -> None:
+    contract = "## Session tools\n\nrun the tool"
+
+    for adapter in (PiAdapter(), CodexAdapter()):
+        command = adapter.build_command("prompt", "session", "high", "", None, contract)
+        assert "--append-system-prompt" not in command
+        assert command[-1] == contract + "\n\nprompt"
+
+
+def test_an_absent_system_prompt_adds_no_argument() -> None:
+    for adapter in (ClaudeAdapter(), QoderAdapter(), PiAdapter(), CodexAdapter()):
+        command = adapter.build_command("prompt", "session", "high", "")
+        assert "--append-system-prompt" not in command
+        assert command[-1] == "prompt"
+
+
 def test_structured_session_settings_cannot_override_runtime_model() -> None:
     with pytest.raises(ValueError, match="both Runtime and session settings"):
         PiAdapter().build_command("prompt", "session", "high", '{"model":"other"}', "m")

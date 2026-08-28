@@ -165,6 +165,13 @@ def codex_settings_args(raw: str) -> list[str]:
     return arguments
 
 
+def merged_user_prompt(prompt: str, system_prompt: str) -> str:
+    """Fold a system prompt into the user prompt for backends without that channel."""
+    if not system_prompt:
+        return prompt
+    return system_prompt.rstrip() + "\n\n" + prompt
+
+
 class AgentBackendAdapter(ABC):
     id: str
     settings_variable: str
@@ -181,6 +188,7 @@ class AgentBackendAdapter(ABC):
         reasoning_effort: str,
         settings: str,
         model: str | None = None,
+        system_prompt: str = "",
     ) -> list[str]: ...
 
     @abstractmethod
@@ -276,6 +284,7 @@ class ClaudeAdapter(ClaudeLikeAdapter):
         reasoning_effort: str,
         settings: str,
         model: str | None = None,
+        system_prompt: str = "",
     ) -> list[str]:
         command = [
             "claude",
@@ -296,6 +305,8 @@ class ClaudeAdapter(ClaudeLikeAdapter):
             command += ["--model", model]
         if settings:
             command += ["--settings", settings]
+        if system_prompt:
+            command += ["--append-system-prompt", system_prompt]
         command.append(prompt)
         return command
 
@@ -358,6 +369,7 @@ class QoderAdapter(ClaudeLikeAdapter):
         reasoning_effort: str,
         settings: str,
         model: str | None = None,
+        system_prompt: str = "",
     ) -> list[str]:
         command = [
             "qodercli",
@@ -375,6 +387,8 @@ class QoderAdapter(ClaudeLikeAdapter):
             command += ["--model", model]
         if settings:
             command += ["--settings", settings]
+        if system_prompt:
+            command += ["--append-system-prompt", system_prompt]
         command.append(prompt)
         return command
 
@@ -394,6 +408,7 @@ class PiAdapter(AgentBackendAdapter):
         reasoning_effort: str,
         settings: str,
         model: str | None = None,
+        system_prompt: str = "",
     ) -> list[str]:
         command = [
             "pi",
@@ -411,7 +426,7 @@ class PiAdapter(AgentBackendAdapter):
         if model is not None:
             command += ["--model", model]
         command += settings_args
-        command.append(prompt)
+        command.append(merged_user_prompt(prompt, system_prompt))
         return command
 
     def normalize_stream(self, stdout: str) -> tuple[tuple[NormalizedAgentEvent, ...], TokenUsage]:
@@ -482,6 +497,7 @@ class CodexAdapter(AgentBackendAdapter):
         reasoning_effort: str,
         settings: str,
         model: str | None = None,
+        system_prompt: str = "",
     ) -> list[str]:
         del session_id
         command = [
@@ -500,7 +516,7 @@ class CodexAdapter(AgentBackendAdapter):
         if model is not None:
             command += ["-c", f"model={json.dumps(model, ensure_ascii=False)}"]
         command += settings_args
-        command.append(prompt)
+        command.append(merged_user_prompt(prompt, system_prompt))
         return command
 
     def normalize_stream(self, stdout: str) -> tuple[tuple[NormalizedAgentEvent, ...], TokenUsage]:

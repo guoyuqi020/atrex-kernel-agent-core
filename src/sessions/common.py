@@ -144,6 +144,7 @@ def start_live_trace(
     runtime_id: str,
     session_id: str,
     config: AgentConfig,
+    system_prompt: str = "",
 ) -> bool:
     """Create a stable, explicitly non-authoritative trace projection before launch."""
     if context.session_trace_path is None:
@@ -158,6 +159,8 @@ def start_live_trace(
     trace_root.mkdir(mode=0o700)
     atomic_text(trace_root / _LIVE_TRACE_MARKER, "unsealed\n")
     atomic_text(trace_root / "input/prompt.md", prompt)
+    if system_prompt:
+        atomic_text(trace_root / "input/system-prompt.md", system_prompt)
     atomic_text(
         trace_root / "conversation.jsonl",
         encode_records(
@@ -165,6 +168,7 @@ def start_live_trace(
                 backend=runtime_id,
                 session_id=session_id,
                 prompt=prompt,
+                system_prompt=system_prompt,
             )
         ),
     )
@@ -250,6 +254,7 @@ def write_trace(
     config: AgentConfig,
     *,
     replace_live: bool = False,
+    system_prompt: str = "",
 ) -> None:
     """Persist unredacted Session input and Provider files plus a normalized usage index."""
     if context.session_trace_path is None:
@@ -295,6 +300,8 @@ def write_trace(
     trace_root.mkdir(mode=0o700)
     filtered_stdout = filter_provider_stdout(result.stdout)
     atomic_text(trace_root / "input/prompt.md", prompt)
+    if system_prompt:
+        atomic_text(trace_root / "input/system-prompt.md", system_prompt)
     atomic_text(trace_root / "provider/stdout.stream-json", filtered_stdout)
     atomic_text(trace_root / "provider/stderr.log", result.stderr)
     for relative, payload in raw_files:
@@ -311,6 +318,7 @@ def write_trace(
             exit_status=result.exit_status,
             timed_out=result.timed_out,
             raw_provider_capture_complete=result.raw_provider_capture_complete,
+            system_prompt=system_prompt,
         ),
     )
 
@@ -380,6 +388,7 @@ def execute_agent_session(
     config: AgentConfig,
     prompt: str,
     *,
+    system_prompt: str = "",
     on_success: Callable[[], None] | None = None,
 ) -> int:
     """Run one backend session and always persist its provider-usage report."""
@@ -392,6 +401,7 @@ def execute_agent_session(
         runtime_id=runtime.id,
         session_id=session_id,
         config=config,
+        system_prompt=system_prompt,
     )
     try:
         result = runtime.run(
@@ -405,9 +415,17 @@ def execute_agent_session(
                 model=config.model,
                 usage_budget=context.usage_budget,
                 live_trace_path=context.session_trace_path if live_trace else None,
+                system_prompt=system_prompt,
             )
         )
-        write_trace(context, result, prompt, config, replace_live=live_trace)
+        write_trace(
+            context,
+            result,
+            prompt,
+            config,
+            replace_live=live_trace,
+            system_prompt=system_prompt,
+        )
         if not result.raw_provider_capture_complete:
             return 126
         if result.budget_exhausted:
