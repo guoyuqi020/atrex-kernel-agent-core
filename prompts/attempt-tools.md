@@ -22,11 +22,47 @@ python3 {{RUNTIME_TOOL}} attempt-report --request scratch/<request>.json
 fields. Never embed a candidate, schema version, capability, or attempt ID in its request.
 Runtime-local history queries use their dedicated commands above;
 do not pass `kernel_trial_show`, `kernel_artifact_read`, or
-`gateway_result_read` to `gateway-execute`. Example profile request:
+`gateway_result_read` to `gateway-execute`.
 
-```json
-{"operation": "profile", "level": "survey"}
+Every `gateway-execute` request names one `operation`. These are the only Agent-authored fields;
+each is optional with the default shown in parentheses unless marked required, and an omitted field
+is normally the right choice:
+
+```text
+evaluate     no further fields; one Job measures every contract Shape
+profile      level=survey|sol|deep (sol), profiler=ncu|rocprofv3, counters=[], source (false),
+             kernel_name or kernel_regex, launch_skip, launch_count, top_kernels, shape_id
+dev          command (required), file_paths=[], env_vars={}, job_timeout_s (<=600), recycle (true),
+             note, intent=workspace|scratch_exec|inspect|compile|profile_adhoc|sanitize|
+             custom_harness|other
+check        arch, sanitize=memcheck|racecheck|initcheck|synccheck
+disassemble  fmt=sass|ptx|auto (auto)
+poll         job_id (required), wait (false), include_spec (false)
+jobs         kind=eval|profile|dev|compile|sol|disassemble,
+             status=queued|running|succeeded|failed|cancelled, limit (50, at most 200)
+cancel       job_id (required)
+env          gpu, capabilities (false, requires gpu), force (false)
+health       no further fields
+config       no further fields
 ```
+
+`profile`, `check`, and `disassemble` additionally accept `env_vars`, `requirements`, and
+`deps_mode=freeze_installed|no_deps` to install dependencies for that Job. `kernel_name` and
+`kernel_regex` are mutually exclusive, and `level: "deep"` requires one of them. `dev` takes its
+extra sources through `file_paths`, a list of workspace-relative paths; each named file is uploaded
+under its basename alone and may not shadow a `work/kernel` path, which is why a multi-line probe
+does not need to be smuggled through `command`. Prefer `file_paths` over a heredoc inside `command`.
+
+A Gateway call blocks until its Job reaches a terminal state, which for `evaluate`, `profile`,
+`check`, and `disassemble` routinely exceeds any local command timeout. Start those calls as a
+background task and collect the output once it finishes; a foreground call that is killed locally
+leaves the Job running. Keep stderr out of the JSON on stdout, because appending `2>&1` corrupts the
+result you then have to parse. Never wrap a call in a `sleep` retry loop: `{"operation": "jobs"}`
+lists this Attempt's Jobs, and `{"operation": "poll", "job_id": "<id>", "wait": true}` blocks on one
+Job until it is terminal, which replaces the whole loop with a single call. Re-issuing a request
+whose Job is still in flight is refused as a binding conflict; re-issuing one that already completed
+replays its recorded Result without spending GPU time or call budget, so the way to recover a call
+killed by a local timeout is to run the identical request again.
 
 An expected tool failure prints one JSON Object and exits nonzero. For request mistakes, repair the
 compact `issues` first, then use the operation-specific `request_schema`; an unknown operation
