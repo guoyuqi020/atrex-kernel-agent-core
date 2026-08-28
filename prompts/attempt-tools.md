@@ -90,8 +90,9 @@ the compile verdict; a compile-only Job never launches the Kernel, so it carries
 or assembly evidence. Use `evaluate` or `profile` for those.
 
 Profile additionally reports the numeric `shape_id`, normalized per-Kernel durations, resource and
-SOL evidence, safe profiler counters, and duration-weighted summary fields. Protocol versions and
-trusted request identities are never printed.
+SOL evidence, safe profiler counters, and duration-weighted summary fields. No Gateway result echoes
+a protocol version or a trusted request identity; the `request_schema` returned with a request error
+is the one exception, because it is a schema document and carries its own versions.
 
 Example exploratory evaluation request:
 
@@ -112,10 +113,15 @@ not contain `operation`. Examples are `{"kernel_trial_id":"gtrial_<id>"}` for
 `"file":"scratch/recovered/kernel.py"}` for
 `kernel-artifact-read`, `{"gateway_result_digest":"sha256:<digest>"}` for
 `gateway-result-read`. These reads are unmetered and never contact Agate.
-`kernel-trial-show` returns only the Kernel Artifact Digest and normalized `gateway_results`;
-result entries omit their already-resolved Gateway Result Digests.
-`gateway-result-read` returns a normalized Agent-visible measurement with operation, status,
-correctness, aggregate latencies, and latency by opaque Shape ID. It does not reveal private
+`kernel-trial-show` returns only the Kernel Artifact Digest and a `gateway_results` array; each
+entry is `{"operation", "status", "result"}` and omits its already-resolved Gateway Result Digest.
+An entry replays whatever that call's Agent-visible response was, so a `dev` entry still carries
+the whole Agate Job envelope.
+`gateway-result-read` returns `{"operation", "status", "result"}`; the measurement lives under
+`result`, not beside those keys. For an Evaluate it holds `correct`, `correctness`, `failures`,
+`latency_us_by_shape` keyed by opaque Shape ID, and the aggregates `latency_us_arith_mean` and
+`latency_us_geomean`. Those two names differ from the single `latency_us` an Evaluate response
+returns, so compare the same field when reading a Result back. It does not reveal private
 evaluator inputs or hidden-case details.
 For `kernel-artifact-read`, `file` is a required destination under `scratch/`; `artifact_file`
 selects the source inside the Artifact and defaults to the destination basename. Source content is
@@ -223,7 +229,10 @@ refine the diagnosis, evidence summaries, Profile bindings, knowledge use, and A
 analysis while the evidence is fresh. The draft may be overwritten throughout the session. Do not
 call `attempt-report` during this process. When the engineering loop and all started Directions are
 closed, validate the completed draft and use it as the request. The first successful call publishes
-the write-once terminal handoff to the separate `scratch/attempt-report.json`. An
+the write-once terminal handoff to the separate `scratch/attempt-report.json` and prints only a
+compact receipt such as
+`{"status":"published","report_status":"candidate_ready","file":"scratch/attempt-report.json",`
+`"experiment_count":3,"finding_count":2}`; the report text itself is never echoed back. An
 error response publishes nothing: correct the same draft using
 `issues`, `request_schema`, and `recovery`, then call `attempt-report` again. Never call it again
 after a successful response.

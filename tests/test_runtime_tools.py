@@ -351,7 +351,7 @@ def test_baseline_experiment_is_bootstrap_only_and_one_sided(tmp_path: Path) -> 
 
     _complete_direction(bootstrap, direction_id)
     result = attempt_report(bootstrap, _report(str(receipt["experiment_id"])))
-    assert result["status"] == "candidate_ready"
+    assert result["report_status"] == "candidate_ready"
 
 
 def test_blocked_bootstrap_cannot_omit_measured_baseline(tmp_path: Path) -> None:
@@ -603,22 +603,39 @@ def test_attempt_report_validates_and_atomically_publishes_once(tmp_path: Path) 
     assert isinstance(receipt["experiment_id"], str)
     assert receipt["experiment_id"].startswith("experiment_")
 
-    report = attempt_report(context, _report(receipt["experiment_id"]))
+    published = attempt_report(context, _report(receipt["experiment_id"]))
 
+    assert published == {
+        "status": "published",
+        "report_status": "candidate_ready",
+        "file": "scratch/attempt-report.json",
+        "experiment_count": 1,
+        "finding_count": 1,
+    }
+    report = json.loads(context.report_path.read_text(encoding="utf-8"))
     assert report["schema_version"] == 12
     assert report["experiments"][0]["experiment_id"] == receipt["experiment_id"]
-    assert json.loads(context.report_path.read_text(encoding="utf-8")) == report
     with pytest.raises(FileExistsError, match="already exists"):
         attempt_report(context, _report(receipt["experiment_id"]))
+
+
+def test_attempt_report_receipt_withholds_the_report_and_its_identities(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    _direction_id, receipt = _completed_test_experiment(context)
+
+    published = attempt_report(context, _report(receipt["experiment_id"]))
+
+    assert not {"schema_version", "attempt_id"} & set(published)
+    assert not {"analysis", "findings", "experiments", "direction_events"} & set(published)
 
 
 def test_attempt_report_registers_with_runtime_before_publishing(tmp_path: Path) -> None:
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
 
-    report = attempt_report(context, _report(receipt["experiment_id"]))
+    attempt_report(context, _report(receipt["experiment_id"]))
 
-    assert [report] == _REGISTERED_REPORTS
+    assert [json.loads(context.report_path.read_text(encoding="utf-8"))] == _REGISTERED_REPORTS
 
 
 def test_a_refused_nomination_publishes_nothing(
@@ -754,8 +771,9 @@ def test_attempt_report_allows_any_number_of_continuable_directions(tmp_path: Pa
             },
         )
 
-    report = attempt_report(context, _report(str(receipt["experiment_id"])))
+    attempt_report(context, _report(str(receipt["experiment_id"])))
 
+    report = json.loads(context.report_path.read_text(encoding="utf-8"))
     assert sum(event["action"] == "propose" for event in report["direction_events"]) == 5
 
 
@@ -864,7 +882,7 @@ def test_attempt_report_rejects_unexperimented_direction_left_in_progress(
         },
     )
     report = attempt_report(context, _report(str(receipt["experiment_id"])))
-    assert report["status"] == "candidate_ready"
+    assert report["report_status"] == "candidate_ready"
 
 
 def test_experiment_journal_can_be_listed_and_loaded_by_id(
@@ -968,7 +986,7 @@ def test_attempt_report_rejects_invalid_lists_before_publication(tmp_path: Path)
     assert isinstance(approach, dict)
     approach["steps"] = ["apply the measured optimization"]
     published = attempt_report(context, report)
-    assert published["status"] == "candidate_ready"
+    assert published["report_status"] == "candidate_ready"
     assert context.report_path.is_file()
 
 

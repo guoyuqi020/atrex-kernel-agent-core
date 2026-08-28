@@ -1300,7 +1300,13 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     }
     _register_attempt_report(context, report)
     _atomic_json(context.report_path, report, exclusive=True)
-    return report
+    return {
+        "status": "published",
+        "report_status": report["status"],
+        "file": context.report_path.relative_to(context.workspace).as_posix(),
+        "experiment_count": len(experiments),
+        "finding_count": len(findings),
+    }
 
 
 def _register_attempt_report(context: RuntimeToolContext, report: dict[str, Any]) -> None:
