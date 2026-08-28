@@ -117,6 +117,10 @@ _MAX_CANDIDATE_FILES = 4096
 _MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _MAX_ERROR_RESPONSE_BYTES = 64 * 1024
+_HTTP_TIMEOUT_SECONDS = 600
+# Seven ten-minute reads outlast Runtime's own Agate wait, so a slow operation is
+# collected on a later reconnect instead of being abandoned half-finished.
+_MAX_TIMEOUT_RECONNECTS = 6
 
 
 class RuntimeServiceError(RuntimeError):
@@ -246,8 +250,26 @@ def _post(url: str, capability: str, path: str, value: object) -> dict[str, Any]
             "content-type": "application/json",
         },
     )
+    for _ in range(_MAX_TIMEOUT_RECONNECTS + 1):
+        try:
+            return _exchange(request)
+        except TimeoutError:
+            continue
+        except urllib.error.HTTPError:
+            raise
+        except urllib.error.URLError as error:
+            if not isinstance(error.reason, TimeoutError):
+                raise RuntimeError(f"Runtime service is unavailable: {error.reason}") from error
+    raise RuntimeError(
+        "Runtime service did not answer within "
+        f"{(_MAX_TIMEOUT_RECONNECTS + 1) * _HTTP_TIMEOUT_SECONDS}s; "
+        "repeat the identical request to collect the result"
+    )
+
+
+def _exchange(request: urllib.request.Request) -> dict[str, Any]:
     try:
-        with urllib.request.urlopen(request, timeout=600) as response:
+        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
             body = response.read(_MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
         body = error.read(_MAX_ERROR_RESPONSE_BYTES + 1)
@@ -275,8 +297,6 @@ def _post(url: str, capability: str, path: str, value: object) -> dict[str, Any]
                     }
                 )
         raise RuntimeServiceError(error.code, error_payload) from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Runtime service is unavailable: {error.reason}") from error
     if len(body) > _MAX_RESPONSE_BYTES:
         raise RuntimeError("Runtime service response exceeds the Core byte limit")
     result = json.loads(body)

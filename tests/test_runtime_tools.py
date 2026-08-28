@@ -1636,3 +1636,41 @@ def test_wiki_query_assigns_request_identity(
             context,
             {"query": "shared memory", "idempotency_key": "agent-controlled"},
         )
+
+
+def test_a_slow_operation_is_collected_on_reconnect(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts: list[int] = []
+
+    def urlopen(request: Any, timeout: float) -> Any:
+        attempts.append(len(attempts))
+        if len(attempts) < 3:
+            raise TimeoutError("read timed out")
+
+        class _Response:
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self, _limit: int) -> bytes:
+                return json.dumps({"result": {"status": "completed"}}).encode()
+
+        return _Response()
+
+    monkeypatch.setattr(runtime_tools.urllib.request, "urlopen", urlopen)
+
+    assert runtime_tools._post("http://runtime.invalid", "cap", "/v1/operations", {}) == {
+        "result": {"status": "completed"}
+    }
+    assert len(attempts) == 3
+
+
+def test_an_unreachable_runtime_still_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    def urlopen(request: Any, timeout: float) -> Any:
+        raise runtime_tools.urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(runtime_tools.urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(RuntimeError, match="Runtime service is unavailable"):
+        runtime_tools._post("http://runtime.invalid", "cap", "/v1/operations", {})
