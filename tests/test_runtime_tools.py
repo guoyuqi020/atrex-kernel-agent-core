@@ -71,6 +71,7 @@ def _bootstrap_context(root: Path) -> RuntimeLineageBootstrapContext:
 
 _FAKE_JOURNALS: dict[str, dict[str, list[dict[str, Any]]]] = {}
 _FAKE_HISTORY: dict[str, dict[str, list[dict[str, Any]]]] = {}
+_REGISTERED_REPORTS: list[dict[str, Any]] = []
 
 
 def _fake_state(context: Any) -> dict[str, list[dict[str, Any]]]:
@@ -275,6 +276,13 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError(f"unexpected Runtime Journal command: {command}")
 
     monkeypatch.setattr(runtime_tools, "runtime_journal", journal)
+
+    def register(context: Any, report: dict[str, Any]) -> None:
+        del context
+        _REGISTERED_REPORTS.append(report)
+
+    _REGISTERED_REPORTS.clear()
+    monkeypatch.setattr(runtime_tools, "_register_attempt_report", register)
 
 
 def _propose_and_start_direction(context: Any) -> str:
@@ -604,6 +612,32 @@ def test_attempt_report_validates_and_atomically_publishes_once(tmp_path: Path) 
         attempt_report(context, _report(receipt["experiment_id"]))
 
 
+def test_attempt_report_registers_with_runtime_before_publishing(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    _direction_id, receipt = _completed_test_experiment(context)
+
+    report = attempt_report(context, _report(receipt["experiment_id"]))
+
+    assert [report] == _REGISTERED_REPORTS
+
+
+def test_a_refused_nomination_publishes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context(tmp_path)
+    _direction_id, receipt = _completed_test_experiment(context)
+
+    def refuse(_context: Any, _report: dict[str, Any]) -> None:
+        raise ValueError("no Agent evaluate covers it")
+
+    monkeypatch.setattr(runtime_tools, "_register_attempt_report", refuse)
+
+    with pytest.raises(ValueError, match="no Agent evaluate covers it"):
+        attempt_report(context, _report(receipt["experiment_id"]))
+    assert not context.report_path.exists()
+
+
 def test_direction_journal_can_be_recorded_listed_and_loaded(tmp_path: Path) -> None:
     context = _context(tmp_path)
     request = {"file": "scratch/directions-index.json"}
@@ -809,6 +843,7 @@ def test_attempt_may_explore_only_one_direction_at_a_time(tmp_path: Path) -> Non
         },
     )
     assert load_direction(context, {"direction_id": second})["status"] == "in_progress"
+
 
 def test_attempt_report_rejects_unexperimented_direction_left_in_progress(
     tmp_path: Path,

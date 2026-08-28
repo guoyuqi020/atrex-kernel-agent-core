@@ -1279,8 +1279,30 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         "experiments": experiments,
         "direction_events": direction_events,
     }
+    _register_attempt_report(context, report)
     _atomic_json(context.report_path, report, exclusive=True)
     return report
+
+
+def _register_attempt_report(context: RuntimeToolContext, report: dict[str, Any]) -> None:
+    """Let Runtime seal the exact candidate and accept or refuse this nomination."""
+    value: dict[str, Any] = {
+        "schema_version": 2,
+        "attempt_id": context.attempt_id,
+        "operation": "attempt_report",
+        "report": report,
+        "candidate": _candidate(context.working_kernel),
+    }
+    value["idempotency_key"] = _idempotency_key("runtime-report", value)
+    response = _post(
+        context.gateway_url,
+        context.gateway_capability,
+        "/v1/runtime/queries",
+        value,
+    )
+    result = response.get("result")
+    if not isinstance(result, dict) or result.get("status") != "registered":
+        raise ValueError("Attempt report registration returned an invalid response")
 
 
 def _context(command: str) -> RuntimeToolContext:
