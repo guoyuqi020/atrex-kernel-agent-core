@@ -36,7 +36,7 @@ dev          command (required), file_paths=[], env_vars={}, job_timeout_s (<=60
              note, intent=workspace|scratch_exec|inspect|compile|profile_adhoc|sanitize|
              custom_harness|other
 check        arch, sanitize=memcheck|racecheck|initcheck|synccheck
-disassemble  fmt=sass|ptx|auto (auto)
+disassemble  fmt=sass|ptx|isa|auto (auto)
 poll         job_id (required), wait (false), include_spec (false)
 jobs         kind=eval|profile|dev|compile|sol|disassemble,
              status=queued|running|succeeded|failed|cancelled, limit (50, at most 200)
