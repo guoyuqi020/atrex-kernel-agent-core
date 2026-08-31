@@ -1059,17 +1059,25 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     if set(request) != _REPORT_FIELDS:
         raise ValueError(f"Attempt report fields must be exactly {sorted(_REPORT_FIELDS)}")
     snapshot = runtime_journal(context, "_journal-snapshot", {})
-    if set(snapshot) != {"direction_events", "experiments", "directions"}:
+    if set(snapshot) != {
+        "direction_events",
+        "experiments",
+        "directions",
+        "citable_profile_results",
+    }:
         raise ValueError("Runtime returned an invalid Journal snapshot")
     experiment_values = snapshot.get("experiments")
     direction_event_values = snapshot.get("direction_events")
     direction_values = snapshot.get("directions")
+    citable_profile_results = snapshot.get("citable_profile_results")
     if not isinstance(experiment_values, list) or not experiment_values:
         raise ValueError("Attempt report requires at least one Runtime Experiment")
     if not isinstance(direction_event_values, list) or not direction_event_values:
         raise ValueError("Attempt report requires at least one Runtime Direction event")
     if not isinstance(direction_values, list):
         raise ValueError("Runtime returned invalid normalized Directions")
+    if not isinstance(citable_profile_results, list):
+        raise ValueError("Runtime returned invalid citable Profile results")
     experiments = _validate_experiment_entries(
         experiment_values,
         "Runtime Experiment Journal",
@@ -1178,19 +1186,23 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         if len(supporting_results) > 32:
             raise ValueError("Attempt report profile_evidence supports at most 32 results")
         journal_bindings: set[tuple[str, str, str]] = set()
-        for experiment in experiments:
-            for side_name in ("before", "after"):
-                side = experiment[side_name]
-                if side is None:
-                    continue
-                for result_digest in side["gateway_result_digests"]:
-                    journal_bindings.add(
-                        (
-                            side["kernel_artifact_digest"],
-                            side["kernel_trial_id"],
-                            result_digest,
-                        )
-                    )
+        for citable in citable_profile_results:
+            identity = _exact_object(
+                citable,
+                "Runtime citable Profile result",
+                {
+                    "kernel_artifact_digest",
+                    "kernel_trial_id",
+                    "gateway_result_digest",
+                },
+            )
+            journal_bindings.add(
+                (
+                    str(identity["kernel_artifact_digest"]),
+                    str(identity["kernel_trial_id"]),
+                    str(identity["gateway_result_digest"]),
+                )
+            )
         seen_results: set[str] = set()
         has_profile = False
         for index, item in enumerate(supporting_results):
@@ -1224,7 +1236,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
             )
             if binding not in journal_bindings:
                 raise ValueError(
-                    "Profile supporting result is not referenced by the Experiment journal: "
+                    "Profile supporting result is not referenced by any visible Experiment: "
                     f"{binding[2]}"
                 )
             if binding[2] in seen_results:

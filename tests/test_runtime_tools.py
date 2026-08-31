@@ -121,6 +121,24 @@ def _fake_direction_views(context: Any) -> dict[str, dict[str, Any]]:
     return directions
 
 
+def _fake_citable_profile_results(context: Any) -> list[dict[str, Any]]:
+    identities: list[dict[str, Any]] = []
+    for experiment in _fake_visible(context, "experiments"):
+        for side_name in ("before", "after"):
+            side = experiment.get(side_name)
+            if side is None:
+                continue
+            for result_digest in side["gateway_result_digests"]:
+                identity = {
+                    "kernel_artifact_digest": side["kernel_artifact_digest"],
+                    "kernel_trial_id": side["kernel_trial_id"],
+                    "gateway_result_digest": result_digest,
+                }
+                if identity not in identities:
+                    identities.append(identity)
+    return identities
+
+
 @pytest.fixture(autouse=True)
 def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
     _FAKE_JOURNALS.clear()
@@ -272,6 +290,7 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                 "direction_events": deepcopy(state["direction_events"]),
                 "experiments": deepcopy(state["experiments"]),
                 "directions": list(_fake_direction_views(context).values()),
+                "citable_profile_results": _fake_citable_profile_results(context),
             }
         raise AssertionError(f"unexpected Runtime Journal command: {command}")
 
@@ -1013,9 +1032,46 @@ def test_attempt_report_rejects_profile_result_absent_from_journal(tmp_path: Pat
     assert isinstance(results, list)
     results[0]["gateway_result_digest"] = "sha256:" + "1" * 64
 
-    with pytest.raises(ValueError, match="not referenced by the Experiment journal"):
+    with pytest.raises(ValueError, match="not referenced by any visible Experiment"):
         attempt_report(context, report)
     assert not context.report_path.exists()
+
+
+def test_attempt_report_can_cite_a_historical_profile_result(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    historical_experiment = {
+        "experiment_id": "experiment_" + "8" * 32,
+        "sequence": 1,
+        "recorded_at": "2026-08-24T00:00:00+00:00",
+        **_experiment(),
+    }
+    historical_after = historical_experiment["after"]
+    assert isinstance(historical_after, dict)
+    historical_after.update(
+        {
+            "kernel_artifact_digest": "sha256:" + "2" * 64,
+            "kernel_trial_id": "gtrial_" + "3" * 32,
+            "gateway_result_digests": ["sha256:" + "4" * 64],
+        }
+    )
+    _FAKE_HISTORY[str(context.workspace)] = {
+        "direction_events": [],
+        "experiments": [historical_experiment],
+    }
+    _direction_id, receipt = _completed_test_experiment(context)
+    report = _report(str(receipt["experiment_id"]))
+    profile = report["profile_evidence"]
+    assert isinstance(profile, dict)
+    profile["supporting_results"] = [
+        {
+            "operation": "profile",
+            "kernel_artifact_digest": "sha256:" + "2" * 64,
+            "kernel_trial_id": "gtrial_" + "3" * 32,
+            "gateway_result_digest": "sha256:" + "4" * 64,
+        }
+    ]
+
+    assert attempt_report(context, report)["report_status"] == "candidate_ready"
 
 
 def test_attempt_report_rejects_finding_from_another_experiment(tmp_path: Path) -> None:

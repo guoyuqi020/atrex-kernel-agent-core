@@ -312,8 +312,9 @@ unique `supporting_experiment_ids`
 returned by `record-experiment`; each ID must belong to this Attempt's Experiment Journal.
 `profile_evidence` must describe evidence returned by Runtime-bound profiling and
 bind every supporting Profile result to the exact Kernel Artifact, Kernel Trial, and Gateway
-Result identifiers returned by Runtime. Those exact identifiers must also occur in an Experiment
-Journal `before` or `after` subject. Include at least one `profile` result, set `profile_evidence`
+Result identifiers returned by Runtime. Those exact identifiers must also occur in a `before` or
+`after` subject of some Experiment in the visible history, so a Profile recorded by an earlier
+Attempt stays citable. Include at least one `profile` result, set `profile_evidence`
 to `null` if no Profile was executed, and never invent profiler evidence. Do not include the
 Journal in the terminal request; the CLI obtains the authoritative current-Attempt snapshot from
 Runtime and attaches it. Do not run GPU, compiler, JIT,
