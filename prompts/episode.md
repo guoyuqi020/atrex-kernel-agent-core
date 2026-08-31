@@ -113,6 +113,19 @@ Follow the Session-tool contracts for Direction state, Experiment linkage, incre
 construction, retry behavior, and terminal validation; do not reconstruct the Journal from memory
 at the end.
 
+### 8. Deposit what the next Attempt would otherwise re-derive
+
+Before the terminal Report, review this Attempt for knowledge that cost real effort and would be
+paid for again from scratch. Write it to `skills/` as one short file per durable fact or method:
+which module exposes a DSL intrinsic, the exact signature that compiled, a layout constraint the
+hardware imposed, a measured dead end and why it was dead. Put a reusable script in `tools/` and
+keep its mandatory index in step with it. Prefer updating an existing entry over a near-duplicate.
+
+This is a required step, not an option. A retained method is worth more than a retained result, so
+deposit the reusable form rather than this Attempt's specific numbers. If nothing this Attempt
+learned is reusable, say so in the Report `analysis` — an empty deposit must be a decision, not an
+omission.
+
 ## Terminal behavior
 
 Stop only with a mature evaluated candidate, an exhausted or reverted direction, or a genuine

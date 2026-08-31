@@ -31,10 +31,13 @@ or an instruction selection, then write your own baseline. Copying a file wholes
 
 ## Execution boundary
 
-- Modify candidate files only under `work/kernel/`; temporary files belong in `scratch/`. Reusable
-  methods may be saved under `skills/`, and reusable utilities under `tools/` with a synchronized
-  `tools/README.md`. These directories seed every later trajectory; never store credentials or
-  one-off measurements in them.
+- Modify candidate files only under `work/kernel/`; temporary files belong in `scratch/`. These
+  directories seed every later trajectory, so bringing the framework up is the highest-leverage
+  place to record how this DSL actually works. Before finishing, write what you had to discover to
+  `skills/` — which module exposes an intrinsic, the exact signature that compiled, a layout or
+  dtype constraint the hardware imposed — one short file per durable fact, and put reusable
+  utilities under `tools/` with a synchronized `tools/README.md`. Without this, every later Attempt
+  re-derives the same facts from scratch. Never store credentials or one-off measurements there.
 - Give every `Model` constructor parameter a default: `check` constructs `Model()` bare and reports
   the failure as an `error` diagnostic inside a `succeeded` job.
 - Candidate source importing `builtins` `cffi` `ctypes` `ftplib` `http` `importlib`
