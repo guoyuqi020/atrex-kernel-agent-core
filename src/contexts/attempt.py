@@ -30,7 +30,6 @@ _EXPECTED_PATHS = {
     "evidence": "input/evidence",
     "agent_problem": ".runtime/agent-problem.json",
     "optimizer": "agent/optimizer",
-    "reference": "reference",
 }
 _MANIFEST_FIELDS = {
     "schema_version",
@@ -279,7 +278,3 @@ class RuntimeAttemptContext:
     @property
     def working_kernel(self) -> Path:
         return self.workspace / _EXPECTED_PATHS["working_kernel"]
-
-    @property
-    def reference(self) -> Path:
-        return self.workspace / _EXPECTED_PATHS["reference"]

@@ -77,8 +77,9 @@ target.
 
 ### 4. Research progressively
 
-Use `reference/` for pinned production implementation patterns and the knowledge query command for
-external architecture-, DSL-, compiler-, and operator-specific facts. Preserve stable knowledge
+Use the visible Direction and Experiment history for what this lineage already measured, and the
+knowledge query command for external architecture-, DSL-, compiler-, and operator-specific facts.
+This workspace carries no upstream project checkout. Preserve stable knowledge
 Record IDs only for records that materially affect the work. Test every adopted recommendation;
 stop research when one actionable direction has adequate support.
 

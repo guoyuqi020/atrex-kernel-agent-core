@@ -20,7 +20,6 @@ def _workspace(root: Path) -> tuple[Path, dict[str, object]]:
         ".runtime",
         "agent/optimizer",
         "work/kernel",
-        "reference",
         "sessions",
         "scratch",
     ):
