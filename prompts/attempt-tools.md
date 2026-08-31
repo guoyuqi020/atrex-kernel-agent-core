@@ -158,8 +158,8 @@ Direction status events.
 
 A Direction is the durable unit of research and exploration for one causal hypothesis, not an
 Experiment container. Before choosing one, inspect only the contract, incumbent, Journal indexes,
-and generic Runtime state. Once chosen, immediately `propose` and `start` it before its Wiki/reference
-research, Dev/Check/Profile/Evaluate, disassembly, tools, or source edits. `TaskCreate`, scratch
+and generic Runtime state. Once chosen, immediately `propose` and `start` it before its research,
+Dev/Check/Profile/Evaluate, disassembly, tools, or source edits. `TaskCreate`, scratch
 plans, and prose do not register it; do not wait for measurement or `record-experiment`.
 
 Propose a Direction with:
