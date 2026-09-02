@@ -459,6 +459,7 @@ def _report(experiment_id: str) -> dict[str, object]:
                 "supporting_experiment_ids": [experiment_id],
             }
         ],
+        "contributing_kernel_trial_ids": ["gtrial_" + "e" * 32],
         "blocker": None,
     }
 
@@ -1007,6 +1008,33 @@ def test_attempt_report_rejects_invalid_lists_before_publication(tmp_path: Path)
     published = attempt_report(context, report)
     assert published["report_status"] == "candidate_ready"
     assert context.report_path.is_file()
+
+
+def test_attempt_report_rejects_invalid_contributing_kernel_trial_ids(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    _direction_id, receipt = _completed_test_experiment(context)
+    report = _report(receipt["experiment_id"])
+    first = "gtrial_" + "a" * 32
+    second = "gtrial_" + "b" * 32
+
+    report["contributing_kernel_trial_ids"] = ["not-a-trial"]
+    with pytest.raises(ValueError, match=r"contributing_kernel_trial_ids\[0\]"):
+        attempt_report(context, report)
+
+    report["contributing_kernel_trial_ids"] = [first, first]
+    with pytest.raises(ValueError, match="contributing_kernel_trial_ids must be unique"):
+        attempt_report(context, report)
+
+    report["contributing_kernel_trial_ids"] = [second, first]
+    with pytest.raises(ValueError, match="contributing_kernel_trial_ids must be sorted"):
+        attempt_report(context, report)
+    assert not context.report_path.exists()
+
+    report["contributing_kernel_trial_ids"] = [first, second]
+    published = attempt_report(context, report)
+    assert published["report_status"] == "candidate_ready"
+    stored = json.loads(context.report_path.read_text(encoding="utf-8"))
+    assert stored["contributing_kernel_trial_ids"] == [first, second]
 
 
 def test_attempt_report_rejects_incomplete_profile_evidence(tmp_path: Path) -> None:

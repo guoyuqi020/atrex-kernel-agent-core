@@ -164,7 +164,8 @@ may omit it only when no candidate reached an identity-bearing Gateway result.
 Use the shared report fields with Bootstrap semantics: `diagnosis` names the bring-up or correctness
 issue, `approach` explains the construction or repair, and `expected_impact` states the expected
 correctness or compatibility effect. Set `profile_evidence` to `null` unless profiling was actually
-needed. If the nominated Kernel is unchanged from the seed, say that explicitly in
+needed. Bootstrap precedes all Lineage history, so `contributing_kernel_trial_ids` is always `[]`.
+If the nominated Kernel is unchanged from the seed, say that explicitly in
 `final_candidate.change_summary`; do not invent a change or a performance bottleneck.
 
 `candidate_ready` nominates the exact final `work/kernel/` tree as the Baseline Candidate. The

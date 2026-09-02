@@ -108,6 +108,7 @@ _REPORT_FIELDS = {
     "analysis",
     "knowledge_used",
     "findings",
+    "contributing_kernel_trial_ids",
     "blocker",
 }
 RuntimeToolContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
@@ -869,6 +870,15 @@ def load_direction(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     return runtime_journal(context, "load-direction", request)
 
 
+def _is_kernel_trial_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith("gtrial_")
+        and len(value) == len("gtrial_") + 32
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
 def _experiment_subject(value: object, label: str) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -885,12 +895,7 @@ def _experiment_subject(value: object, label: str) -> dict[str, Any] | None:
     ):
         raise ValueError(f"Experiment {label} kernel_artifact_digest is invalid")
     trial_id = value.get("kernel_trial_id")
-    if (
-        not isinstance(trial_id, str)
-        or not trial_id.startswith("gtrial_")
-        or len(trial_id) != len("gtrial_") + 32
-        or any(character not in "0123456789abcdef" for character in trial_id[7:])
-    ):
+    if not _is_kernel_trial_id(trial_id):
         raise ValueError(f"Experiment {label} kernel_trial_id is invalid")
     results = value.get("gateway_result_digests")
     if (
@@ -1303,6 +1308,21 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                 "Attempt finding references Experiments outside this journal: "
                 f"{unknown_experiment_ids}"
             )
+    contributing = _text_array(
+        request.get("contributing_kernel_trial_ids"),
+        "Attempt report contributing_kernel_trial_ids",
+    )
+    if len(contributing) > 64:
+        raise ValueError("Attempt report contributing_kernel_trial_ids allows at most 64 entries")
+    for index, trial_id in enumerate(contributing):
+        if not _is_kernel_trial_id(trial_id):
+            raise ValueError(
+                f"Attempt report contributing_kernel_trial_ids[{index}] must be a Kernel Trial ID"
+            )
+    if len(set(contributing)) != len(contributing):
+        raise ValueError("Attempt report contributing_kernel_trial_ids must be unique")
+    if contributing != sorted(contributing):
+        raise ValueError("Attempt report contributing_kernel_trial_ids must be sorted")
     report = {
         "schema_version": 12,
         "attempt_id": context.attempt_id,

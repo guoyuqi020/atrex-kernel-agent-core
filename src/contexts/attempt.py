@@ -168,7 +168,7 @@ class RuntimeAttemptContext:
         current_epoch = object_value(evidence_view.get("current_epoch"), "current Evidence Epoch")
         visibility = object_value(evidence_view.get("visibility"), "Evidence visibility")
         expected_visibility = {
-            "completed_epochs": "promoted_lineage",
+            "completed_epochs": "all_completed_branches",
             "current_attempts_before": context["attempt_ordinal"],
         }
         trajectory_ordinal = visibility.get("current_trajectory_ordinal")

@@ -295,6 +295,7 @@ exactly these fields:
     "lesson": "reusable lesson",
     "supporting_experiment_ids": ["experiment_<id>"]
   }],
+  "contributing_kernel_trial_ids": ["gtrial_<id>"],
   "blocker": null
 }
 ```
@@ -315,7 +316,12 @@ bind every supporting Profile result to the exact Kernel Artifact, Kernel Trial,
 Result identifiers returned by Runtime. Those exact identifiers must also occur in a `before` or
 `after` subject of some Experiment in the visible history, so a Profile recorded by an earlier
 Attempt stays citable. Include at least one `profile` result, set `profile_evidence`
-to `null` if no Profile was executed, and never invent profiler evidence. Do not include the
+to `null` if no Profile was executed, and never invent profiler evidence.
+Use `contributing_kernel_trial_ids` to name the historical Kernel Trials whose code or approach this
+Attempt actually drew on, sorted and unique, using the Trial identifiers Runtime returned. Use `[]`
+when you drew on none. It records where your work came from for whoever reads this Attempt later; it
+is a claim rather than a measured fact, and it neither replaces nor duplicates the Experiment
+`before` and `after` bindings. Do not include the
 Journal in the terminal request; the CLI obtains the authoritative current-Attempt snapshot from
 Runtime and attaches it. Do not run GPU, compiler, JIT,
 profiler, or evaluator work outside these bindings.

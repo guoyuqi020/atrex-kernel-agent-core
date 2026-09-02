@@ -169,6 +169,12 @@ def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
                     }
                 ),
             },
+            "contributing_kernel_trial_ids": {
+                "type": "array",
+                "maxItems": 64,
+                "uniqueItems": True,
+                "items": _identifier("gtrial_"),
+            },
             "blocker": {"oneOf": [_text(), {"type": "null"}]},
         }
     )
@@ -315,6 +321,10 @@ _PATH_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"Experiment Direction", re.I), "direction_id"),
     (re.compile(r"direction[_ ]id", re.I), "direction_id"),
     (re.compile(r"experiment[_ ]id", re.I), "experiment_id"),
+    (
+        re.compile(r"contributing[_ ]kernel[_ ]trial[_ ]ids", re.I),
+        "contributing_kernel_trial_ids",
+    ),
     (re.compile(r"kernel[_ ]trial[_ ]id", re.I), "kernel_trial_id"),
     (re.compile(r"kernel[_ ]artifact", re.I), "kernel_artifact_digest"),
     (re.compile(r"gateway[_ ]result", re.I), "gateway_result_digest"),

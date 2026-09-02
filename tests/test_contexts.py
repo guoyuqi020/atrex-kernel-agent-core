@@ -76,7 +76,7 @@ def _workspace(root: Path) -> tuple[Path, dict[str, object]]:
                     "trigger": None,
                 },
                 "visibility": {
-                    "completed_epochs": "promoted_lineage",
+                    "completed_epochs": "all_completed_branches",
                     "current_attempts_before": 1,
                     "current_trajectory_ordinal": 1,
                 },
