@@ -134,8 +134,7 @@ stdout/stderr Capture。
 原始 Rollout。这份 Workspace 视图可实时查看，但还不是权威封存结果。Agent 进程回收后，Core
 删除实时投影，并从有界捕获重建终态目录；保留的文件不做脱敏或文本改写。Core 仅省略高频
 Claude `system/thinking_tokens` 估算事件，且在 `session.json.provider_event_filters` 明确记录；
-最终权威 Usage 仍保存在 `events.jsonl`。`conversation.jsonl` 包含 Runtime 输入、每条保留的 Provider stdout
-Event、已捕获的 Codex 原始 Rollout 和捕获终态。CLI 未导出的 Provider 内置 System Prompt 会被
+最终权威 Usage 仍保存在 `events.jsonl`。封存后的 `conversation.jsonl` 是阅读视图：Claude 优先使用原生内容，省去已被完整覆盖的 stdout 消息副本，保留不同的 thinking/text/tool 内容块、未被覆盖的 stdout 内容、诊断、压缩边界和终态结果。重复的初始 Prompt，以及原生队列、标题、文件历史等内部管理事件只从阅读视图中省去。封存前的实时视图仍跟随 stdout。原始 Provider 文件及规范化 usage 索引不变。CLI 未导出的 Provider 内置 System Prompt 会被
 明确标记为不可获取，不会伪造内容。`events.jsonl` 是供 Runtime 投影使用的独立规范化用量索引，
 不能替代原始文件；终态
 `session.json` 记录捕获完整性和可信进程诊断。输出溢出、Codex Rollout 缺失、不安全的原始文件

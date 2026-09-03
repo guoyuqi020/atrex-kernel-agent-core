@@ -24,6 +24,7 @@ from .adapter import (
     token_usage_from_mapping,
     token_usage_from_model_usage,
 )
+from .claude_ledger import ClaudeSessionLedger, observe_claude_usage
 from .codex_ledger import (
     CodexLedgerError,
     CodexSessionLedgerObserver,
@@ -70,6 +71,7 @@ class TokenBudgetObserver(ProcessObserver):
         self._exhausted = False
         self._monitoring_failed = adapter.id == "codex" and codex_home_path is None
         self._seen_message_ids: set[str] = set()
+        self._claude_message_totals: dict[str, int] = {}
         self._codex_thread_id = ""
         self._codex = (
             CodexSessionLedgerObserver(codex_home_path)
@@ -119,6 +121,14 @@ class TokenBudgetObserver(ProcessObserver):
             else None
         )
         with self._lock:
+            if self._adapter.id == "claude" and message_id is not None:
+                total = token_usage_from_mapping(usage).total_tokens
+                if total is not None:
+                    previous = self._claude_message_totals.get(message_id, 0)
+                    self._claude_message_totals[message_id] = total
+                    self._used += total - previous
+                    self._exhausted = self._exhausted or self._used >= self._budget
+                return self._exhausted
             if message_id is not None and message_id in self._seen_message_ids:
                 return self._exhausted
             try:
@@ -167,6 +177,8 @@ class _LiveSessionTraceObserver(ProcessObserver):
     """Best-effort projection of live Provider streams into the fixed Session workspace."""
 
     def __init__(self, root: Path) -> None:
+        self._root = root
+        self._claude: ClaudeSessionLedger | None = None
         self._codex: CodexSessionLedgerObserver | None = None
         self._codex_thread_id = ""
         self._lock = threading.Lock()
@@ -177,6 +189,9 @@ class _LiveSessionTraceObserver(ProcessObserver):
         self._conversation = conversation.open("a", encoding="utf-8")
         raw_codex = root / "provider/codex-rollout.raw-jsonl"
         self._raw_codex = raw_codex.open("r+b") if raw_codex.is_file() else None
+
+    def attach_claude(self, observer: ClaudeSessionLedger) -> None:
+        self._claude = observer
 
     def attach_codex(self, observer: CodexSessionLedgerObserver) -> None:
         self._codex = observer
@@ -218,6 +233,9 @@ class _LiveSessionTraceObserver(ProcessObserver):
         return False
 
     def poll(self) -> bool:
+        if self._claude is not None:
+            with self._lock, contextlib.suppress(OSError, ValueError):
+                self._claude.sync_live(self._root)
         observer = self._codex
         with self._lock:
             thread_id = self._codex_thread_id
@@ -241,6 +259,14 @@ class _LiveSessionTraceObserver(ProcessObserver):
         return False
 
     def close(self) -> None:
+        # Also capture the last flush on timeout, cancellation or runner failure.
+        self.poll()
+        if self._claude is not None:
+            with contextlib.suppress(OSError, ValueError):
+                for file in self._claude.capture():
+                    path = self._root / file.relative_path
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(file.payload)
         with self._lock:
             self._stdout.close()
             self._stderr.close()
@@ -377,6 +403,9 @@ class CliAgentRuntime:
         )
         environment = build_session_environment(self.id)
         environment["IS_SANDBOX"] = "1"
+        claude_observer = (
+            ClaudeSessionLedger(environment, session_id) if self.id == "claude" else None
+        )
         codex_observer = None
         codex_temporary_home = None
         pre_observation_errors: tuple[str, ...] = ()
@@ -419,6 +448,8 @@ class CliAgentRuntime:
             if request.live_trace_path is not None
             else None
         )
+        if live_trace_observer is not None and claude_observer is not None:
+            live_trace_observer.attach_claude(claude_observer)
         if live_trace_observer is not None and codex_observer is not None:
             live_trace_observer.attach_codex(codex_observer)
         observers = tuple(
@@ -491,6 +522,23 @@ class CliAgentRuntime:
                 observation_errors += (f"codex_ledger_unavailable:{type(exc).__name__}",)
         raw_session_files: tuple[RawSessionFile, ...] = ()
         raw_provider_capture_complete = not process.output_overflow
+        response_usage_complete = None
+        if claude_observer is not None:
+            response_usage_complete = False
+            try:
+                raw_session_files = claude_observer.capture()
+            except (OSError, ValueError) as exc:
+                raw_provider_capture_complete = False
+                observation_errors += (f"claude_native_capture_failed:{type(exc).__name__}",)
+            if raw_session_files:
+                events, terminal_usage, response_usage_complete, ledger_errors = (
+                    observe_claude_usage(raw_session_files, events, terminal_usage)
+                )
+                observation_errors += ledger_errors
+            capabilities = replace(
+                capabilities,
+                usage_delta_observed=any(event.kind == "usage_delta" for event in events),
+            )
         if self.id == "codex":
             if codex_observer is None:
                 raw_provider_capture_complete = False
@@ -533,6 +581,7 @@ class CliAgentRuntime:
             stderr=stderr,
             raw_session_files=raw_session_files,
             raw_provider_capture_complete=raw_provider_capture_complete,
+            response_usage_complete=response_usage_complete,
             policy_diagnostics=process.policy_diagnostics,
             session_id=session_id,
             budget_exhausted=(budget_observer.exhausted if budget_observer is not None else False),

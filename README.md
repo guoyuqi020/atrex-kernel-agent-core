@@ -113,26 +113,31 @@ sessions/<name>/
 ├── conversation.jsonl                # observable retained-event transcript
 ├── provider/stdout.stream-json
 ├── provider/stderr.log
-├── provider/codex-rollout.raw-jsonl  # Codex only
+├── provider/codex-rollout.raw-jsonl   # Codex only
+├── provider/claude-session.raw-jsonl  # Claude native main session
+├── provider/claude-subagents/         # Claude native child sessions, if any
 ├── events.jsonl                      # normalized usage index
 └── session.json                      # capture status and diagnostics
 ```
 
-`conversation.jsonl` starts with the exact Runtime-supplied user Prompt, embeds every retained
-Provider stdout event, includes the raw Codex rollout when applicable, and ends with Runtime's
-capture status. It explicitly records that a Provider-managed system Prompt is unavailable when
+`conversation.jsonl` starts with the exact Runtime-supplied user Prompt, projects Provider conversation
+content and diagnostics, and ends with Runtime's capture status. It explicitly records that a Provider-managed system Prompt is unavailable when
 the CLI does not export it. Prompt and retained Provider files are captured without redaction or
 text rewriting. The high-frequency Claude `system/thinking_tokens` estimate event is omitted from
 both stdout and the conversation; `session.json.provider_event_filters` records that selection and
 the final authoritative Provider usage remains in `events.jsonl`;
 reasoning, tool arguments/results, command output, and any sensitive values emitted by the Provider
 remain present. Core does not proactively copy credentials that the Provider never emitted. A
-bounded-output overflow or incomplete Codex rollout capture fails the phase instead of silently
+bounded-output overflow or incomplete native Claude/Codex transcript capture fails the phase instead of silently
 claiming a complete Trace. Before launch, Core creates this fixed directory with `session.json`
-marked `running`, then streams stdout/stderr and mirrors the Codex rollout while the process is
+marked `running`, then streams stdout/stderr and mirrors native Claude/Codex transcripts while the process is
 alive. This live view is explicitly unsealed. After reaping the process, Core discards it and
-rebuilds the complete final directory from bounded captures before Runtime seals the Artifact.
+rebuilds the complete final directory from the captured files before Runtime seals the Artifact.
 The Coding Agent may not pre-create or redirect the Runtime-selected Session path.
+
+Claude uses a fresh session ID with native persistence enabled; it never resumes prior context. Its native main/child JSONLs are retained under `provider/claude-session.raw-jsonl` and `provider/claude-subagents/`, including on timeout or failure. `events.jsonl` contains one latest usage record per response, with `message_id` and `source_path` for joining back to tool calls. Print-stream counters are provisional; repeated updates replace earlier counters. `session.json.response_usage_complete` is true only when native response counters reconcile with the terminal bill. Gaps remain partial with diagnostics; the terminal bill is not replaced with estimates. Do not sum native and stdout copies, or add the terminal bill to response usage.
+
+The sealed `conversation.jsonl` is a reading view: Claude native content takes precedence over duplicate stdout messages. Distinct thinking/text/tool blocks remain intact; uncovered stdout content, diagnostics, compaction boundaries, and terminal results remain visible. Duplicate initial prompts and native queue/title/file-history bookkeeping are omitted from this view only. The live view still follows stdout until sealing. Raw Provider files and the normalized usage index are unchanged.
 
 ## Engineering loop
 

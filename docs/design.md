@@ -170,9 +170,7 @@ and rebuilds the final directory from its bounded captures. The retained files r
 or text rewriting. Core omits only the high-frequency Claude `system/thinking_tokens` estimate
 event from Provider stdout and `conversation.jsonl`; `session.json.provider_event_filters` makes
 that selection explicit, while final authoritative usage remains in `events.jsonl`.
-`conversation.jsonl` contains the Runtime input, every retained Provider stdout event, any captured
-raw Codex rollout, and the
-terminal capture status. Provider-owned system instructions remain explicitly marked unavailable
+The sealed `conversation.jsonl` is a reading view: Claude native content takes precedence over duplicate stdout messages. Distinct thinking/text/tool blocks remain intact; uncovered stdout content, diagnostics, compaction boundaries, and terminal results remain visible. Duplicate initial prompts and native queue/title/file-history bookkeeping are omitted from this view only. The live view still follows stdout until sealing. Raw Provider files and the normalized usage index are unchanged. Provider-owned system instructions remain explicitly marked unavailable
 when the CLI does not export them. `events.jsonl` is a separate normalized usage index for Runtime
 projection; it does not replace the raw files. Final `session.json` records capture completeness and
 trusted process diagnostics. An output overflow, missing Codex rollout, unsafe raw-file path, or

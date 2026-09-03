@@ -96,22 +96,28 @@ sessions/<name>/
 ├── conversation.jsonl                # 保留事件的可观测对话记录
 ├── provider/stdout.stream-json
 ├── provider/stderr.log
-├── provider/codex-rollout.raw-jsonl  # 仅 Codex
+├── provider/codex-rollout.raw-jsonl   # 仅 Codex
+├── provider/claude-session.raw-jsonl  # Claude 原生主会话
+├── provider/claude-subagents/         # Claude 原生子会话（若存在）
 ├── events.jsonl                      # 规范化用量索引
 └── session.json                      # 捕获状态与诊断
 ```
 
-`conversation.jsonl` 先记录 Runtime 实际提交的 User Prompt，再嵌入每条保留的 Provider stdout
-Event；选择 Codex 时还会包含原始 Rollout，最后记录 Runtime 捕获终态。当 CLI 不导出 Provider
+`conversation.jsonl` 先记录 Runtime 实际提交的 User Prompt，再投影 Provider 对话内容和诊断，
+最后记录 Runtime 捕获终态。当 CLI 不导出 Provider
 内置 System Prompt 时，文件会明确标记其不可获取，而不会伪造内容。Prompt 与保留的 Provider
 文件不做脱敏或文本改写。高频 Claude `system/thinking_tokens` 估算事件不会写入 stdout 和对话，
 `session.json.provider_event_filters` 会明确记录该选择，最终权威 Provider Usage 仍写入
 `events.jsonl`。Provider 实际输出的 Reasoning、工具参数与
 结果、命令输出及敏感值都会保留。Core 不会主动复制 Provider 从未输出的凭据。输出超过安全上限或
-Codex Rollout 捕获不完整时，阶段会失败，不会把不完整 Trace 伪装成完整结果。Core 在启动前创建
-该固定目录并把 `session.json` 标记为 `running`，进程运行时持续写入 stdout/stderr，并镜像 Codex
-Rollout；这份实时视图尚未封存。进程回收后，Core 会丢弃实时视图，用有界捕获重建完整终态目录，
+Claude/Codex 原生会话捕获不完整时，阶段会失败，不会把不完整 Trace 伪装成完整结果。Core 在启动前创建
+该固定目录并把 `session.json` 标记为 `running`，进程运行时持续写入 stdout/stderr，并镜像 Claude/Codex
+原生会话；这份实时视图尚未封存。进程回收后，Core 会丢弃实时视图，用捕获文件重建完整终态目录，
 再交给 Runtime 封存 Artifact。Coding Agent 不能预先创建或重定向 Runtime 选定的 Session 路径。
+
+Claude 使用全新 Session ID 并启用原生持久化，不恢复旧上下文。主会话和子会话 JSONL 分别保存在 `provider/claude-session.raw-jsonl`、`provider/claude-subagents/`，超时或失败时也尽力保留。`events.jsonl` 每个响应只保留最新 usage，并通过 `message_id`、`source_path` 关联原始工具调用。stdout 中间计数属于暂定值，重复更新替换旧值。只有原生逐响应计数与终态总账核对一致时，`session.json.response_usage_complete` 才为 true；缺失或不一致会标为 partial 并记录诊断，不用估算值替换终态总账。统计时不要重复累加 native/stdout 副本，也不要把终态总账再加到逐响应用量上。
+
+封存后的 `conversation.jsonl` 是阅读视图：Claude 优先使用原生内容，省去已被完整覆盖的 stdout 消息副本，保留不同的 thinking/text/tool 内容块、未被覆盖的 stdout 内容、诊断、压缩边界和终态结果。重复的初始 Prompt，以及原生队列、标题、文件历史等内部管理事件只从阅读视图中省去。封存前的实时视图仍跟随 stdout。原始 Provider 文件及规范化 usage 索引不变。
 
 ## 工程循环
 

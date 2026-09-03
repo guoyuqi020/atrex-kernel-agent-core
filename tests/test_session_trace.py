@@ -36,7 +36,9 @@ class _Context:
 
 def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
     sessions = tmp_path / "sessions"
     sessions.mkdir()
     prompt = "private optimizer prompt"
@@ -95,7 +97,12 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
         env: dict[str, str] | None = None,
         observer: ProcessObserver | None = None,
     ) -> ProcessResult:
-        del command, cwd, timeout, env, observer
+        del cwd, timeout, observer
+        assert env is not None
+        session_id = command[command.index("--session-id") + 1]
+        native = Path(env["CLAUDE_CONFIG_DIR"]) / "projects/test" / f"{session_id}.jsonl"
+        native.parent.mkdir(parents=True)
+        native.write_text(stdout)
         return ProcessResult(
             stdout=stdout,
             stderr="raw stderr credential",
@@ -118,6 +125,7 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     result = replace(
         result,
         raw_session_files=(
+            *result.raw_session_files,
             RawSessionFile(
                 "provider/codex-rollout.raw-jsonl",
                 b'{"raw":"codex reasoning and tool result"}\n',
@@ -151,6 +159,10 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     assert conversation[1]["role"] == "user"
     assert conversation[1]["content"] == [{"type": "text", "text": prompt}]
     assert conversation[2]["event"]["provider_credential"] == "Bearer raw-provider-secret"
+    assistants = [row for row in conversation if row.get("event", {}).get("type") == "assistant"]
+    assert len(assistants) == 1
+    assert assistants[0]["path"] == "provider/claude-session.raw-jsonl"
+    assert (trace / "provider/claude-session.raw-jsonl").read_text() == provider_stdout
     assert any(
         row.get("path") == "provider/codex-rollout.raw-jsonl"
         and row.get("event", {}).get("raw") == "codex reasoning and tool result"
@@ -167,6 +179,11 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     assert all(json.loads(line)["ignorable"] is True for line in normalized[1:])
     metadata = json.loads((trace / "session.json").read_text())
     assert metadata["raw_provider_capture_complete"] is True
+    assert metadata["response_usage_complete"] is True
+    response = json.loads(normalized[1])["data"]
+    assert response["message_id"] == "message-1"
+    assert response["source_path"] == "provider/claude-session.raw-jsonl"
+    assert response["usage"]["output_tokens"] == 5
     assert metadata["conversation_capture_complete"] is True
     assert metadata["provider_system_prompt_capture"] == "provider_managed_unavailable"
     assert metadata["provider_event_filters"] == ["system/thinking_tokens"]
@@ -207,6 +224,7 @@ def test_core_projects_provider_streams_while_session_is_running(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
     sessions = tmp_path / "sessions"
     sessions.mkdir()
     stdout = (
@@ -242,7 +260,12 @@ def test_core_projects_provider_streams_while_session_is_running(
         env: dict[str, str] | None = None,
         observer: ProcessObserver | None = None,
     ) -> ProcessResult:
-        del command, cwd, timeout, env
+        del cwd, timeout
+        assert env is not None
+        session_id = command[command.index("--session-id") + 1]
+        native = Path(env["CLAUDE_CONFIG_DIR"]) / "projects/test" / f"{session_id}.jsonl"
+        native.parent.mkdir(parents=True)
+        native.write_text(stdout)
         trace = sessions / "core"
         assert json.loads((trace / "session.json").read_text())["state"] == "running"
         assert observer is not None

@@ -21,7 +21,7 @@ def test_every_backend_builds_one_fresh_noninteractive_command() -> None:
     }
 
     assert commands["claude"][:2] == ["claude", "--print"]
-    assert "--no-session-persistence" in commands["claude"]
+    assert "--no-session-persistence" not in commands["claude"]
     assert commands["claude"][commands["claude"].index("--name") + 1] == "atrex-session"
     assert "--no-session-persistence" in commands["qodercli"]
     assert commands["pi"][:3] == ["pi", "--mode", "json"]

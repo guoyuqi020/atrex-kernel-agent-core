@@ -222,7 +222,7 @@ class ClaudeLikeAdapter(AgentBackendAdapter):
         normalized: list[NormalizedAgentEvent] = []
         terminal = TokenUsage.unavailable()
         sequence = 0
-        seen_usage_message_ids: set[str] = set()
+        message_indexes: dict[str, int] = {}
         for event in _json_events(stdout):
             event_type = event.get("type")
             if event_type == "result":
@@ -249,18 +249,24 @@ class ClaudeLikeAdapter(AgentBackendAdapter):
                 if isinstance(message, Mapping) and isinstance(message.get("id"), str)
                 else None
             )
-            duplicate_usage = bool(message_id and message_id in seen_usage_message_ids)
-            if parsed.total_tokens is not None and not duplicate_usage:
-                normalized.append(
-                    NormalizedAgentEvent(
-                        sequence=sequence,
-                        kind="usage_delta",
-                        usage=parsed,
-                    )
+            if parsed.total_tokens is not None:
+                # Print-stream counters may be provisional and may be revised for the same
+                # response. Last wins; adding revisions would charge the same response twice.
+                item = NormalizedAgentEvent(
+                    sequence=sequence,
+                    kind="usage_delta",
+                    usage=replace(parsed, measurement="partial"),
+                    message_id=message_id,
+                    source_path="provider/stdout.stream-json",
                 )
-                sequence += 1
-                if message_id:
-                    seen_usage_message_ids.add(message_id)
+                if message_id and message_id in message_indexes:
+                    index = message_indexes[message_id]
+                    normalized[index] = replace(item, sequence=normalized[index].sequence)
+                else:
+                    if message_id:
+                        message_indexes[message_id] = len(normalized)
+                    normalized.append(item)
+                    sequence += 1
         if terminal.total_tokens is None:
             deltas = [
                 event.usage
@@ -295,7 +301,6 @@ class ClaudeAdapter(ClaudeLikeAdapter):
             "stream-json",
             "--session-id",
             session_id,
-            "--no-session-persistence",
             "--name",
             f"atrex-{session_id}",
             "--effort",

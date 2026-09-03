@@ -330,6 +330,8 @@ def write_trace(
             "schema_version": 1,
             "sequence": event.sequence,
             "kind": event.kind,
+            "message_id": event.message_id,
+            "source_path": event.source_path,
         }
         if event.usage is not None:
             data["usage"] = {
@@ -374,6 +376,7 @@ def write_trace(
             "exit_status": result.exit_status,
             "timed_out": result.timed_out,
             "raw_provider_capture_complete": result.raw_provider_capture_complete,
+            "response_usage_complete": result.response_usage_complete,
             "conversation_capture_complete": result.raw_provider_capture_complete,
             "provider_system_prompt_capture": "provider_managed_unavailable",
             "provider_event_filters": list(FILTERED_PROVIDER_EVENTS),
@@ -426,13 +429,15 @@ def execute_agent_session(
             replace_live=live_trace,
             system_prompt=system_prompt,
         )
-        if not result.raw_provider_capture_complete:
-            return 126
         if result.budget_exhausted:
             return 125
         if result.timed_out:
             return 124
-        if result.exit_status == 0 and on_success is not None:
+        if result.exit_status != 0:
+            return result.exit_status
+        if not result.raw_provider_capture_complete:
+            return 126
+        if on_success is not None:
             on_success()
         return result.exit_status
     except BaseException as error:

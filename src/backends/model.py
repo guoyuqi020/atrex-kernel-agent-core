@@ -139,6 +139,8 @@ class NormalizedAgentEvent:
     sequence: int
     kind: NormalizedEventKind
     usage: TokenUsage | None = None
+    message_id: str | None = None
+    source_path: str | None = None
 
 
 def resequence_agent_events(
@@ -149,6 +151,8 @@ def resequence_agent_events(
             sequence=index,
             kind=event.kind,
             usage=event.usage,
+            message_id=event.message_id,
+            source_path=event.source_path,
         )
         for index, event in enumerate(events)
     )
@@ -207,6 +211,7 @@ class AgentRunResult:
     policy_diagnostics: tuple[str, ...]
     session_id: str = ""
     budget_exhausted: bool = False
+    response_usage_complete: bool | None = None
 
     @property
     def stdout_tail(self) -> str:
