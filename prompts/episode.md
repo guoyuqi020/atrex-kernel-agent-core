@@ -116,10 +116,12 @@ at the end.
 ### 8. Deposit what the next Attempt would otherwise re-derive
 
 Before the terminal Report, review this Attempt for knowledge that cost real effort and would be
-paid for again from scratch. Write it to `skills/` as one short file per durable fact or method:
-which module exposes a DSL intrinsic, the exact signature that compiled, a layout constraint the
-hardware imposed, a measured dead end and why it was dead. Put a reusable script in `tools/` and
-keep its mandatory index in step with it. Prefer updating an existing entry over a near-duplicate.
+paid for again from scratch. Record search lessons and dead ends in `memory/`, reusable DSL/API or
+hardware knowledge in `docs/`, repeatable procedures in `skills/`, and scripts in `tools/`. Read the
+four README indexes before adding content. Whenever you add, change, rename, or remove content,
+update the corresponding `README.md`; prefer improving an existing entry over a near-duplicate.
+Link relevant Journal/measurement identities, distinguish facts from analysis, and follow the
+injected Runtime State inheritance policy.
 
 This is a required step, not an option. A retained method is worth more than a retained result, so
 deposit the reusable form rather than this Attempt's specific numbers. If nothing this Attempt

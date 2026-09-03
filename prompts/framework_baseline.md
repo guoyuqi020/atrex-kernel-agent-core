@@ -16,8 +16,10 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 | writable baseline candidate copied from the seed | `work/kernel/` |
 | immutable Agent implementation and included Skills | `agent/optimizer/` |
 | read-only pinned upstream GPU kernel projects | `reference/` |
-| writable reusable learned Skills | `skills/` |
-| writable reusable tools and required tool index | `tools/`, `tools/README.md` |
+| writable search memories and lessons | `memory/` |
+| writable reusable knowledge and reference notes | `docs/` |
+| writable reusable procedures | `skills/` |
+| writable reusable tool scripts | `tools/` |
 | temporary plans, requests, and notes | `scratch/` |
 
 Private evaluator inputs and exact cases are absent. The trusted task context below is authoritative
@@ -31,13 +33,12 @@ or an instruction selection, then write your own baseline. Copying a file wholes
 
 ## Execution boundary
 
-- Modify candidate files only under `work/kernel/`; temporary files belong in `scratch/`. These
-  directories seed every later trajectory, so bringing the framework up is the highest-leverage
-  place to record how this DSL actually works. Before finishing, write what you had to discover to
-  `skills/` — which module exposes an intrinsic, the exact signature that compiled, a layout or
-  dtype constraint the hardware imposed — one short file per durable fact, and put reusable
-  utilities under `tools/` with a synchronized `tools/README.md`. Without this, every later Attempt
-  re-derives the same facts from scratch. Never store credentials or one-off measurements there.
+- Modify Kernel files only under `work/kernel/`; temporary files belong in `scratch/`. Deposit search
+  lessons before finishing in `memory/`, DSL/API and hardware knowledge in `docs/`, reusable procedures in `skills/`,
+  and scripts in `tools/`. These four State directories seed later Trajectories under the injected
+  inheritance policy. Read their indexes first and update the corresponding `README.md` whenever
+  content is added, changed, renamed, or removed. Keep concise, reusable notes with source/evidence
+  references, not credentials or raw one-off measurements.
 - Give every `Model` constructor parameter a default: `check` constructs `Model()` bare and reports
   the failure as an `error` diagnostic inside a `succeeded` job.
 - Candidate source importing `builtins` `cffi` `ctypes` `ftplib` `http` `importlib`

@@ -143,7 +143,7 @@ The selected Agent receives fixed paths:
 | public operator contract | injected directly into the final Prompt |
 | immutable Core Revision | `agent/optimizer` |
 | read-only pinned upstream GPU kernel projects | `reference` |
-| reusable methods and tools | `skills`, `tools` |
+| adaptive memories, knowledge, procedures, scripts | `memory`, `docs`, `skills`, `tools` (each with `README.md`) |
 | requests, plan, journal, reports | `scratch` |
 | unredacted Agent Session Artifacts and normalized usage index | `sessions` |
 
