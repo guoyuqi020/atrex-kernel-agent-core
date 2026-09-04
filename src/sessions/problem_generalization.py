@@ -104,7 +104,7 @@ def finalize_output(context: RuntimeProblemGeneralizationContext) -> None:
 
 def run() -> int:
     context = RuntimeProblemGeneralizationContext.from_environment()
-    config = AgentConfig.load(context.repository)
+    config = AgentConfig.load(context.repository, workspace=context.workspace)
     return execute_agent_session(
         context,
         config,

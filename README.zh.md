@@ -45,6 +45,18 @@ Runtime 必须显式设置 `ATREX_CORE_PHASE`。每次进程只执行一个全�
 
 ## Runtime Workspace
 
+托管 Core 启动前（包括 dev-shell），Runtime 将实际生效的 `agent_backend`、`model`、
+`reasoning_effort`、`session_settings` 同步到工作区的 `atrex-agent.json`，保留 Prompt 映射。
+该文件是只读部署投影，不修改 Git 仓库或封存 Source Artifact；执行时仍以 Runtime 环境绑定为准。
+托管配置设置 `prompt_root: "workspace"`，`prompts/...` 相对于工作区根目录解析；独立运行默认
+使用 `prompt_root: "repository"`。Optimizer Source 工作副本省略六个初始 State 目录，只有根级
+可写 State；`prompts/` 的修改由后续新 Session 加载，不改变当前已提交 Prompt。封存 Source 保持完整。
+
+仓库根级 `prompts/`、`memory/`、`knowledge/`、`skills/`、`tools/`、`hooks/` 保存 Runtime State 的初始内容，
+各自包含由 Agent 维护的 README 索引。没有继承 State 时，Runtime 从固定的 Core Revision
+复制到工作区可写目录。Bootstrap 积累和后续 Checkpoint 优先，不会被初始内容覆盖；
+重置 State 的消融臂每次回到 Core 初始内容。工程文档目录 `docs/` 不属于 State。
+
 普通 Attempt 的固定结构为：
 
 ```text
@@ -57,8 +69,14 @@ Runtime 必须显式设置 `ATREX_CORE_PHASE`。每次进程只执行一个全�
 │   └── evidence/               # 不可变、按 Epoch 组织的统一 Evidence View
 │   │   ├── bootstrap/
 │   │   └── epochs/             # trajectories/<n>/attempts/<n>/{report,conversation}
-├── agent/optimizer/            # 不可变 Core Revision
+├── agent/optimizer/            # 只读实现与配置，不重复展示初始 State
 ├── work/kernel/                # 可写 candidate
+├── prompts/                    # 可写、继承的阶段指令
+├── memory/                     # 可写、继承的搜索记忆
+├── knowledge/                  # 可写、继承的知识
+├── skills/                     # 可写、继承的复用流程
+├── tools/                      # 可写、继承的脚本
+├── hooks/                      # 可写、继承的 Hook 定义
 ├── sessions/                   # 未脱敏 Agent Session Artifact
 └── scratch/                    # 本 Attempt 独占的可写状态
     ├── directions.json         # 仅本 Attempt 新增的 Direction 事件
@@ -173,6 +191,11 @@ Backend Credential 和二进制可用性属于部署责任，只能通过 Runtim
 │   ├── sessions/                     # Prompt、执行、Trace 与 Token Report
 │   └── backends/                     # Claude、Codex、Pi、Qoder Adapter
 ├── prompts/                          # 分阶段方法论与协议模板
+├── memory/                           # 初始搜索记忆与 README 索引
+├── knowledge/                        # 初始知识与 README 索引
+├── skills/                           # 初始复用流程与 README 索引
+├── tools/                            # 初始工具脚本与 README 索引
+├── hooks/                            # 初始 Claude/Codex Hooks 与 README 索引
 ├── tests/                            # Core 单元与协议客户端测试
 ├── pyproject.toml                    # Ruff、mypy、pytest 策略
 └── docs/                             # 设计与 Runtime 使用文档

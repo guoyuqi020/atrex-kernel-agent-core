@@ -115,13 +115,19 @@ at the end.
 
 ### 8. Deposit what the next Attempt would otherwise re-derive
 
+Use writable `prompts/` for reusable phase instructions; preserve configured paths and maintain its
+README. Prompt edits apply to later fresh sessions, not to the current conversation.
+
 Before the terminal Report, review this Attempt for knowledge that cost real effort and would be
-paid for again from scratch. Record search lessons and dead ends in `memory/`, reusable DSL/API or
-hardware knowledge in `docs/`, repeatable procedures in `skills/`, and scripts in `tools/`. Read the
-four README indexes before adding content. Whenever you add, change, rename, or remove content,
+paid for again from scratch. Record reusable search lessons and dead ends in `memory/`, reusable DSL/API or
+hardware knowledge in `knowledge/`, repeatable procedures in `skills/`, scripts in `tools/`, and
+reusable Claude/Codex hook scripts and configuration snippets in `hooks/`. Read the
+six README indexes before adding content. Whenever you add, change, rename, or remove content,
 update the corresponding `README.md`; prefer improving an existing entry over a near-duplicate.
 Link relevant Journal/measurement identities, distinguish facts from analysis, and follow the
 injected Runtime State inheritance policy.
+For hooks, document backend, event, invocation, activation steps, and verification status; storing
+a hook does not enable it automatically.
 
 This is a required step, not an option. A retained method is worth more than a retained result, so
 deposit the reusable form rather than this Attempt's specific numbers. If nothing this Attempt

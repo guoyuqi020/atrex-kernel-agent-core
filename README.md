@@ -34,6 +34,12 @@ Two root manifests are intentionally separate:
   Sessions apply an authoritative Backend/model/effort/settings binding while leaving Prompt and
   workflow evolution intact. An empty model selects the Backend CLI default.
 
+Before a managed Core launch (including dev-shell), Runtime projects the effective `agent_backend`,
+`model`, `reasoning_effort`, and `session_settings` into the workspace's `atrex-agent.json`.
+Prompt mappings are preserved, with `prompt_root: "workspace"`: `prompts/...` resolves against the
+session workspace. Standalone runs default to `prompt_root: "repository"`. This read-only deployment projection does not modify the Git
+repository or sealed Source Artifact; environment binding remains authoritative at execution.
+
 Runtime sets `ATREX_CORE_PHASE` and the corresponding strict environment/manifest protocol. The
 entrypoint supports exactly three fresh-process phases:
 
@@ -50,6 +56,12 @@ Attempts from the currently selected revision. Active/Challenger roles are not e
 
 ## Runtime workspace
 
+The repository's `prompts/`, `memory/`, `knowledge/`, `skills/`, `tools/`, and `hooks/` contain initial Runtime State,
+including an Agent-maintained README index in each. Runtime copies these from the pinned Core
+Revision into writable workspace directories when there is no inherited State. Bootstrap deposits
+and later checkpoints take precedence; they are not overwritten by these defaults. Reset-state
+ablation arms restart from the Core seeds. The engineering documentation in `docs/` is not State.
+
 Core validates the Runtime-owned manifest before launching an Agent. A normal Attempt exposes:
 
 ```text
@@ -62,8 +74,14 @@ Core validates the Runtime-owned manifest before launching an Agent. A normal At
 │   └── evidence/               # immutable unified, Epoch-organized Evidence view
 │   │   ├── bootstrap/
 │   │   └── epochs/             # trajectories/<n>/attempts/<n>/{report,conversation}
-├── agent/optimizer/            # immutable materialized Core Revision
+├── agent/optimizer/            # read-only implementation/config; initial State copies omitted
 ├── work/kernel/                # writable candidate
+├── prompts/                    # writable, inherited phase prompts
+├── memory/                     # writable, inherited search memories
+├── knowledge/                  # writable, inherited knowledge
+├── skills/                     # writable, inherited procedures
+├── tools/                      # writable, inherited scripts
+├── hooks/                      # writable, inherited hook definitions
 ├── sessions/                   # unredacted Agent-session artifacts
 └── scratch/                    # writable state owned by this Attempt
     ├── directions.json         # only Direction events added by this Attempt
@@ -72,6 +90,10 @@ Core validates the Runtime-owned manifest before launching an Agent. A normal At
     ├── experiments-index.json  # generated visible history + current summary
     └── ...                     # Agent-facing requests, reports, and recovered files
 ```
+
+The Source workspace copy omits the six initial State directories; only the root-level State is
+used by Optimizer. Edits to `prompts/` affect later fresh Sessions, not the already sent Prompt.
+The sealed Source Artifact remains complete.
 
 `.runtime/` is an internal Runtime-to-Core control surface. Core locates it through the launch
 environment; the Agent Prompt does not advertise it or require the Optimizer to read it. Core
@@ -194,6 +216,11 @@ an invalid/incomplete accounting outcome rather than guessed.
 │   ├── sessions/                     # phase prompts, execution, trace, and token reports
 │   └── backends/                     # Claude, Codex, Pi, and Qoder adapters
 ├── prompts/                          # phase methodology and protocol templates
+├── memory/                           # initial search memories and README index
+├── knowledge/                        # initial knowledge and README index
+├── skills/                           # initial reusable procedures and README index
+├── tools/                            # initial tool scripts and README index
+├── hooks/                            # initial Claude/Codex hooks and README index
 ├── tests/                            # Core-owned unit and protocol-client tests
 ├── pyproject.toml                    # standalone Ruff, mypy, and pytest policy
 └── docs/                             # Core design and Runtime-oriented usage

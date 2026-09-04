@@ -124,7 +124,7 @@ Runtime 会对每个终止提名应用配置指定的可信留存策略：普通
 | 公开算子契约 | 直接注入最终 Prompt |
 | Core Revision | `agent/optimizer` |
 | 只读上游 GPU Kernel 项目 | `reference` |
-| 记忆、知识、技能、工具脚本 | `memory`、`docs`、`skills`、`tools`（各有 `README.md`） |
+| 阶段指令、记忆、知识、技能、工具脚本、Hooks | `prompts`、`memory`、`knowledge`、`skills`、`tools`、`hooks`（各有 `README.md`） |
 | Request、Plan、Journal、Report | `scratch` |
 | 未脱敏 Agent Session Artifact 与规范化用量索引 | `sessions` |
 

@@ -141,9 +141,9 @@ The selected Agent receives fixed paths:
 | writable candidate Kernel | `work/kernel` |
 | unified promoted-lineage/current-Attempt Evidence view | `input/evidence` |
 | public operator contract | injected directly into the final Prompt |
-| immutable Core Revision | `agent/optimizer` |
+| read-only Core implementation/config (State seeds omitted) | `agent/optimizer` |
 | read-only pinned upstream GPU kernel projects | `reference` |
-| adaptive memories, knowledge, procedures, scripts | `memory`, `docs`, `skills`, `tools` (each with `README.md`) |
+| adaptive phase prompts, memories, knowledge, procedures, scripts, hooks | `prompts`, `memory`, `knowledge`, `skills`, `tools`, `hooks` (each with `README.md`) |
 | requests, plan, journal, reports | `scratch` |
 | unredacted Agent Session Artifacts and normalized usage index | `sessions` |
 

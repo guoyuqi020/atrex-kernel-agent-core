@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,38 @@ from sessions.attempt import _render_prompt_fragment, _tool_instructions
 from sessions.operator_contract import public_operator_contract
 
 CORE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_managed_prompt_paths_read_workspace_state(tmp_path: Path) -> None:
+    repository = tmp_path / "agent/optimizer"
+    repository.mkdir(parents=True)
+    value = json.loads((CORE_ROOT / "atrex-agent.json").read_text())
+    value["prompt_root"] = "workspace"
+    (repository / "atrex-agent.json").write_text(json.dumps(value))
+    shutil.copytree(CORE_ROOT / "prompts", tmp_path / "prompts")
+    config = AgentConfig.load(repository, environment={}, workspace=tmp_path)
+    assert config.prompt_path("optimization_attempt") == tmp_path / "prompts/episode.md"
+    assert config.prompt_fragment_path("attempt_tools") == tmp_path / "prompts/attempt-tools.md"
+    (tmp_path / "prompts/episode.md").write_text("Next session's learned methodology")
+    next_config = AgentConfig.load(repository, environment={}, workspace=tmp_path)
+    assert next_config.prompt_path("optimization_attempt").read_text() == (
+        "Next session's learned methodology"
+    )
+    assert not (repository / "prompts").exists()
+    with pytest.raises(ValueError, match="requires the Runtime session workspace"):
+        AgentConfig.load(repository, environment={})
+    value["prompts"]["optimization_attempt"] = "prompts/../input/private.json"
+    (repository / "atrex-agent.json").write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="safe relative path"):
+        AgentConfig.load(repository, environment={}, workspace=tmp_path)
+
+
+def test_core_contains_indexed_initial_runtime_state() -> None:
+    for name in ("prompts", "memory", "knowledge", "skills", "tools", "hooks"):
+        readme = (CORE_ROOT / name / "README.md").read_text()
+        assert "Whenever you add, change, rename, or remove" in readme
+        assert "README" in readme
+    assert (CORE_ROOT / "docs/design.md").is_file()
 
 
 def test_public_operator_contract_hides_non_actionable_provenance() -> None:

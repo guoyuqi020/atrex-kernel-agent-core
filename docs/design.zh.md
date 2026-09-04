@@ -89,10 +89,12 @@ input/evidence/bootstrap/conversation.jsonl
 input/evidence/epochs/
 agent/optimizer/
 work/kernel/
+prompts/README.md
 memory/README.md
-docs/README.md
+knowledge/README.md
 skills/README.md
 tools/README.md
+hooks/README.md
 sessions/
 scratch/
 ```
@@ -103,17 +105,18 @@ Bootstrap 被视为 Epoch 之前的一次特殊 Attempt；Agent 可见 Evidence 
 Kernel Trial 和 Gateway Result 会成为后续 Optimizer Attempt 继承的根历史。
 
 Agent Problem 是 Core 内部输入，由 Core 投影进最终 Agent Prompt；Optimizer 不会获知其工作区
-路径。Agent 可以写入 `work/kernel`、`memory/`、`docs/`、`skills/`、`tools/` 与 `scratch/`；`sessions/` 由 Core 和
+路径。Agent 可以写入 `work/kernel`、`prompts/`、`memory/`、`knowledge/`、`skills/`、`tools/`、`hooks/` 与 `scratch/`；`sessions/` 由 Core 和
 Provider 管理，其余声明输入均只读。Runtime 通过 Bubblewrap 与 cgroup v2 约束挂载、进程和资源。
 Evaluation Contract 只暴露 Digest。
 
-`memory/`、`docs/`、`skills/` 与 `tools/` 是可写 State，并在同一 Epoch 的串行 Attempt 之间复用。Runtime 按
+`prompts/`、`memory/`、`knowledge/`、`skills/`、`tools/` 与 `hooks/` 是可写 State，并在同一 Epoch 的串行 Attempt 之间复用。Runtime 按
 Lineage、Agent Revision 和 Trajectory 隔离，避免并发写冲突。进入下一 Epoch 时，每条 Active
 Trajectory 都从上一 Epoch 获胜分支最佳 Kernel Trajectory 的终态 State 获得独立副本；Challenger
 从 Evolver 封存的 Revision State 开始。Bootstrap 会发布 Revision 级初始 Seed，再复制给每条新
 Trajectory。每个可复用工具
 都必须在 `tools/README.md` 中说明用法。各目录都必须有随内容变化同步更新的 README 索引，分别存放
-搜索记忆、知识、技能流程和工具脚本。清空状态的消融臂每次只保留四目录的 README 模板。
+搜索记忆、知识、技能流程、工具脚本和 Claude/Codex Hooks。没有继承 State 时，从固定 Core Revision 复制六目录初始内容；
+重置 State 的消融臂每个 Attempt 和重试都恢复到该种子。
 
 `runtime_tools.py` 是规范 Core 协议客户端，而不是 Credential 隔离边界。Runtime 签发的短期
 Attempt Capability 对不可信 Worker 可见，因此即使 Agent 直接构造 Proxy Request，Runtime 也必须

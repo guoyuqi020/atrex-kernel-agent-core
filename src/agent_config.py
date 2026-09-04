@@ -26,6 +26,8 @@ class AgentConfig:
         cls,
         repository: Path,
         environment: Mapping[str, str] | None = None,
+        *,
+        workspace: Path | None = None,
     ) -> AgentConfig:
         config_path = repository / "atrex-agent.json"
         if config_path.is_symlink() or not config_path.is_file():
@@ -41,10 +43,26 @@ class AgentConfig:
             "model",
             "prompts",
             "prompt_fragments",
+            "prompt_root",
         }
         unknown = set(value) - allowed
         if unknown:
             raise ValueError(f"unknown Agent config fields: {sorted(unknown)}")
+        prompt_root = value.get("prompt_root", "repository")
+        if not isinstance(prompt_root, str) or prompt_root not in {"repository", "workspace"}:
+            raise ValueError("prompt_root must be repository or workspace")
+        if prompt_root == "workspace" and workspace is None:
+            raise ValueError("workspace prompt_root requires the Runtime session workspace")
+
+        def resolve_prompt(raw: object, label: str) -> Path:
+            relative = text_value(raw, label)
+            if prompt_root == "workspace":
+                if not relative.startswith("prompts/"):
+                    raise ValueError(f"{label} must be under workspace prompts/")
+                assert workspace is not None
+                return within(workspace.resolve() / "prompts", relative[len("prompts/") :], label)
+            return within(repository, relative, label)
+
         backend = text_value(value.get("agent_backend"), "agent_backend")
         if backend not in {"claude", "codex", "pi", "qodercli"}:
             raise ValueError(f"unsupported Core agent backend: {backend}")
@@ -67,7 +85,7 @@ class AgentConfig:
             raise ValueError("Agent prompts must define every supported session phase")
         prompt_paths: dict[str, Path] = {}
         for phase, prompt_value in prompts.items():
-            prompt = within(repository, text_value(prompt_value, phase), phase)
+            prompt = resolve_prompt(prompt_value, phase)
             if prompt.is_symlink() or not prompt.is_file():
                 raise ValueError(f"Agent prompt is unavailable: {phase}")
             prompt_paths[phase] = prompt
@@ -80,11 +98,7 @@ class AgentConfig:
             raise ValueError("Agent prompt_fragments must define every supported fragment")
         prompt_fragment_paths: dict[str, Path] = {}
         for name, fragment_value in prompt_fragments.items():
-            fragment = within(
-                repository,
-                text_value(fragment_value, name),
-                name,
-            )
+            fragment = resolve_prompt(fragment_value, name)
             if fragment.is_symlink() or not fragment.is_file():
                 raise ValueError(f"Agent prompt fragment is unavailable: {name}")
             prompt_fragment_paths[name] = fragment

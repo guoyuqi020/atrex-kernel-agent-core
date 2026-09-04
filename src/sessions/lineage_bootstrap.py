@@ -55,7 +55,7 @@ def render_system_prompt(
 
 def run() -> int:
     context = RuntimeLineageBootstrapContext.from_environment()
-    config = AgentConfig.load(context.repository)
+    config = AgentConfig.load(context.repository, workspace=context.workspace)
     return execute_agent_session(
         context,
         config,
