@@ -402,6 +402,10 @@ class CliAgentRuntime:
             request.system_prompt,
         )
         environment = build_session_environment(self.id)
+        if self.id == "codex" and environment.get("ATREX_OPTIMIZER_CODEX_HOOKS") == "1":
+            # Runtime installs hooks only in this Attempt's private CLI Home.
+            # Trust applies to this invocation; do not persist a global trust decision.
+            command.insert(2, "--dangerously-bypass-hook-trust")
         environment["IS_SANDBOX"] = "1"
         claude_observer = (
             ClaudeSessionLedger(environment, session_id) if self.id == "claude" else None

@@ -8,8 +8,9 @@ import pytest
 
 from backends.adapter import ClaudeAdapter, CodexAdapter, PiAdapter, QoderAdapter
 from backends.codex_ledger import CodexTemporaryHome
-from backends.model import TokenUsage
-from backends.process import run_bounded
+from backends.model import AgentRunRequest, TokenUsage
+from backends.process import ProcessObserver, ProcessResult, run_bounded
+from backends.runtime import CodexRuntime
 
 
 def test_every_backend_builds_one_fresh_noninteractive_command() -> None:
@@ -134,6 +135,36 @@ def test_codex_installation_identity_is_a_writable_session_copy(tmp_path: Path) 
         assert (source / "installation_id").read_text() == "install-1"
     finally:
         assert temporary.close() is None
+
+
+@pytest.mark.parametrize("installed", ["0", "1"])
+def test_codex_hook_trust_is_invocation_local(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installed: str,
+) -> None:
+    home = tmp_path / "private-codex"
+    home.mkdir()
+    (home / "hooks.json").write_text('{"hooks":{}}')
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setenv("ATREX_OPTIMIZER_CODEX_HOOKS", installed)
+
+    def runner(
+        command: list[str],
+        cwd: Path,
+        timeout: int | None,
+        env: dict[str, str] | None = None,
+        observer: ProcessObserver | None = None,
+    ) -> ProcessResult:
+        assert ("--dangerously-bypass-hook-trust" in command) == (installed == "1")
+        assert env is not None
+        assert env["CODEX_HOME"] != str(home)
+        assert (Path(env["CODEX_HOME"]) / "hooks.json").read_text() == '{"hooks":{}}'
+        return ProcessResult("", "test process exited before model invocation", 1, False, False, ())
+
+    CodexRuntime(process_runner=runner).run(AgentRunRequest(tmp_path, "test", 30))
+    assert (home / "hooks.json").read_text() == '{"hooks":{}}'
+    assert not (home / "config.toml").exists()
 
 
 def test_process_stdout_capture_is_unbounded(tmp_path: Path) -> None:

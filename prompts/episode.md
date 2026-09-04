@@ -126,8 +126,8 @@ six README indexes before adding content. Whenever you add, change, rename, or r
 update the corresponding `README.md`; prefer improving an existing entry over a near-duplicate.
 Link relevant Journal/measurement identities, distinguish facts from analysis, and follow the
 injected Runtime State inheritance policy.
-For hooks, document backend, event, invocation, activation steps, and verification status; storing
-a hook does not enable it automatically.
+For hooks, document backend, event, invocation and verification status. Follow the injected
+session-local Skill/Hook installation contract; never change host/global CLI configuration.
 
 This is a required step, not an option. A retained method is worth more than a retained result, so
 deposit the reusable form rather than this Attempt's specific numbers. If nothing this Attempt

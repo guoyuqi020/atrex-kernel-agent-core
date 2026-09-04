@@ -42,8 +42,8 @@ or an instruction selection, then write your own baseline. Copying a file wholes
   inheritance policy. Read their indexes first and update the corresponding `README.md` whenever
   content is added, changed, renamed, or removed. Keep concise, reusable notes with source/evidence
   references, not credentials or raw one-off measurements.
-  For hooks, document backend, event, invocation, activation steps, and verification status;
-  storing a hook does not enable it automatically.
+  For hooks, document backend, event, invocation and verification status. Follow the injected
+  session-local Skill/Hook installation contract; never change host/global CLI configuration.
 - Give every `Model` constructor parameter a default: `check` constructs `Model()` bare and reports
   the failure as an `error` diagnostic inside a `succeeded` job.
 - Candidate source importing `builtins` `cffi` `ctypes` `ftplib` `http` `importlib`
