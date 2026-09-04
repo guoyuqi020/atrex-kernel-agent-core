@@ -57,7 +57,6 @@ _RUNTIME_JOURNAL_COMMANDS = {
 _ATTEMPT_COMMANDS = (
     "gateway-execute",
     *_PUBLIC_RUNTIME_QUERY_COMMANDS,
-    "wiki-query",
     "update-direction",
     "list-directions",
     "load-direction",
@@ -712,30 +711,6 @@ def runtime_journal(
     if not isinstance(result, dict):
         raise ValueError(f"{command} returned an invalid Runtime Journal response")
     return result
-
-
-def wiki_query(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
-    if context.wiki_url is None or context.wiki_capability is None:
-        raise RuntimeError("GPU Wiki capability is unavailable for this Attempt")
-    unknown = set(request) - {"query"}
-    if unknown:
-        raise ValueError(f"unknown Wiki request fields: {sorted(unknown)}")
-    query = request.get("query")
-    if not isinstance(query, str) or not query.strip():
-        raise ValueError("Wiki request requires a non-empty query")
-    value = {"schema_version": 1, "attempt_id": context.attempt_id, "query": query}
-    value["idempotency_key"] = _idempotency_key("wiki", value)
-    return _agent_knowledge(
-        _post(context.wiki_url, context.wiki_capability, "/v1/wiki/query", value)
-    )
-
-
-def _agent_knowledge(response: dict[str, Any]) -> dict[str, Any]:
-    """Expose knowledge content while retaining audit identities inside Runtime."""
-    content = response.get("content")
-    if not isinstance(content, dict):
-        raise RuntimeError("Runtime Wiki response has no Agent-readable content object")
-    return content
 
 
 def _direction_event_fields() -> set[str]:
@@ -1433,8 +1408,6 @@ def main(argv: list[str] | None = None) -> int:
             result = gateway_execute(context, request)
         elif args.command in _RUNTIME_QUERY_COMMANDS:
             result = runtime_query(context, args.command, request)
-        elif args.command == "wiki-query":
-            result = wiki_query(context, request)
         elif args.command == "update-direction":
             result = update_direction(context, request)
         elif args.command == "list-directions":

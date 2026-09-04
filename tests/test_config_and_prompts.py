@@ -222,9 +222,9 @@ def test_attempt_tool_example_uses_the_trusted_lineage_dsl() -> None:
     config = AgentConfig.load(CORE_ROOT)
     instructions = _tool_instructions(config, "triton")
 
-    assert '"query": "triton vectorized load requirements' in instructions
+    assert "## Session tools (triton)" in instructions
     assert "wiki-read" not in instructions
-    assert "complete safe served Record" in instructions
+    assert "wiki-query" not in instructions
     assert "CUDA vectorized load requirements" not in instructions
     assert "{{" not in instructions
     assert "}}" not in instructions
@@ -266,8 +266,8 @@ def test_bootstrap_prompt_matches_special_attempt_protocol() -> None:
     assert "when completing the Direction" in baseline
     assert "may evaluate that unchanged copy" in baseline
     assert "does not register `v0`" in baseline
-    assert "When `wiki-query` is available" in baseline
-    assert "Wiki absence alone is not a blocker" in baseline
+    assert "wiki-query" not in baseline
+    assert "Use the seed, included Skills, and public contract." in baseline
     assert "Do not use `pivot` during Bootstrap" in baseline
     assert "complete private Bootstrap Gate independently" in baseline
     assert "Set `profile_evidence` to `null` unless profiling was actually" in baseline

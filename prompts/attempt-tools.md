@@ -1,4 +1,4 @@
-## Session tools
+## Session tools ({{DSL}})
 
 Use the following exact CLI subcommand names; there are no function-style aliases. For each call,
 write one JSON request under `scratch/`, then run exactly one of:
@@ -8,7 +8,6 @@ python3 {{RUNTIME_TOOL}} gateway-execute --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} kernel-trial-show --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} kernel-artifact-read --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} gateway-result-read --request scratch/<request>.json
-python3 {{RUNTIME_TOOL}} wiki-query --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} update-direction --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} list-directions --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} load-direction --request scratch/<request>.json
@@ -108,12 +107,6 @@ Example exploratory evaluation request:
 {"operation": "evaluate"}
 ```
 
-Example knowledge query request:
-
-```json
-{"query": "{{DSL}} vectorized load requirements for the target architecture"}
-```
-
 Runtime-local query commands infer their operation from the command name. Their request JSON must
 not contain `operation`. Examples are `{"kernel_trial_id":"gtrial_<id>"}` for
 `kernel-trial-show`,
@@ -184,12 +177,6 @@ Directions; proposals are unlimited and do not consume this limit. Only one Dire
 starting another, close the current one with `complete`, `abandon`, `defer`, or `block`. None may
 remain `in_progress` at handoff. Without an Experiment use `defer` or `block`; `complete` and
 `abandon` require supporting Experiments.
-
-`wiki-query` returns the GPU Wiki's exact `records` mapping and `notes`. Each mapping key is a
-stable Record ID; each value keeps its Store, source, type, scope, match, and isolated payload.
-The payload is the complete safe served Record; no second read step exists. Preserve the exact
-mapping keys of records that materially informed your work. Wiki protocol versions, snapshot
-identities, and integrity digests are intentionally absent from Agent-facing results.
 
 Each `record-experiment` request must contain exactly these fields:
 

@@ -83,10 +83,9 @@ After the minimal operator-contract review, choose one baseline-construction hyp
 immediately follow the shared Direction contract below to propose and start it before any
 direction-specific work.
 
-When `wiki-query` is available, query only for the actual architecture, DSL, operator, and mechanism.
-Preserve stable Record IDs for knowledge actually used. If Wiki authority is unavailable, continue
-from the seed, included Skills, and public contract; Wiki absence alone is not a blocker. Stop once one
-viable approach has adequate support and keep its actionable constraints in `scratch/`.
+Use the seed, included Skills, and public contract. Select knowledge relevant to the actual
+architecture, DSL, operator, and mechanism. Stop once one viable approach has adequate support
+and keep its actionable constraints in `scratch/`.
 
 ### 3. Establish the first self-contained DSL Kernel
 

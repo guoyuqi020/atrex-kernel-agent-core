@@ -192,7 +192,6 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
         required=("kernel_artifact_digest", "file"),
     ),
     "gateway-result-read": _object({"gateway_result_digest": _digest()}),
-    "wiki-query": _object({"query": _text()}),
     "update-direction": _direction_schema(),
     "list-directions": _SCRATCH_FILE,
     "load-direction": _object({"direction_id": _identifier("direction_")}),
