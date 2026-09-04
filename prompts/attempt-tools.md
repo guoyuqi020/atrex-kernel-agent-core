@@ -28,7 +28,7 @@ each is optional with the default shown in parentheses unless marked required, a
 is normally the right choice:
 
 ```text
-evaluate     no further fields; one Job measures every contract Shape
+evaluate     no further fields; Runtime measures all contract Shapes in batches and merges results
 profile      level=survey|sol|deep (sol), profiler=ncu|rocprofv3, counters=[], source (false),
              kernel_name or kernel_regex, launch_skip, launch_count, top_kernels, shape_id
 dev          command (required), file_paths=[], env_vars={}, job_timeout_s (<=600), recycle (true),
