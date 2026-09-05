@@ -126,11 +126,11 @@ def _fake_citable_profile_results(context: Any) -> list[dict[str, Any]]:
             side = experiment.get(side_name)
             if side is None:
                 continue
-            for result_digest in side["gateway_result_digests"]:
+            for result_digest in side["result_artifact_digests"]:
                 identity = {
                     "kernel_artifact_digest": side["kernel_artifact_digest"],
                     "kernel_trial_id": side["kernel_trial_id"],
-                    "gateway_result_digest": result_digest,
+                    "result_artifact_digest": result_digest,
                 }
                 if identity not in identities:
                     identities.append(identity)
@@ -245,8 +245,11 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                 raise ValueError(
                     f"Experiment fields must be exactly {sorted(runtime_tools._EXPERIMENT_FIELDS)}"
                 )
+            materialized = dict(request)
+            for side_name in ("before", "after"):
+                materialized[side_name] = _materialized_subject(materialized.get(side_name))
             runtime_tools._validate_experiment_comparison(
-                request,
+                materialized,
                 allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
             )
             if request["action"] == "baseline" and any(
@@ -262,7 +265,7 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                 "experiment_id": f"experiment_{uuid4().hex}",
                 "sequence": len(state["experiments"]) + 1,
                 "recorded_at": datetime.now(UTC).isoformat(),
-                **request,
+                **materialized,
             }
             state["experiments"].append(experiment)
             return {"status": "recorded", "experiment_id": experiment["experiment_id"]}
@@ -271,8 +274,11 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                 "experiments": [
                     {
                         "experiment_id": value["experiment_id"],
-                        "sequence": value["sequence"],
                         "name": value["name"],
+                        "hypothesis": value["hypothesis"],
+                        "change": value["change"],
+                        "evidence": value["evidence"],
+                        "analysis": value["analysis"],
                         "action": value["action"],
                     }
                     for value in _fake_visible(context, "experiments")
@@ -281,7 +287,9 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
         if command == "load-experiment":
             for value in _fake_visible(context, "experiments"):
                 if value["experiment_id"] == request.get("experiment_id"):
-                    return value
+                    visible = dict(value)
+                    visible.pop("sequence", None)
+                    return visible
             raise ValueError("Experiment ID is outside the current Attempt's visible history")
         if command == "_journal-snapshot":
             return {
@@ -333,20 +341,33 @@ def _experiment(direction_id: str = "direction_" + "a" * 32) -> dict[str, object
         "name": "vectorize load",
         "hypothesis": "one transaction replaces two",
         "change": "use a vector load",
-        "before": {
-            "kernel_artifact_digest": "sha256:" + "a" * 64,
-            "kernel_trial_id": "gtrial_" + "b" * 32,
-            "gateway_result_digests": ["sha256:" + "c" * 64],
-        },
-        "after": {
-            "kernel_artifact_digest": "sha256:" + "d" * 64,
-            "kernel_trial_id": "gtrial_" + "e" * 32,
-            "gateway_result_digests": ["sha256:" + "f" * 64],
-        },
+        "before": {"kernel_trial_id": "gtrial_" + "b" * 32},
+        "after": {"kernel_trial_id": "gtrial_" + "e" * 32},
         "evidence": "evaluation result sha256:example",
         "analysis": "the hypothesis held because latency improved",
         "action": "keep_after",
     }
+
+
+def _materialized_subject(value: object) -> object:
+    if value is None:
+        return None
+    assert isinstance(value, dict)
+    trial_id = value["kernel_trial_id"]
+    assert isinstance(trial_id, str)
+    if trial_id == "gtrial_" + "b" * 32:
+        return {
+            "kernel_artifact_digest": "sha256:" + "a" * 64,
+            "kernel_trial_id": trial_id,
+            "result_artifact_digests": ["sha256:" + "c" * 64],
+        }
+    if trial_id == "gtrial_" + "e" * 32:
+        return {
+            "kernel_artifact_digest": "sha256:" + "d" * 64,
+            "kernel_trial_id": trial_id,
+            "result_artifact_digests": ["sha256:" + "f" * 64],
+        }
+    return value
 
 
 def test_baseline_experiment_is_bootstrap_only_and_one_sided(tmp_path: Path) -> None:
@@ -441,7 +462,7 @@ def _report(experiment_id: str) -> dict[str, object]:
                     "operation": "profile",
                     "kernel_artifact_digest": "sha256:" + "d" * 64,
                     "kernel_trial_id": "gtrial_" + "e" * 32,
-                    "gateway_result_digest": "sha256:" + "f" * 64,
+                    "result_artifact_digest": "sha256:" + "f" * 64,
                 }
             ],
         },
@@ -920,7 +941,11 @@ def test_experiment_journal_can_be_listed_and_loaded_by_id(
         "experiment_id": historical_id,
         "sequence": 1,
         "recorded_at": "2026-08-24T00:00:00+00:00",
-        **_experiment(),
+        **{
+            **_experiment(),
+            "before": _materialized_subject(_experiment()["before"]),
+            "after": _materialized_subject(_experiment()["after"]),
+        },
     }
     _FAKE_HISTORY[str(context.workspace)] = {
         "direction_events": [],
@@ -942,36 +967,45 @@ def test_experiment_journal_can_be_listed_and_loaded_by_id(
         "experiments": [
             {
                 "experiment_id": historical_id,
-                "sequence": 1,
                 "name": "vectorize load",
+                "hypothesis": "one transaction replaces two",
+                "change": "use a vector load",
+                "evidence": "evaluation result sha256:example",
+                "analysis": "the hypothesis held because latency improved",
                 "action": "keep_after",
             },
             {
                 "experiment_id": first["experiment_id"],
-                "sequence": 1,
                 "name": "vectorize load",
+                "hypothesis": "one transaction replaces two",
+                "change": "use a vector load",
+                "evidence": "evaluation result sha256:example",
+                "analysis": "the hypothesis held because latency improved",
                 "action": "keep_after",
             },
             {
                 "experiment_id": second["experiment_id"],
-                "sequence": 2,
                 "name": "second vectorization experiment",
+                "hypothesis": "one transaction replaces two",
+                "change": "use a vector load",
+                "evidence": "evaluation result sha256:example",
+                "analysis": "the hypothesis held because latency improved",
                 "action": "restore_before",
             },
         ]
     }
     loaded = load_experiment(context, {"experiment_id": second["experiment_id"]})
     assert loaded["experiment_id"] == second["experiment_id"]
-    assert loaded["sequence"] == 2
+    assert "sequence" not in loaded
     assert loaded["name"] == "second vectorization experiment"
-    assert loaded["before"] == second_value["before"]
-    assert loaded["after"] == second_value["after"]
+    assert loaded["before"] == _materialized_subject(second_value["before"])
+    assert loaded["after"] == _materialized_subject(second_value["after"])
     assert loaded["evidence"] == second_value["evidence"]
     assert loaded["analysis"] == second_value["analysis"]
     assert loaded["action"] == "restore_before"
     historical = load_experiment(context, {"experiment_id": historical_id})
     assert historical == {
-        **historical_experiment,
+        key: value for key, value in historical_experiment.items() if key != "sequence"
     }
 
 
@@ -1056,7 +1090,7 @@ def test_attempt_report_rejects_profile_result_absent_from_journal(tmp_path: Pat
     assert isinstance(profile, dict)
     results = profile["supporting_results"]
     assert isinstance(results, list)
-    results[0]["gateway_result_digest"] = "sha256:" + "1" * 64
+    results[0]["result_artifact_digest"] = "sha256:" + "1" * 64
 
     with pytest.raises(ValueError, match="not referenced by any visible Experiment"):
         attempt_report(context, report)
@@ -1069,7 +1103,11 @@ def test_attempt_report_can_cite_a_historical_profile_result(tmp_path: Path) -> 
         "experiment_id": "experiment_" + "8" * 32,
         "sequence": 1,
         "recorded_at": "2026-08-24T00:00:00+00:00",
-        **_experiment(),
+        **{
+            **_experiment(),
+            "before": _materialized_subject(_experiment()["before"]),
+            "after": _materialized_subject(_experiment()["after"]),
+        },
     }
     historical_after = historical_experiment["after"]
     assert isinstance(historical_after, dict)
@@ -1077,7 +1115,7 @@ def test_attempt_report_can_cite_a_historical_profile_result(tmp_path: Path) -> 
         {
             "kernel_artifact_digest": "sha256:" + "2" * 64,
             "kernel_trial_id": "gtrial_" + "3" * 32,
-            "gateway_result_digests": ["sha256:" + "4" * 64],
+            "result_artifact_digests": ["sha256:" + "4" * 64],
         }
     )
     _FAKE_HISTORY[str(context.workspace)] = {
@@ -1093,7 +1131,7 @@ def test_attempt_report_can_cite_a_historical_profile_result(tmp_path: Path) -> 
             "operation": "profile",
             "kernel_artifact_digest": "sha256:" + "2" * 64,
             "kernel_trial_id": "gtrial_" + "3" * 32,
-            "gateway_result_digest": "sha256:" + "4" * 64,
+            "result_artifact_digest": "sha256:" + "4" * 64,
         }
     ]
 
@@ -1162,7 +1200,7 @@ def test_runtime_queries_have_dedicated_commands_and_endpoint(
         assert url == context.gateway_url
         assert capability == context.gateway_capability
         calls.append((path, value))
-        if isinstance(value, dict) and value.get("operation") == "gateway_result_read":
+        if isinstance(value, dict) and value.get("operation") == "result_artifact_read":
             return {
                 "status": "completed",
                 "result": {
@@ -1183,7 +1221,7 @@ def test_runtime_queries_have_dedicated_commands_and_endpoint(
             "status": "completed",
             "result": {
                 "kernel_artifact_digest": "sha256:" + "c" * 64,
-                "gateway_results": [],
+                "result_artifacts": [],
             },
         }
 
@@ -1192,7 +1230,7 @@ def test_runtime_queries_have_dedicated_commands_and_endpoint(
     trial_id = "gtrial_" + "d" * 32
     assert runtime_query(context, "kernel-trial-show", {"kernel_trial_id": trial_id}) == {
         "kernel_artifact_digest": "sha256:" + "c" * 64,
-        "gateway_results": [],
+        "result_artifacts": [],
     }
     path, value = calls[0]
     assert path == "/v1/runtime/queries"
@@ -1201,8 +1239,8 @@ def test_runtime_queries_have_dedicated_commands_and_endpoint(
     assert value["kernel_trial_id"] == trial_id
     assert runtime_query(
         context,
-        "gateway-result-read",
-        {"gateway_result_digest": "sha256:" + "a" * 64},
+        "result-artifact-read",
+        {"result_artifact_digest": "sha256:" + "a" * 64},
     ) == {
         "operation": "evaluate",
         "status": "completed",
@@ -1255,21 +1293,21 @@ def test_gateway_execute_hides_wire_schema_version(
         sent.append((path, value))
         return {
             "schema_version": 2,
-            "operation": "health",
+            "operation": "env",
             "status": "completed",
             "kernel_artifact_digest": None,
             "kernel_trial_id": None,
-            "gateway_result_digest": "sha256:" + "e" * 64,
+            "result_artifact_digest": "sha256:" + "e" * 64,
             "job_id": None,
             "evaluation": None,
-            "result": {"ok": True},
+            "result": {"env": [{"name": "L20N"}]},
         }
 
     monkeypatch.setattr(runtime_tools, "_post", fake_post)
 
-    response = gateway_execute(context, {"operation": "health"})
+    response = gateway_execute(context, {"operation": "env"})
 
-    assert response == {"ok": True}
+    assert response == {"env": [{"name": "L20N"}]}
     path, request = sent[0]
     assert path == "/v1/operations"
     assert isinstance(request, dict)
@@ -1278,7 +1316,7 @@ def test_gateway_execute_hides_wire_schema_version(
     with pytest.raises(ValueError, match="Runtime-owned fields"):
         gateway_execute(
             context,
-            {"operation": "health", "idempotency_key": "agent-controlled"},
+            {"operation": "env", "idempotency_key": "agent-controlled"},
         )
     with pytest.raises(ValueError, match="unsupported gateway-execute operation"):
         gateway_execute(context, {"operation": "sol", "solution_path": "solution.json"})
@@ -1286,30 +1324,21 @@ def test_gateway_execute_hides_wire_schema_version(
         gateway_execute(context, {"operation": "submit", "payload_path": "payload.json"})
 
 
-@pytest.mark.parametrize(
-    ("operation", "result"),
-    [
-        ("env", {"env": [{"name": "L20N"}]}),
-        ("health", {"ok": True}),
-        ("config", {"url": "https://gateway.invalid", "gpu": "L20N"}),
-    ],
-)
 def test_gateway_execute_returns_read_only_service_result_directly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    operation: str,
-    result: dict[str, object],
 ) -> None:
     context = _context(tmp_path)
+    result = {"env": [{"name": "L20N"}]}
 
     def fake_post(_url: str, _capability: str, _path: str, _value: object) -> dict[str, Any]:
         return {
             "schema_version": 2,
-            "operation": operation,
+            "operation": "env",
             "status": "completed",
             "kernel_artifact_digest": None,
             "kernel_trial_id": None,
-            "gateway_result_digest": "sha256:" + "e" * 64,
+            "result_artifact_digest": "sha256:" + "e" * 64,
             "job_id": None,
             "evaluation": None,
             "result": result,
@@ -1317,10 +1346,10 @@ def test_gateway_execute_returns_read_only_service_result_directly(
 
     monkeypatch.setattr(runtime_tools, "_post", fake_post)
 
-    assert gateway_execute(context, {"operation": operation}) == result
+    assert gateway_execute(context, {"operation": "env"}) == result
 
 
-def test_gateway_execute_merges_evaluation_into_result(
+def test_gateway_execute_preserves_canonical_evaluation_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1337,11 +1366,11 @@ def test_gateway_execute_merges_evaluation_into_result(
             "status": "completed",
             "kernel_artifact_digest": "sha256:" + "a" * 64,
             "kernel_trial_id": "gtrial_" + "b" * 32,
-            "gateway_result_digest": "sha256:" + "c" * 64,
+            "result_artifact_digest": "sha256:" + "c" * 64,
             "job_id": None,
             "evaluation": {"correct": True, "latency_us": 12.288},
             "result": {
-                "all_pass": True,
+                "correct": True,
                 "correctness": {
                     "status": "PASS",
                     "rel_err": 0.001,
@@ -1350,6 +1379,7 @@ def test_gateway_execute_merges_evaluation_into_result(
                 },
                 "failures": [],
                 "latency_us_geomean": 12.288,
+                "latency_us_arith_mean": 12.288,
                 "latency_us_by_shape": {"0": 12.288},
             },
         }
@@ -1367,8 +1397,9 @@ def test_gateway_execute_merges_evaluation_into_result(
             "max_abs_err": 0.0009765625,
             "max_rel_err": 0.0078125,
         },
-        "latency_us": 12.288,
         "failures": [],
+        "latency_us_geomean": 12.288,
+        "latency_us_arith_mean": 12.288,
         "latency_us_by_shape": {"0": 12.288},
     }
 
@@ -1390,7 +1421,7 @@ def test_gateway_execute_keeps_check_kernel_identities(
             "status": "completed",
             "kernel_artifact_digest": "sha256:" + "a" * 64,
             "kernel_trial_id": "gtrial_" + "b" * 32,
-            "gateway_result_digest": "sha256:" + "c" * 64,
+            "result_artifact_digest": "sha256:" + "c" * 64,
             "job_id": "cp_example",
             "evaluation": None,
             "result": {"job_id": "cp_example", "status": "succeeded"},
@@ -1403,112 +1434,24 @@ def test_gateway_execute_keeps_check_kernel_identities(
         "status": "completed",
         "kernel_artifact_digest": "sha256:" + "a" * 64,
         "kernel_trial_id": "gtrial_" + "b" * 32,
-        "gateway_result_digest": "sha256:" + "c" * 64,
+        "result_artifact_digest": "sha256:" + "c" * 64,
         "job_id": "cp_example",
         "result": {"job_id": "cp_example", "status": "succeeded"},
     }
 
 
-def test_gateway_execute_returns_jobs_result_directly(
+@pytest.mark.parametrize("operation", ["poll", "jobs", "cancel", "health", "config"])
+def test_gateway_execute_does_not_expose_control_operations(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
 ) -> None:
     context = _context(tmp_path)
+    request: dict[str, object] = {"operation": operation}
+    if operation in {"poll", "cancel"}:
+        request["job_id"] = "pr_example"
 
-    def fake_post(_url: str, _capability: str, _path: str, _value: object) -> dict[str, Any]:
-        return {
-            "schema_version": 2,
-            "operation": "jobs",
-            "status": "completed",
-            "kernel_artifact_digest": None,
-            "kernel_trial_id": None,
-            "gateway_result_digest": "sha256:" + "d" * 64,
-            "job_id": None,
-            "evaluation": None,
-            "result": {
-                "jobs": [
-                    {
-                        "job_id": "pr_example",
-                        "operation": "profile",
-                        "status": "running",
-                    }
-                ]
-            },
-        }
-
-    monkeypatch.setattr(runtime_tools, "_post", fake_post)
-
-    assert gateway_execute(context, {"operation": "jobs"}) == {
-        "jobs": [
-            {
-                "job_id": "pr_example",
-                "operation": "profile",
-                "status": "running",
-            }
-        ]
-    }
-
-
-def test_gateway_execute_returns_cancel_result_directly(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = _context(tmp_path)
-
-    def fake_post(_url: str, _capability: str, _path: str, _value: object) -> dict[str, Any]:
-        return {
-            "schema_version": 2,
-            "operation": "cancel",
-            "status": "cancelled",
-            "kernel_artifact_digest": None,
-            "kernel_trial_id": None,
-            "gateway_result_digest": "sha256:" + "e" * 64,
-            "job_id": "pr_example",
-            "evaluation": None,
-            "result": {"status": "cancelled", "job_id": "pr_example"},
-        }
-
-    monkeypatch.setattr(runtime_tools, "_post", fake_post)
-
-    assert gateway_execute(
-        context,
-        {"operation": "cancel", "job_id": "pr_example"},
-    ) == {"status": "cancelled", "job_id": "pr_example"}
-
-
-def test_gateway_execute_returns_poll_result_directly(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    context = _context(tmp_path)
-
-    def fake_post(_url: str, _capability: str, _path: str, _value: object) -> dict[str, Any]:
-        return {
-            "schema_version": 2,
-            "operation": "poll",
-            "status": "completed",
-            "kernel_artifact_digest": None,
-            "kernel_trial_id": None,
-            "gateway_result_digest": "sha256:" + "f" * 64,
-            "job_id": "pr_example",
-            "evaluation": None,
-            "result": {
-                "job_id": "pr_example",
-                "status": "succeeded",
-                "result": {"kernels": []},
-            },
-        }
-
-    monkeypatch.setattr(runtime_tools, "_post", fake_post)
-
-    assert gateway_execute(
-        context,
-        {"operation": "poll", "job_id": "pr_example"},
-    ) == {
-        "job_id": "pr_example",
-        "status": "succeeded",
-        "result": {"kernels": []},
-    }
+    with pytest.raises(ValueError, match="unsupported gateway-execute operation"):
+        gateway_execute(context, request)
 
 
 def test_gateway_execute_returns_normalized_kernel_profile(
@@ -1528,7 +1471,7 @@ def test_gateway_execute_returns_normalized_kernel_profile(
             "status": "completed",
             "kernel_artifact_digest": "sha256:" + "a" * 64,
             "kernel_trial_id": "gtrial_" + "b" * 32,
-            "gateway_result_digest": "sha256:" + "c" * 64,
+            "result_artifact_digest": "sha256:" + "c" * 64,
             "job_id": "pr_example",
             "evaluation": None,
             "result": {
@@ -1567,7 +1510,7 @@ def test_gateway_execute_returns_normalized_kernel_profile(
     ) == {
         "kernel_artifact_digest": "sha256:" + "a" * 64,
         "kernel_trial_id": "gtrial_" + "b" * 32,
-        "gateway_result_digest": "sha256:" + "c" * 64,
+        "result_artifact_digest": "sha256:" + "c" * 64,
         "job_id": "pr_example",
         "status": "succeeded",
         "result": {
@@ -1622,7 +1565,7 @@ def test_gateway_execute_returns_dev_result_directly(
             "status": "completed",
             "kernel_artifact_digest": "sha256:" + "7" * 64,
             "kernel_trial_id": "gtrial_" + "8" * 32,
-            "gateway_result_digest": "sha256:" + "9" * 64,
+            "result_artifact_digest": "sha256:" + "9" * 64,
             "job_id": "dv_example",
             "evaluation": None,
             "result": {
@@ -1661,7 +1604,7 @@ def test_gateway_execute_keeps_disassemble_provenance_identities(
             "status": "completed",
             "kernel_artifact_digest": "sha256:" + "4" * 64,
             "kernel_trial_id": "gtrial_" + "5" * 32,
-            "gateway_result_digest": "sha256:" + "6" * 64,
+            "result_artifact_digest": "sha256:" + "6" * 64,
             "job_id": "da_example",
             "evaluation": None,
             "result": {
@@ -1682,7 +1625,7 @@ def test_gateway_execute_keeps_disassemble_provenance_identities(
         "status": "completed",
         "kernel_artifact_digest": "sha256:" + "4" * 64,
         "kernel_trial_id": "gtrial_" + "5" * 32,
-        "gateway_result_digest": "sha256:" + "6" * 64,
+        "result_artifact_digest": "sha256:" + "6" * 64,
         "job_id": "da_example",
         "result": {
             "job_id": "da_example",

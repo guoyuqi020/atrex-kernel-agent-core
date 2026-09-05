@@ -123,7 +123,7 @@ Bootstrap is represented as the special pre-Epoch Attempt. Its Agent-facing Evid
 the terminal report and latest sealed backend-neutral conversation, matching the compact ordinary
 Attempt convention. It uses the same journal/query tools and terminal Attempt Report schema as an
 ordinary Attempt, with Bootstrap-specific methodology and no prior Lineage history. Its journals,
-Kernel Trials, and Gateway Results become the root history inherited by later Optimizer Attempts.
+Kernel Trials, and Agent-visible Result Artifacts become the root history inherited by later Optimizer Attempts.
 
 The Agent Problem is an internal Core input projected into the final Agent Prompt; its workspace
 path is not advertised to the Optimizer. The Agent may write `work/kernel`, `prompts/`, `memory/`, `knowledge/`, `skills/`, `tools/`, and

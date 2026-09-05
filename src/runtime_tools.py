@@ -31,17 +31,12 @@ _CANDIDATE_OPERATIONS = {
     "disassemble",
 }
 _GATEWAY_EXECUTE_OPERATIONS = _CANDIDATE_OPERATIONS | {
-    "poll",
-    "jobs",
-    "cancel",
     "env",
-    "health",
-    "config",
 }
 _PUBLIC_RUNTIME_QUERY_COMMANDS = {
     "kernel-trial-show": "kernel_trial_show",
     "kernel-artifact-read": "kernel_artifact_read",
-    "gateway-result-read": "gateway_result_read",
+    "result-artifact-read": "result_artifact_read",
 }
 _RUNTIME_QUERY_COMMANDS = dict(_PUBLIC_RUNTIME_QUERY_COMMANDS)
 _RUNTIME_QUERY_OPERATIONS = frozenset(_RUNTIME_QUERY_COMMANDS.values())
@@ -94,7 +89,7 @@ _DIRECTION_UPDATE_FIELDS = {
 _EXPERIMENT_SUBJECT_FIELDS = {
     "kernel_artifact_digest",
     "kernel_trial_id",
-    "gateway_result_digests",
+    "result_artifact_digests",
 }
 _REPORT_FIELDS = {
     "status",
@@ -481,7 +476,7 @@ def _profile_agent_response(
     visible = {
         "kernel_artifact_digest": response.get("kernel_artifact_digest"),
         "kernel_trial_id": response.get("kernel_trial_id"),
-        "gateway_result_digest": response.get("gateway_result_digest"),
+        "result_artifact_digest": response.get("result_artifact_digest"),
         **worker,
     }
     raw_result = worker.get("result")
@@ -499,12 +494,7 @@ def _agent_gateway_response(
         return _profile_agent_response(response, request)
     if operation in {
         "dev",
-        "jobs",
-        "poll",
-        "cancel",
         "env",
-        "health",
-        "config",
     }:
         result = response.get("result")
         if not isinstance(result, dict):
@@ -513,20 +503,6 @@ def _agent_gateway_response(
     visible = {
         key: item for key, item in response.items() if key not in {"schema_version", "evaluation"}
     }
-    evaluation = response.get("evaluation")
-    if evaluation is None:
-        return visible
-    if not isinstance(evaluation, dict):
-        raise ValueError("Gateway returned an invalid evaluation")
-    result = visible.get("result")
-    if not isinstance(result, dict):
-        raise ValueError("Gateway returned an evaluation without an object result")
-    merged = dict(result)
-    merged.pop("all_pass", None)
-    merged.pop("latency_us_geomean", None)
-    merged["correct"] = evaluation.get("correct")
-    merged["latency_us"] = evaluation.get("latency_us")
-    visible["result"] = merged
     return visible
 
 
@@ -647,7 +623,7 @@ def runtime_query(
     result = response.get("result")
     if not isinstance(result, dict):
         raise ValueError(f"{command} returned an invalid response")
-    if command == "gateway-result-read":
+    if command == "result-artifact-read":
         return result
     if command == "kernel-artifact-read":
         if not isinstance(result, dict) or destination is None or destination_name is None:
@@ -872,15 +848,16 @@ def _experiment_subject(value: object, label: str) -> dict[str, Any] | None:
     trial_id = value.get("kernel_trial_id")
     if not _is_kernel_trial_id(trial_id):
         raise ValueError(f"Experiment {label} kernel_trial_id is invalid")
-    results = value.get("gateway_result_digests")
+    results = value.get("result_artifact_digests")
     if (
         not isinstance(results, list)
         or not results
-        or len(results) > 32
+        or len(results) > 4_096
         or len(set(item for item in results if isinstance(item, str))) != len(results)
     ):
         raise ValueError(
-            f"Experiment {label} gateway_result_digests must be a non-empty unique list"
+            f"Experiment {label} result_artifact_digests must be a non-empty unique list "
+            "with at most 4096 items"
         )
     for result in results:
         if (
@@ -889,7 +866,7 @@ def _experiment_subject(value: object, label: str) -> dict[str, Any] | None:
             or len(result) != len("sha256:") + 64
             or any(character not in "0123456789abcdef" for character in result[7:])
         ):
-            raise ValueError(f"Experiment {label} gateway_result_digests is invalid")
+            raise ValueError(f"Experiment {label} result_artifact_digests is invalid")
     return value
 
 
@@ -1173,14 +1150,14 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                 {
                     "kernel_artifact_digest",
                     "kernel_trial_id",
-                    "gateway_result_digest",
+                    "result_artifact_digest",
                 },
             )
             journal_bindings.add(
                 (
                     str(identity["kernel_artifact_digest"]),
                     str(identity["kernel_trial_id"]),
-                    str(identity["gateway_result_digest"]),
+                    str(identity["result_artifact_digest"]),
                 )
             )
         seen_results: set[str] = set()
@@ -1193,7 +1170,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                     "operation",
                     "kernel_artifact_digest",
                     "kernel_trial_id",
-                    "gateway_result_digest",
+                    "result_artifact_digest",
                 },
             )
             operation = reference["operation"]
@@ -1204,7 +1181,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                 {
                     "kernel_artifact_digest": reference["kernel_artifact_digest"],
                     "kernel_trial_id": reference["kernel_trial_id"],
-                    "gateway_result_digests": [reference["gateway_result_digest"]],
+                    "result_artifact_digests": [reference["result_artifact_digest"]],
                 },
                 f"Attempt report profile_evidence.supporting_results[{index}]",
             )
@@ -1212,7 +1189,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
             binding = (
                 subject["kernel_artifact_digest"],
                 subject["kernel_trial_id"],
-                subject["gateway_result_digests"][0],
+                subject["result_artifact_digests"][0],
             )
             if binding not in journal_bindings:
                 raise ValueError(

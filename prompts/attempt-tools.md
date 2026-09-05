@@ -7,7 +7,7 @@ write one JSON request under `scratch/`, then run exactly one of:
 python3 {{RUNTIME_TOOL}} gateway-execute --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} kernel-trial-show --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} kernel-artifact-read --request scratch/<request>.json
-python3 {{RUNTIME_TOOL}} gateway-result-read --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} result-artifact-read --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} update-direction --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} list-directions --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} load-direction --request scratch/<request>.json
@@ -21,7 +21,7 @@ python3 {{RUNTIME_TOOL}} attempt-report --request scratch/<request>.json
 fields. Never embed a candidate, schema version, capability, or attempt ID in its request.
 Runtime-local history queries use their dedicated commands above;
 do not pass `kernel_trial_show`, `kernel_artifact_read`, or
-`gateway_result_read` to `gateway-execute`.
+`result_artifact_read` to `gateway-execute`.
 
 Every `gateway-execute` request names one `operation`. These are the only Agent-authored fields;
 each is optional with the default shown in parentheses unless marked required, and an omitted field
@@ -36,13 +36,7 @@ dev          command (required), file_paths=[], env_vars={}, job_timeout_s (<=60
              custom_harness|other
 check        arch, sanitize=memcheck|racecheck|initcheck|synccheck
 disassemble  fmt=sass|ptx|isa|auto (auto)
-poll         job_id (required), wait (false), include_spec (false)
-jobs         kind=eval|profile|dev|compile|sol|disassemble,
-             status=queued|running|succeeded|failed|cancelled, limit (50, at most 200)
-cancel       job_id (required)
 env          gpu, capabilities (false, requires gpu), force (false)
-health       no further fields
-config       no further fields
 ```
 
 `profile`, `check`, and `disassemble` additionally accept `env_vars`, `requirements`, and
@@ -53,15 +47,11 @@ under its basename alone and may not shadow a `work/kernel` path, which is why a
 does not need to be smuggled through `command`. Prefer `file_paths` over a heredoc inside `command`.
 
 A Gateway call blocks until its Job reaches a terminal state, which for `evaluate`, `profile`,
-`check`, and `disassemble` routinely exceeds any local command timeout. Start those calls as a
-background task and collect the output once it finishes; a foreground call that is killed locally
-leaves the Job running. Keep stderr out of the JSON on stdout, because appending `2>&1` corrupts the
-result you then have to parse. Never wrap a call in a `sleep` retry loop: `{"operation": "jobs"}`
-lists this Attempt's Jobs, and `{"operation": "poll", "job_id": "<id>", "wait": true}` blocks on one
-Job until it is terminal, which replaces the whole loop with a single call. Re-issuing a request
-whose Job is still in flight is refused as a binding conflict; re-issuing one that already completed
-replays its recorded Result without spending GPU time or call budget, so the way to recover a call
-killed by a local timeout is to run the identical request again.
+`check`, and `disassemble` may take a long time. Let the command finish and keep stderr out of the
+JSON on stdout, because appending `2>&1` corrupts the result you then have to parse. Runtime owns Job
+tracking and recovery; do not build polling or retry loops. If a local process interruption loses a
+response, run the identical request again. Runtime either reconnects to the in-flight operation or
+replays its recorded Result without spending GPU time or call budget.
 
 An expected tool failure prints one JSON Object and exits nonzero. For request mistakes, repair the
 compact `issues` first, then use the operation-specific `request_schema`; an unknown operation
@@ -88,9 +78,9 @@ candidate the Agent measured as correct and that rejection lands after the Sessi
 Agent-visible Gateway responses follow three contracts:
 
 - `evaluate`, `profile`, `check`, and `disassemble` retain the exact `kernel_artifact_digest`,
-  `kernel_trial_id`, and `gateway_result_digest` needed for experiment provenance;
+  `kernel_trial_id`, and `result_artifact_digest` needed for experiment provenance;
 - `dev` returns its Agent-safe Job result directly and does not print those identities;
-- `jobs`, `poll`, `cancel`, `env`, `health`, and `config` return their Agent-safe `result` directly.
+- `env` returns its Agent-safe `result` directly.
 
 `check` and `disassemble` report only `status`, `job_id`, `error`, and the nested `result` holding
 the compile verdict; a compile-only Job never launches the Kernel, so it carries no register, spill,
@@ -112,18 +102,17 @@ not contain `operation`. Examples are `{"kernel_trial_id":"gtrial_<id>"}` for
 `kernel-trial-show`,
 `{"kernel_artifact_digest":"sha256:<digest>","artifact_file":"kernel.py",`
 `"file":"scratch/recovered/kernel.py"}` for
-`kernel-artifact-read`, `{"gateway_result_digest":"sha256:<digest>"}` for
-`gateway-result-read`. These reads are unmetered and never contact Agate.
-`kernel-trial-show` returns only the Kernel Artifact Digest and a `gateway_results` array; each
-entry is `{"operation", "status", "result"}` and omits its already-resolved Gateway Result Digest.
-An entry replays whatever that call's Agent-visible response was, so a `dev` entry still carries
-the whole Agate Job envelope.
-`gateway-result-read` returns `{"operation", "status", "result"}`; the measurement lives under
-`result`, not beside those keys. For an Evaluate it holds `correct`, `correctness`, `failures`,
-`latency_us_by_shape` keyed by opaque Shape ID, and the aggregates `latency_us_arith_mean` and
-`latency_us_geomean`. Those two names differ from the single `latency_us` an Evaluate response
-returns, so compare the same field when reading a Result back. It does not reveal private
-evaluator inputs or hidden-case details.
+`kernel-artifact-read`, `{"result_artifact_digest":"sha256:<digest>"}` for
+`result-artifact-read`. These reads are unmetered and never contact Agate.
+`kernel-trial-show` returns the Kernel Artifact Digest and a compact `result_artifacts` index. Each
+entry is `{"result_artifact_digest", "operation", "status"}`; it does not inline result content.
+Use `result-artifact-read` only for the Evaluate, Profile, or other result that you actually need.
+`result-artifact-read` returns `{"operation", "status", "result"}`; the measurement lives under
+`result`, not beside those keys. `operation`, `status`, and `result` are the same canonical values
+returned by the original `gateway-execute` call. For an Evaluate, `result` holds `correct`,
+`correctness`, `failures`, `latency_us_by_shape` keyed by opaque Shape ID, and the aggregates
+`latency_us_arith_mean` and `latency_us_geomean`. It does not reveal private evaluator inputs or
+hidden-case details.
 For `kernel-artifact-read`, `file` is a required destination under `scratch/`; `artifact_file`
 selects the source inside the Artifact and defaults to the destination basename. Source content is
 written atomically and is not printed to stdout.
@@ -133,10 +122,10 @@ it to the logical Attempt before the command returns; the Journal therefore surv
 Session and a new recovery generation. Invoke `list-experiments` with
 `{"file":"scratch/experiments-index.json"}`; it asks Runtime for the authorized live-plus-history
 view, then atomically writes compact
-Experiment ID, sequence, name, and action entries to that file and returns only status, file, and
-count. Read the file, then invoke `load-experiment` with
+Experiment ID, name, hypothesis, change, evidence, analysis, and action entries to that
+file and returns only status, file, and count. Read the file, then invoke `load-experiment` with
 `{"experiment_id":"experiment_<id>"}` only for selected entries to retrieve their complete
-original records. Both commands are Runtime-local, unmetered, and bounded by Runtime-authorized Lineage
+Agent-visible records; Runtime-internal ordering metadata is omitted. Both commands are Runtime-local, unmetered, and bounded by Runtime-authorized Lineage
 history. Bootstrap starts with no earlier journal history; its current live Journal remains visible.
 
 `update-direction` likewise persists each proposal or lifecycle event in Runtime before returning.
@@ -186,29 +175,21 @@ Each `record-experiment` request must contain exactly these fields:
   "name": "short experiment name",
   "hypothesis": "falsifiable expected mechanism",
   "change": "exact candidate change, including a reverted change",
-  "before": {
-    "kernel_artifact_digest": "sha256:<before-kernel>",
-    "kernel_trial_id": "gtrial_<before-trial>",
-    "gateway_result_digests": ["sha256:<before-evaluate>", "sha256:<before-profile>"]
-  },
-  "after": {
-    "kernel_artifact_digest": "sha256:<after-kernel>",
-    "kernel_trial_id": "gtrial_<after-trial>",
-    "gateway_result_digests": ["sha256:<after-evaluate>", "sha256:<after-profile>"]
-  },
+  "before": {"kernel_trial_id": "gtrial_<before-trial>"},
+  "after": {"kernel_trial_id": "gtrial_<after-trial>"},
   "evidence": "concise before/after measurements and observations",
   "analysis": "what the evidence means, including whether the hypothesis held",
   "action": "keep_after"
 }
 ```
 
-`before` and `after` bind both sides of the modification to exact source and measurements. Each side
-contains one Kernel Artifact Digest, its Trial ID, and a non-empty unique list of every relevant
-Evaluate/Profile/Check/Disassemble Result Digest for that exact Kernel. Record the entry before
-changing or reverting the candidate. For `keep_after` and `restore_before`, both sides are required.
+`before` and `after` identify both measured sides using only their Kernel Trial IDs. Runtime resolves
+and freezes each Trial's exact Kernel Artifact and all Result Artifacts when it records the
+Experiment; do not submit those derived identities yourself. Record the entry before changing or
+reverting the candidate. For `keep_after` and `restore_before`, both sides are required.
 For `abandon_direction` before any identity-bearing operation, set both `before` and `after` to
 `null`; never set only one side to `null`. The phase Prompt may additionally permit Bootstrap-only
-`baseline`, which requires `before=null` and a complete `after`. A `dev` result alone supplies no
+`baseline`, which requires `before=null` and a measured `after` Trial. A `dev` result alone supplies no
 identity.
 `record-experiment` persists the complete entry and prints only a compact receipt such as
 `{"status":"recorded","experiment_id":"experiment_<id>"}`; use that ID when referring to the
@@ -265,7 +246,7 @@ exactly these fields:
       "operation": "profile",
       "kernel_artifact_digest": "sha256:...",
       "kernel_trial_id": "gtrial_...",
-      "gateway_result_digest": "sha256:..."
+      "result_artifact_digest": "sha256:..."
     }]
   },
   "analysis": "Attempt-level synthesis and hypothesis verdict",
@@ -299,8 +280,8 @@ workaround, explicit absence of a fix, or deferred action. Every finding must al
 unique `supporting_experiment_ids`
 returned by `record-experiment`; each ID must belong to this Attempt's Experiment Journal.
 `profile_evidence` must describe evidence returned by Runtime-bound profiling and
-bind every supporting Profile result to the exact Kernel Artifact, Kernel Trial, and Gateway
-Result identifiers returned by Runtime. Those exact identifiers must also occur in a `before` or
+bind every supporting Profile result to the exact Kernel Artifact, Kernel Trial, and Result
+Artifact identifiers returned by Runtime. Those exact identifiers must also occur in a `before` or
 `after` subject of some Experiment in the visible history, so a Profile recorded by an earlier
 Attempt stays citable. Include at least one `profile` result, set `profile_evidence`
 to `null` if no Profile was executed, and never invent profiler evidence.

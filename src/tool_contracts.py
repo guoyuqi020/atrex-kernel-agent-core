@@ -32,19 +32,7 @@ def _object(
 
 
 def _subject() -> dict[str, Any]:
-    return _object(
-        {
-            "kernel_artifact_digest": _digest(),
-            "kernel_trial_id": _identifier("gtrial_"),
-            "gateway_result_digests": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 32,
-                "uniqueItems": True,
-                "items": _digest(),
-            },
-        }
-    )
+    return _object({"kernel_trial_id": _identifier("gtrial_")})
 
 
 def _direction_schema() -> dict[str, Any]:
@@ -97,7 +85,7 @@ def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
             "operation": {"const": "profile"},
             "kernel_artifact_digest": _digest(),
             "kernel_trial_id": _identifier("gtrial_"),
-            "gateway_result_digest": _digest(),
+            "result_artifact_digest": _digest(),
         }
     )
     profile = _object(
@@ -191,7 +179,7 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
         },
         required=("kernel_artifact_digest", "file"),
     ),
-    "gateway-result-read": _object({"gateway_result_digest": _digest()}),
+    "result-artifact-read": _object({"result_artifact_digest": _digest()}),
     "update-direction": _direction_schema(),
     "list-directions": _SCRATCH_FILE,
     "load-direction": _object({"direction_id": _identifier("direction_")}),
@@ -228,10 +216,11 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
             )
         }
     ],
-    "gateway-result-read": [
+    "result-artifact-read": [
         {
             "instruction": (
-                "Use a gateway_result_digest returned by a visible Gateway operation or Experiment"
+                "Use a result_artifact_digest returned by a visible Gateway operation, "
+                "kernel-trial-show, or Experiment"
             )
         }
     ],
@@ -272,6 +261,12 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
             "request": {"file": "scratch/directions-index.json"},
         },
         {"instruction": "Bind the Experiment to a visible Direction whose status is in_progress"},
+        {
+            "instruction": (
+                "Set each non-null before/after subject to exactly one visible kernel_trial_id; "
+                "Runtime resolves the Kernel and Result Artifacts"
+            )
+        },
     ],
     "load-experiment": [
         {
@@ -326,7 +321,7 @@ _PATH_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (re.compile(r"kernel[_ ]trial[_ ]id", re.I), "kernel_trial_id"),
     (re.compile(r"kernel[_ ]artifact", re.I), "kernel_artifact_digest"),
-    (re.compile(r"gateway[_ ]result", re.I), "gateway_result_digest"),
+    (re.compile(r"(?:result[_ ]artifact|gateway[_ ]result)", re.I), "result_artifact_digest"),
     (re.compile(r"\bbefore\b", re.I), "before"),
     (re.compile(r"\bafter\b", re.I), "after"),
     (re.compile(r"\bquery\b", re.I), "query"),

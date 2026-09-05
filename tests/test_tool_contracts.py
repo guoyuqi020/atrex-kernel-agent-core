@@ -33,6 +33,15 @@ def test_complex_local_schemas_track_validator_top_level_fields() -> None:
         "restore_before",
         "abandon_direction",
     ]
+    subject = experiment["properties"]["before"]["oneOf"][0]
+    assert subject["properties"] == {
+        "kernel_trial_id": {
+            "type": "string",
+            "pattern": r"^gtrial_[0-9a-f]{32}$",
+        }
+    }
+    assert subject["required"] == ["kernel_trial_id"]
+    assert subject["additionalProperties"] is False
     assert bootstrap_experiment["properties"]["action"]["enum"][-1] == "baseline"
     assert report["properties"]["status"]["enum"] == [
         "candidate_ready",

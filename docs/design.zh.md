@@ -102,7 +102,7 @@ scratch/
 Bootstrap 被视为 Epoch 之前的一次特殊 Attempt；Agent 可见 Evidence 只保留终态报告和最新封存的
 后端无关会话记录，与普通 Attempt 的精简约定一致。它使用和普通 Attempt 相同的 Journal/查询工具
 与终态 Attempt Report Schema，但采用 Bootstrap 专用方法论且没有更早的 Lineage 历史。其 Journal、
-Kernel Trial 和 Gateway Result 会成为后续 Optimizer Attempt 继承的根历史。
+Kernel Trial 和 Agent 可见 Result Artifact 会成为后续 Optimizer Attempt 继承的根历史。
 
 Agent Problem 是 Core 内部输入，由 Core 投影进最终 Agent Prompt；Optimizer 不会获知其工作区
 路径。Agent 可以写入 `work/kernel`、`prompts/`、`memory/`、`knowledge/`、`skills/`、`tools/`、`hooks/` 与 `scratch/`；`sessions/` 由 Core 和

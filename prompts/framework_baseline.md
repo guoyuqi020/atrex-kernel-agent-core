@@ -119,10 +119,10 @@ evidence, not the authoritative baseline outcome.
 The first measured construction has no measured predecessor. Save the request below as
 `scratch/baseline-experiment.json`, then invoke `record-experiment` with that request using the
 exact CLI listed in the shared Runtime tool contract below. Record it exactly once with
-`action="baseline"`, `before=null`, and its complete measured Kernel/Trial/Result subject as `after`.
+`action="baseline"`, `before=null`, and its measured Kernel Trial ID as `after`.
 The receipt returns an `experiment_id`; use that ID when completing the Direction and in every
 Finding supported by this construction. This creates the Experiment anchor only; it does not register `v0`.
-For later repairs use `keep_after` or `restore_before` with complete `before` and `after` subjects.
+For later repairs use `keep_after` or `restore_before` with measured `before` and `after` Trial IDs.
 
 ```json
 {
@@ -131,11 +131,7 @@ For later repairs use `keep_after` or `restore_before` with complete `before` an
   "hypothesis": "the direct DSL implementation satisfies the public contract",
   "change": "established the first measured DSL candidate; state whether the seed was unchanged",
   "before": null,
-  "after": {
-    "kernel_artifact_digest": "sha256:<kernel>",
-    "kernel_trial_id": "gtrial_<id>",
-    "gateway_result_digests": ["sha256:<evaluate-result>"]
-  },
+  "after": {"kernel_trial_id": "gtrial_<id>"},
   "evidence": "factual correctness and latency returned by the evaluation",
   "analysis": "whether the first construction held and what must be repaired",
   "action": "baseline"
