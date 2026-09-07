@@ -205,6 +205,29 @@ def test_prompts_use_only_real_runtime_tool_names() -> None:
     assert "wiki_read" not in text
 
 
+def test_evaluate_prompt_explains_overrides_and_full_contract_requirement() -> None:
+    text = (CORE_ROOT / "prompts/attempt-tools.md").read_text(encoding="utf-8")
+    requests = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", text, re.DOTALL)]
+    evaluations = [request for request in requests if request.get("operation") == "evaluate"]
+
+    assert {"operation": "evaluate"} in evaluations
+    assert {"operation": "evaluate", "mode": "correctness_only"} in evaluations
+    assert {
+        "operation": "evaluate",
+        "mode": "correctness_only",
+        "input_path": "scratch/custom-input.py",
+        "shapes_path": "scratch/custom-shapes.json",
+    } in evaluations
+    assert all(
+        request.get("mode", "full") in {"full", "correctness_only"} for request in evaluations
+    )
+    assert "without performance measurement or automatic profiling" in text
+    assert "requires a successful full evaluation using" in text
+    assert "input_scope" in text
+    assert "input_py" in text and "shapes" in text
+    assert "no further fields" not in text
+
+
 def test_prompts_do_not_reveal_product_or_control_plane_identity() -> None:
     text = "\n".join(path.read_text(encoding="utf-8") for path in CORE_ROOT.glob("prompts/*.md"))
 

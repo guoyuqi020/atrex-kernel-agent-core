@@ -14,4 +14,6 @@ configuration is updated too. Do not store credentials, temporary requests, or r
 - episode.md: Optimizer methodology.
 - framework_baseline.md: Bootstrap methodology.
 - generalize_agent_problem.md: public operator-contract generation.
-- attempt-tools.md: CLI instructions and request/report examples shared by Attempts and Bootstrap.
+- attempt-tools.md: CLI instructions and request/report examples shared by Attempts and Bootstrap,
+  including custom-input and correctness-only evaluation, Evaluate comparisons, and local file-error repair; depends on
+  `src/runtime_tools.py`, `src/tool_contracts.py`, and the trusted Runtime request/report contracts.

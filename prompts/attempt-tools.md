@@ -17,8 +17,10 @@ python3 {{RUNTIME_TOOL}} load-experiment --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} attempt-report --request scratch/<request>.json
 ```
 
-`gateway-execute` automatically attaches the exact current `work/kernel` tree and trusted Runtime
-fields. Never embed a candidate, schema version, capability, or attempt ID in its request.
+`gateway-execute` uploads the current `work/kernel` tree by default. For `evaluate`,
+`candidate_path` may select Candidate B and `comparison.baseline_path` selects baseline A when
+comparing. Trusted Runtime fields are injected automatically. Never embed `baseline` or `candidate`
+source payloads, a schema version, capability, or attempt ID in the request.
 Runtime-local history queries use their dedicated commands above;
 do not pass `kernel_trial_show`, `kernel_artifact_read`, or
 `result_artifact_read` to `gateway-execute`.
@@ -28,7 +30,9 @@ each is optional with the default shown in parentheses unless marked required, a
 is normally the right choice:
 
 ```text
-evaluate     no further fields; Runtime measures all contract Shapes in batches and merges results
+evaluate     candidate_path (work/kernel), mode=full|correctness_only (full),
+             input_py or input_path, shapes or shapes_path; omitted input/Shapes reuse that component;
+             comparison={method:abba, baseline_path:required, repeats:2..20 (2)} (omitted)
 profile      level=survey|sol|deep (sol), profiler=ncu|rocprofv3, counters=[], source (false),
              kernel_name or kernel_regex, launch_skip, launch_count, top_kernels, shape_id
 dev          command (required), file_paths=[], env_vars={}, job_timeout_s (<=600), recycle (true),
@@ -46,6 +50,36 @@ extra sources through `file_paths`, a list of workspace-relative paths; each nam
 under its basename alone and may not shadow a `work/kernel` path, which is why a multi-line probe
 does not need to be smuggled through `command`. Prefer `file_paths` over a heredoc inside `command`.
 
+For `evaluate`, `input_path` names your UTF-8 Python input generator (at most 128 KiB), and
+`shapes_path` names your UTF-8 JSON object of Agate Shape records (at most 256 KiB). Use safe
+workspace-relative paths to regular files, such as `scratch/custom-input.py` and
+`scratch/custom-shapes.json`; links and Runtime control paths are rejected. The tool uploads their
+contents as `input_py` and `shapes` before computing the retry identity. Inline `input_py` and
+`shapes` are also supported; do not provide both forms of the same field. Shape IDs must be integer
+strings and each record must be an object compatible with the input generator. Either override may
+be supplied independently, and an omitted component is reused from the private contract without
+being exposed. Custom source must implement the Agate `_make_inputs` interface for the public ABI.
+For `evaluate`, `mode: "correctness_only"` checks correctness without performance measurement or automatic profiling.
+Custom inputs or Shapes and correctness-only calls provide exploratory evidence; before
+`candidate_ready`, the exact current Kernel still requires a successful full evaluation using
+the trusted contract, requested with `{"operation":"evaluate"}`.
+
+`evaluate` accepts optional `candidate_path`; omitting it uploads the current `work/kernel` tree.
+To compare against baseline A, add `comparison` with `method: "abba"` and required
+`baseline_path` inside that object. Both `comparison.baseline_path` and `candidate_path` must be
+safe workspace-relative paths to either a regular `.py` file or a Kernel source directory. A single
+Python file is uploaded as `kernel.py`; a directory preserves its relative file names. Links,
+absolute/traversal paths, Runtime control paths, and empty source directories are rejected. The tool uploads
+both sources and computes the request identity from their contents, not the local paths.
+Do not embed `baseline` or `candidate` source payloads in the request.
+Both sides use the same evaluation inputs. `comparison.repeats` counts observations per side:
+the default 2 produces A, B, B, A.
+Values from 2 to 20 are accepted only when the schedule fits Runtime's allocation budget.
+Each Shape batch runs both sides within one allocation; different Shape batches may use different
+allocations. ABBA requires full correctness and timing; omit `mode` or set it to `"full"`.
+It is always exploratory, does not retain or promote a Kernel or Agent, and does not satisfy the
+full trusted-contract Evaluate required for `candidate_ready`.
+
 A Gateway call blocks until its Job reaches a terminal state, which for `evaluate`, `profile`,
 `check`, and `disassemble` may take a long time. Let the command finish and keep stderr out of the
 JSON on stdout, because appending `2>&1` corrupts the result you then have to parse. Runtime owns Job
@@ -55,21 +89,30 @@ replays its recorded Result without spending GPU time or call budget.
 
 An expected tool failure prints one JSON Object and exits nonzero. For request mistakes, repair the
 compact `issues` first, then use the operation-specific `request_schema`; an unknown operation
-returns `supported_operations`. Runtime Journal and local Report errors may also return bounded `recovery`
+returns `supported_operations`. Local input-file errors identify the failing `input_path` or
+`shapes_path` in `issues[].path`; source errors identify `comparison.baseline_path` or `candidate_path`.
+Evaluate's `request_schema` describes `full`/`correctness_only`, inline
+and file forms, and their mutual-exclusion constraints. Supplying `comparison` permits only
+`mode: "full"`; its nested schema requires `method` and `baseline_path`, and bounds `repeats`.
+Comparison errors identify `comparison.method`, `comparison.baseline_path`, or `comparison.repeats`.
+Follow the bounded, field-specific
+`recovery` steps to repair the file, path, encoding, JSON object, or conflicting field, then retry.
+For Evaluate errors returned by Runtime, its supplied `issues`, `request_schema`, and `recovery`
+are preserved; use that guidance. Runtime Journal and local Report errors may also return bounded `recovery`
 steps naming a visibility-safe list/load tool; execute those steps instead of guessing an ID. A
 `candidate_rejected` result created before Job execution includes safe source-validation `details`
 that should be fixed directly. A hidden-case failure deliberately omits exact inputs; repair it only
 from the public contract, opaque per-Shape results, and safe profiling evidence.
 
-Evaluation results identify private cases only by numeric `shape_id`, such as `"0"` or `"1"`, and
-never reveal their inputs. After an evaluation, a profile request may add
+Contract evaluation results identify private cases only by numeric `shape_id`, such as `"0"` or `"1"`,
+and never reveal their inputs. After a contract evaluation, a profile request may add
 `"shape_id":"<numeric id>"` to profile that one real case; omitting it selects one evaluator-owned
 case and the Profile result reports the selected number. Do not infer or reconstruct case inputs
 from ids or measurements.
 
 A case passes when every output is within `atol=0.01` and `rtol=0.05` of the reference, so compare
 the reported `max_abs_err` and `max_rel_err` against those thresholds to see how much margin a
-candidate actually has. Every Shape is checked on each evaluation, but each one draws fresh random
+candidate actually has. Every selected Shape is checked on each evaluation, but each one draws fresh random
 inputs, and the authoritative gate that seals a Kernel draws more of them per Shape than an
 exploratory evaluate. A single passing evaluation near either threshold is therefore weak evidence:
 treat a thin margin as a defect to fix rather than a pass, because the sealing gate rejects a
@@ -97,6 +140,45 @@ Example exploratory evaluation request:
 {"operation": "evaluate"}
 ```
 
+Correctness-only evaluation on the contract inputs and Shapes:
+
+```json
+{"operation": "evaluate", "mode": "correctness_only"}
+```
+
+Correctness-only evaluation using your own input generator and Shape records:
+
+```json
+{"operation": "evaluate", "mode": "correctness_only", "input_path": "scratch/custom-input.py", "shapes_path": "scratch/custom-shapes.json"}
+```
+
+Omit `mode` or set `"mode":"full"` to measure performance for your custom cases. These requests
+retain Kernel Trial and Result Artifact identities. Their nested result records the effective
+`mode` and `input_scope` (`"custom"` when either component was supplied, otherwise `"contract"`).
+Correctness-only results contain no performance measurements; do not interpret missing latency as zero.
+
+Example Evaluate comparison using a saved baseline source and the current Kernel:
+
+```json
+{"operation": "evaluate", "comparison": {"method": "abba", "baseline_path": "scratch/baseline.py"} }
+```
+
+An ABBA comparison selecting both source directories and your own input generator and Shapes:
+
+```json
+{"operation": "evaluate", "candidate_path": "scratch/candidate-kernel", "comparison": {"method": "abba", "baseline_path": "scratch/baseline-kernel", "repeats": 2}, "input_path": "scratch/custom-input.py", "shapes_path": "scratch/custom-shapes.json"}
+```
+
+Comparison responses retain `operation: "evaluate"` and identify the method through
+`result.comparison: {"method":"abba","repeats":2}` (using the actual repeat count).
+The returned Kernel Trial and Kernel Artifact identities belong to B. The nested result names
+`baseline_kernel_artifact_digest` for A, provides `baseline` and
+`candidate` correctness and latency summaries, and reports `speedup` as A/B and `improvement_pct`
+as (A-B)/A × 100. It retains `schedule` and all `measurements`, plus `mode` and `input_scope`.
+Read the retained comparison with `result-artifact-read`, or find its digest with
+`kernel-trial-show`; comparison results do not create an ordinary Evaluate record. Record the comparison as
+experiment evidence, then run a standard full Evaluate before nomination.
+
 Runtime-local query commands infer their operation from the command name. Their request JSON must
 not contain `operation`. Examples are `{"kernel_trial_id":"gtrial_<id>"}` for
 `kernel-trial-show`,
@@ -110,8 +192,9 @@ Use `result-artifact-read` only for the Evaluate, Profile, or other result that 
 `result-artifact-read` returns `{"operation", "status", "result"}`; the measurement lives under
 `result`, not beside those keys. `operation`, `status`, and `result` are the same canonical values
 returned by the original `gateway-execute` call. For an Evaluate, `result` holds `correct`,
-`correctness`, `failures`, `latency_us_by_shape` keyed by opaque Shape ID, and the aggregates
-`latency_us_arith_mean` and `latency_us_geomean`. It does not reveal private evaluator inputs or
+`correctness`, and `failures`; a full evaluation also reports `latency_us_by_shape` keyed by opaque
+Shape ID and the aggregates `latency_us_arith_mean` and `latency_us_geomean`. Custom and correctness-only
+evaluations also carry `mode` and `input_scope`. It does not reveal private evaluator inputs or
 hidden-case details.
 For `kernel-artifact-read`, `file` is a required destination under `scratch/`; `artifact_file`
 selects the source inside the Artifact and defaults to the destination basename. Source content is

@@ -35,6 +35,98 @@ def _subject() -> dict[str, Any]:
     return _object({"kernel_trial_id": _identifier("gtrial_")})
 
 
+def _evaluate_schema() -> dict[str, Any]:
+    """Describe Agent inputs, including file helpers resolved before the HTTP request."""
+    schema = _object(
+        {
+            "operation": {"const": "evaluate"},
+            "mode": {"type": "string", "enum": ["full", "correctness_only"], "default": "full"},
+            "candidate_path": {
+                **_text(),
+                "description": (
+                    "Optional workspace-relative Candidate .py file or Kernel directory; "
+                    "Defaults to work/kernel. No absolute/traversal paths, links, or .runtime."
+                ),
+            },
+            "comparison": {
+                "anyOf": [
+                    _object(
+                        {
+                            "method": {"const": "abba"},
+                            "baseline_path": {
+                                **_text(),
+                                "description": (
+                                    "Workspace-relative baseline A .py file or Kernel directory. "
+                                    "A single .py file is uploaded as kernel.py. "
+                                    "No absolute/traversal paths, links, or .runtime paths."
+                                ),
+                            },
+                            "repeats": {
+                                "type": "integer",
+                                "minimum": 2,
+                                "maximum": 20,
+                                "default": 2,
+                                "description": (
+                                    "Observations per side; 2 schedules A, B, B, A. "
+                                    "The schedule must fit Runtime's allocation budget."
+                                ),
+                            },
+                        },
+                        required=("method", "baseline_path"),
+                    ),
+                    {"type": "null"},
+                ],
+                "description": "Optional exploratory A/B comparison; requires full mode.",
+            },
+            "input_py": {
+                "anyOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 131_072},
+                    {"type": "null"},
+                ],
+                "description": "Nonblank Agate _make_inputs source, at most 128 KiB in UTF-8.",
+            },
+            "shapes": {
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "minProperties": 1,
+                        "additionalProperties": {"type": "object"},
+                    },
+                    {"type": "null"},
+                ],
+                "description": (
+                    "Shape IDs must be integer-parseable strings; each record must be an "
+                    "Agate Shape object compatible with the input generator."
+                ),
+            },
+            "input_path": {
+                **_text(),
+                "description": (
+                    "Workspace-relative regular UTF-8 source file, at most 128 KiB. "
+                    "No absolute/traversal paths, links, or .runtime control paths."
+                ),
+            },
+            "shapes_path": {
+                **_text(),
+                "description": (
+                    "Workspace-relative regular UTF-8 JSON file, at most 256 KiB; contents "
+                    "must match shapes. No absolute/traversal paths, links, or .runtime paths."
+                ),
+            },
+        },
+        required=("operation",),
+    )
+    schema["allOf"] = [
+        {"not": {"required": ["input_py", "input_path"]}},
+        {"not": {"required": ["shapes", "shapes_path"]}},
+        {
+            "if": {"required": ["comparison"], "properties": {"comparison": {"type": "object"}}},
+            "then": {"properties": {"mode": {"const": "full"}}},
+        },
+    ]
+    return schema
+
+
 def _direction_schema() -> dict[str, Any]:
     proposal = _object(
         {
@@ -49,9 +141,7 @@ def _direction_schema() -> dict[str, Any]:
     )
     update = _object(
         {
-            "action": {
-                "enum": ["start", "complete", "abandon", "block", "defer"]
-            },
+            "action": {"enum": ["start", "complete", "abandon", "block", "defer"]},
             "direction_id": _identifier("direction_"),
             "analysis": _text(),
         }
@@ -123,12 +213,8 @@ def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
                     "risks": {"type": "array", "items": _text()},
                 }
             ),
-            "final_candidate": {
-                "oneOf": [_object({"change_summary": _text()}), {"type": "null"}]
-            },
-            "evidence_summary": _object(
-                {"correctness": _text(), "performance": _text()}
-            ),
+            "final_candidate": {"oneOf": [_object({"change_summary": _text()}), {"type": "null"}]},
+            "evidence_summary": _object({"correctness": _text(), "performance": _text()}),
             "profile_evidence": {"oneOf": [profile, {"type": "null"}]},
             "analysis": _text(),
             "knowledge_used": {
@@ -192,8 +278,11 @@ def tool_request_schema(
     command: str,
     *,
     allow_baseline: bool = False,
+    operation: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the exact local Agent request contract when Core owns validation."""
+    if command == "gateway-execute" and operation == "evaluate":
+        return _evaluate_schema()
     if command == "record-experiment":
         return _experiment_schema(allow_baseline=allow_baseline)
     if command == "attempt-report":
@@ -300,9 +389,74 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
 }
 
 
-def tool_recovery(command: str) -> list[dict[str, Any]] | None:
+def tool_recovery(
+    command: str, *, operation: str | None = None, detail: str = ""
+) -> list[dict[str, Any]] | None:
     """Return bounded, visibility-safe next actions for repairing one local request."""
+    if command == "gateway-execute" and operation == "evaluate":
+        return _evaluate_recovery(detail)
     return _RECOVERY.get(command)
+
+
+def _evaluate_recovery(detail: str) -> list[dict[str, Any]]:
+    issue = local_validation_issue(detail)
+    field, code = issue["path"], issue["code"]
+    if code == "mutually_exclusive":
+        other = "input_py" if field == "input_path" else "shapes"
+        instruction = f"Keep only one of {field} and {other}; remove the other field."
+    elif field == "shapes_path" and code in {"invalid_json", "invalid_shape_file"}:
+        instruction = (
+            "Fix the shapes_path file as a non-empty JSON object keyed by numeric Shape IDs, "
+            "not an array or quoted JSON string; each value must be an Agate Shape object "
+            "compatible with the input generator (input_kwargs and optional init_kwargs)."
+        )
+    elif code == "invalid_encoding":
+        instruction = f"Save the file named by {field} as UTF-8 text, not binary data."
+    elif code == "limit_exceeded" and field in {"input_path", "shapes_path"}:
+        limit = "128 KiB" if field == "input_path" else "256 KiB"
+        instruction = f"Reduce the file named by {field} to at most {limit}; count UTF-8 bytes."
+    elif field in {"input_path", "shapes_path"}:
+        instruction = (
+            f"Set {field} to an existing regular UTF-8 file under real workspace directories, "
+            "for example scratch/custom-input.py or scratch/custom-shapes.json. "
+            "Do not use absolute paths, dot/traversal components, symlinks, or .runtime files."
+        )
+    elif field in {"comparison.baseline_path", "candidate_path"}:
+        instruction = (
+            f"Set {field} to a real workspace-relative .py file or Kernel directory. "
+            "A single .py file is uploaded as kernel.py. Do not use absolute/traversal paths, "
+            "symlinks, or .runtime files. comparison.baseline_path is required for ABBA; "
+            "omit candidate_path to use work/kernel."
+        )
+    elif field.startswith("comparison") or field in {"baseline_path", "repeats"}:
+        instruction = (
+            "Set comparison.method to abba and name a workspace .py file or Kernel "
+            "directory in comparison.baseline_path. Set comparison.repeats from 2 to 20 "
+            "(default 2). ABBA requires full mode (normally omitted); "
+            "use 2 when a larger schedule exceeds Runtime's allocation budget."
+        )
+    elif field == "mode" and "comparison" in detail:
+        instruction = (
+            "Use mode full for comparison.method abba. To check correctness only, "
+            "remove comparison and set mode to correctness_only."
+        )
+    else:
+        instruction = (
+            "Repair the fields identified in issues using request_schema. "
+            "Evaluate accepts full or correctness_only, not correctness; file helpers and "
+            "inline forms of the same input are mutually exclusive."
+        )
+    return [
+        {"instruction": instruction},
+        {
+            "instruction": (
+                "Save the corrected Evaluate request "
+                "under scratch/ and invoke gateway-execute again. "
+                "The tool rereads input files and derives the retry identity from their contents; "
+                "do not supply idempotency_key or blindly retry an unchanged invalid request."
+            )
+        },
+    ]
 
 
 _PATH_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -331,6 +485,34 @@ _PATH_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 
 def local_validation_issue(detail: str) -> dict[str, str]:
     """Normalize an existing precise validator message into a compact issue object."""
+    evaluate_field = re.match(
+        r"^evaluate "
+        r"(comparison(?:\.(?:baseline_path|method|repeats))?|"
+        r"input_path|shapes_path|input_py|shapes|mode|baseline_path|candidate_path|repeats)\b",
+        detail,
+    )
+    if evaluate_field is not None:
+        if "mutually exclusive" in detail:
+            code = "mutually_exclusive"
+        elif "valid JSON" in detail:
+            code = "invalid_json"
+        elif "JSON object" in detail:
+            code = "invalid_shape_file"
+        elif "contain UTF-8" in detail:
+            code = "invalid_encoding"
+        elif "byte limit" in detail:
+            code = "limit_exceeded"
+        elif (
+            "workspace-relative path" in detail
+            or "control files" in detail
+            or "symbolic links" in detail
+        ):
+            code = "invalid_path"
+        elif "regular file" in detail or "Kernel directory" in detail:
+            code = "invalid_file"
+        else:
+            code = "invalid_value"
+        return {"path": evaluate_field.group(1), "code": code, "message": detail}
     path = "$"
     structured_path = re.search(
         r"Attempt report ([A-Za-z_][A-Za-z0-9_.\[\]]*)",
@@ -343,9 +525,7 @@ def local_validation_issue(detail: str) -> dict[str, str]:
             path = candidate
             break
     lowered = detail.lower()
-    if "fields must be exactly" in lowered or (
-        "unknown" in lowered and "field" in lowered
-    ):
+    if "fields must be exactly" in lowered or ("unknown" in lowered and "field" in lowered):
         code = "invalid_fields"
     elif "outside" in lowered or "unknown" in lowered:
         code = "not_visible"

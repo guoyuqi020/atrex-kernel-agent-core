@@ -60,7 +60,13 @@ _ATTEMPT_COMMANDS = (
     "load-experiment",
     "attempt-report",
 )
-_RESERVED_REQUEST_FIELDS = {"schema_version", "attempt_id", "candidate", "idempotency_key"}
+_RESERVED_REQUEST_FIELDS = {
+    "schema_version",
+    "attempt_id",
+    "baseline",
+    "candidate",
+    "idempotency_key",
+}
 _EXPERIMENT_FIELDS = {
     "direction_id",
     "name",
@@ -108,6 +114,8 @@ _REPORT_FIELDS = {
 RuntimeToolContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
 
 _MAX_REQUEST_BYTES = 256 * 1024
+_MAX_EVALUATE_INPUT_BYTES = 128 * 1024
+_MAX_EVALUATE_SHAPES_BYTES = 256 * 1024
 _MAX_CANDIDATE_FILES = 4096
 _MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -525,13 +533,169 @@ def gateway_execute(context: RuntimeToolContext, request: dict[str, Any]) -> dic
     if operation not in _GATEWAY_EXECUTE_OPERATIONS:
         raise ValueError(f"unsupported gateway-execute operation: {operation}")
     value = {"schema_version": 2, "attempt_id": context.attempt_id, **request}
+    if operation == "evaluate":
+        _evaluate_candidates(context, value)
+        _evaluate_overrides(context, value)
     if operation == "dev":
         value["files"] = _dev_files(context, value)
-    if operation in _CANDIDATE_OPERATIONS:
+    if operation in _CANDIDATE_OPERATIONS and operation != "evaluate":
         value["candidate"] = _candidate(context.working_kernel)
     value["idempotency_key"] = _idempotency_key("gateway", value)
     response = _post(context.gateway_url, context.gateway_capability, "/v1/operations", value)
     return _agent_gateway_response(response, request)
+
+
+def _evaluate_candidates(context: RuntimeToolContext, value: dict[str, Any]) -> None:
+    """Resolve an optional Candidate source and ABBA baseline before request hashing."""
+    for field in ("baseline_path", "repeats"):
+        if field in value:
+            raise ValueError(f"evaluate {field} is not a top-level field; use comparison.{field}")
+    comparison = value.get("comparison")
+    if comparison is not None:
+        if not isinstance(comparison, dict):
+            raise ValueError("evaluate comparison must be a JSON object or null")
+        if comparison.get("method") != "abba":
+            raise ValueError("evaluate comparison.method must be abba")
+        if set(comparison) - {"method", "baseline_path", "repeats"}:
+            raise ValueError(
+                "evaluate comparison has unknown fields; use method, baseline_path, and repeats"
+            )
+        repeats = comparison.get("repeats", 2)
+        if isinstance(repeats, bool) or not isinstance(repeats, int) or not 2 <= repeats <= 20:
+            raise ValueError("evaluate comparison.repeats must be an integer from 2 to 20")
+        if value.get("mode", "full") != "full":
+            raise ValueError("evaluate mode must be full when comparison is supplied")
+        wire_comparison = dict(comparison)
+        value["baseline"] = _evaluate_candidate(
+            context, wire_comparison.pop("baseline_path", None), "comparison.baseline_path"
+        )
+        value["comparison"] = wire_comparison
+    value["candidate"] = (
+        _evaluate_candidate(context, value.pop("candidate_path"), "candidate_path")
+        if "candidate_path" in value
+        else _candidate(context.working_kernel)
+    )
+
+
+def _evaluate_candidate(context: RuntimeToolContext, raw: object, field: str) -> dict[str, object]:
+    """Snapshot one workspace Python file or source directory for Evaluate."""
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        raise ValueError(f"evaluate {field} requires a non-empty workspace-relative path")
+    relative = PurePosixPath(raw)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in raw.split("/")):
+        raise ValueError(f"evaluate {field} must be a safe workspace-relative path")
+    if relative.parts[0] == ".runtime":
+        raise ValueError(f"evaluate {field} must not read Runtime control files")
+    source = context.workspace.resolve()
+    try:
+        for part in relative.parts:
+            source /= part
+            if stat.S_ISLNK(source.lstat().st_mode):
+                raise ValueError(f"evaluate {field} must not contain symbolic links")
+        if source.is_dir():
+            try:
+                return _candidate(source)
+            except ValueError as error:
+                raise ValueError(f"evaluate {field}: {error}") from error
+        if not source.is_file() or source.suffix != ".py":
+            raise ValueError(f"evaluate {field} must name a regular .py file or Kernel directory")
+    except OSError as error:
+        raise ValueError(
+            f"evaluate {field} must name an existing .py file or Kernel directory"
+        ) from error
+    content = _evaluate_override_text(context, raw, field, max_bytes=_MAX_CANDIDATE_BYTES).encode(
+        "utf-8"
+    )
+    return {
+        "files": [
+            {"path": "kernel.py", "content_base64": base64.b64encode(content).decode("ascii")}
+        ]
+    }
+
+
+def _evaluate_override_text(
+    context: RuntimeToolContext,
+    raw: object,
+    field: str,
+    *,
+    max_bytes: int,
+    operation: str = "evaluate",
+) -> str:
+    """Read one bounded workspace file without following links or control paths."""
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        raise ValueError(f"{operation} {field} must be a non-empty workspace-relative path")
+    relative = PurePosixPath(raw)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in raw.split("/")):
+        raise ValueError(f"{operation} {field} must be a safe workspace-relative path")
+    if relative.parts[0] == ".runtime":
+        raise ValueError(f"{operation} {field} must not read Runtime control files")
+    descriptor = os.open(context.workspace.resolve(), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in relative.parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        source = os.open(
+            relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor
+        )
+        try:
+            info = os.fstat(source)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"{operation} {field} must name a regular file")
+            if info.st_size > max_bytes:
+                raise ValueError(f"{operation} {field} exceeds its byte limit")
+            with os.fdopen(source, "rb", closefd=False) as stream:
+                content = stream.read(max_bytes + 1)
+            if len(content) > max_bytes:
+                raise ValueError(f"{operation} {field} exceeds its byte limit")
+        finally:
+            os.close(source)
+    except OSError as error:
+        raise ValueError(
+            f"{operation} {field} must name an existing regular file "
+            "under real workspace directories"
+        ) from error
+    finally:
+        os.close(descriptor)
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"{operation} {field} must contain UTF-8 text") from error
+
+
+def _evaluate_overrides(
+    context: RuntimeToolContext, value: dict[str, Any], *, operation: str = "evaluate"
+) -> None:
+    """Expand file inputs before hashing the exact request sent to Runtime."""
+    for path_field, inline_field in (("input_path", "input_py"), ("shapes_path", "shapes")):
+        if path_field not in value:
+            continue
+        if inline_field in value:
+            raise ValueError(f"{operation} {path_field} and {inline_field} are mutually exclusive")
+        content = _evaluate_override_text(
+            context,
+            value.pop(path_field),
+            path_field,
+            operation=operation,
+            max_bytes=(
+                _MAX_EVALUATE_INPUT_BYTES
+                if inline_field == "input_py"
+                else _MAX_EVALUATE_SHAPES_BYTES
+            ),
+        )
+        if inline_field == "shapes":
+            try:
+                shapes = json.loads(content)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"{operation} shapes_path must contain valid JSON "
+                    f"(line {error.lineno}, column {error.colno}: {error.msg})"
+                ) from error
+            if not isinstance(shapes, dict):
+                raise ValueError(f"{operation} shapes_path must contain a JSON object")
+            value[inline_field] = shapes
+        else:
+            value[inline_field] = content
 
 
 def _dev_files(context: RuntimeToolContext, value: dict[str, Any]) -> list[dict[str, str]]:
@@ -1345,6 +1509,7 @@ def _augment_agent_error(
     *,
     detail: str,
     context: RuntimeToolContext | None = None,
+    operation: str | None = None,
 ) -> dict[str, Any]:
     """Add local repair contracts without replacing more authoritative service guidance."""
     if command == "kernel-artifact-read" and isinstance(response.get("issues"), list):
@@ -1360,11 +1525,12 @@ def _augment_agent_error(
     schema = tool_request_schema(
         command,
         allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
+        operation=operation,
     )
-    if schema is not None:
+    if schema is not None and (command != "gateway-execute" or "request_schema" not in response):
         response["request_schema"] = schema
     if "recovery" not in response:
-        recovery = tool_recovery(command)
+        recovery = tool_recovery(command, operation=operation, detail=detail)
         if recovery is not None:
             response["recovery"] = recovery
     return response
@@ -1378,9 +1544,12 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--request", required=True, type=Path)
     args = parser.parse_args(argv)
     context: RuntimeToolContext | None = None
+    operation: str | None = None
     try:
         context = _context(args.command)
         request = _request_object(context, args.request, args.command)
+        requested_operation = request.get("operation")
+        operation = requested_operation if isinstance(requested_operation, str) else None
         if args.command == "gateway-execute":
             result = gateway_execute(context, request)
         elif args.command in _RUNTIME_QUERY_COMMANDS:
@@ -1414,6 +1583,7 @@ def main(argv: list[str] | None = None) -> int:
                 response,
                 detail=str(response.get("detail", "invalid request")),
                 context=context,
+                operation=operation,
             )
         print(json.dumps(response, ensure_ascii=False, allow_nan=False, sort_keys=True))
         return 2
@@ -1431,6 +1601,7 @@ def main(argv: list[str] | None = None) -> int:
                 response,
                 detail=str(error),
                 context=context,
+                operation=operation,
             )
         print(json.dumps(response, ensure_ascii=False, allow_nan=False, sort_keys=True))
         return 2
