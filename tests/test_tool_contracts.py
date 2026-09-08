@@ -32,6 +32,7 @@ def test_complex_local_schemas_track_validator_top_level_fields() -> None:
         "keep_after",
         "restore_before",
         "abandon_direction",
+        "adopt",
     ]
     subject = experiment["properties"]["before"]["oneOf"][0]
     assert subject["properties"] == {
@@ -52,9 +53,9 @@ def test_complex_local_schemas_track_validator_top_level_fields() -> None:
         "candidate_ready",
         "blocked",
     ]
-    profile_result = bootstrap_report["properties"]["profile_evidence"]["oneOf"][0][
-        "properties"
-    ]["supporting_results"]["items"]
+    profile_result = bootstrap_report["properties"]["profile_evidence"]["oneOf"][0]["properties"][
+        "supporting_results"
+    ]["items"]
     assert profile_result["properties"]["operation"] == {"const": "profile"}
 
 

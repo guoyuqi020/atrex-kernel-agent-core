@@ -254,6 +254,7 @@ def write_trace(
     config: AgentConfig,
     *,
     replace_live: bool = False,
+    keep_live: bool = False,
     system_prompt: str = "",
 ) -> None:
     """Persist unredacted Session input and Provider files plus a normalized usage index."""
@@ -299,6 +300,8 @@ def write_trace(
         shutil.rmtree(trace_root)
     trace_root.mkdir(mode=0o700)
     filtered_stdout = filter_provider_stdout(result.stdout)
+    if keep_live:
+        atomic_text(trace_root / _LIVE_TRACE_MARKER, "unsealed\n")
     atomic_text(trace_root / "input/prompt.md", prompt)
     if system_prompt:
         atomic_text(trace_root / "input/system-prompt.md", system_prompt)
@@ -393,8 +396,20 @@ def execute_agent_session(
     *,
     system_prompt: str = "",
     on_success: Callable[[], None] | None = None,
+    completion_check: Callable[[float], str | None] | None = None,
 ) -> int:
     """Run one backend session and always persist its provider-usage report."""
+    if completion_check is not None:
+        from .session_segments import execute_report_completion
+
+        return execute_report_completion(
+            context,
+            config,
+            prompt,
+            system_prompt=system_prompt,
+            on_success=on_success,
+            completion_check=completion_check,
+        )
     runtime = backends.build_agent_runtime(config.agent_backend)
     result: backends.AgentRunResult | None = None
     session_id = str(uuid.uuid4())

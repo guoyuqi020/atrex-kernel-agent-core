@@ -113,7 +113,7 @@ _REPORT_FIELDS = {
 }
 RuntimeToolContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
 
-_MAX_REQUEST_BYTES = 256 * 1024
+_MAX_REQUEST_BYTES = 1024 * 1024
 _MAX_EVALUATE_INPUT_BYTES = 128 * 1024
 _MAX_EVALUATE_SHAPES_BYTES = 256 * 1024
 _MAX_CANDIDATE_FILES = 4096
@@ -1049,11 +1049,22 @@ def _validate_experiment_comparison(
         return
     if (before is None) != (after is None):
         raise ValueError("Experiment before and after must both be present or both be null")
-    if request.get("action") in {"keep_after", "restore_before"} and before is None:
-        raise ValueError("Experiment keep_after/restore_before requires before and after evidence")
+    if request.get("action") in {"keep_after", "restore_before", "adopt"} and before is None:
+        raise ValueError(
+            "Experiment keep_after/restore_before/adopt requires before and after evidence"
+        )
 
 
 def record_experiment(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("action") == "adopt":
+        for side in ("before", "after"):
+            subject = request.get(side)
+            if (
+                not isinstance(subject, dict)
+                or set(subject) != {"kernel_trial_id"}
+                or not _is_kernel_trial_id(subject.get("kernel_trial_id"))
+            ):
+                raise ValueError(f"Experiment adopt requires a real {side} Kernel Trial reference")
     return runtime_journal(context, "record-experiment", request)
 
 
@@ -1132,6 +1143,7 @@ def _validate_experiment_entries(
             "keep_after",
             "restore_before",
             "abandon_direction",
+            "adopt",
         }
         if allow_baseline:
             allowed_actions.add("baseline")
@@ -1179,6 +1191,9 @@ def load_experiment(
 def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
     if set(request) != _REPORT_FIELDS:
         raise ValueError(f"Attempt report fields must be exactly {sorted(_REPORT_FIELDS)}")
+    status = request.get("status")
+    if not isinstance(status, str) or status not in {"candidate_ready", "pivot", "blocked"}:
+        raise ValueError("Attempt report status is invalid")
     snapshot = runtime_journal(context, "_journal-snapshot", {})
     if set(snapshot) != {
         "direction_events",
@@ -1191,9 +1206,13 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     direction_event_values = snapshot.get("direction_events")
     direction_values = snapshot.get("directions")
     citable_profile_results = snapshot.get("citable_profile_results")
-    if not isinstance(experiment_values, list) or not experiment_values:
+    if not isinstance(experiment_values, list):
+        raise ValueError("Runtime Experiment Journal must be an array")
+    if status == "candidate_ready" and not experiment_values:
         raise ValueError("Attempt report requires at least one Runtime Experiment")
-    if not isinstance(direction_event_values, list) or not direction_event_values:
+    if not isinstance(direction_event_values, list):
+        raise ValueError("Runtime Direction Journal must be an array")
+    if status == "candidate_ready" and not direction_event_values:
         raise ValueError("Attempt report requires at least one Runtime Direction event")
     if not isinstance(direction_values, list):
         raise ValueError("Runtime returned invalid normalized Directions")
@@ -1229,9 +1248,6 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         raise ValueError(
             f"Attempt report cannot leave any Direction in progress: {in_progress_direction_ids}"
         )
-    status = request.get("status")
-    if status not in {"candidate_ready", "pivot", "blocked"}:
-        raise ValueError("Attempt report status is invalid")
     if isinstance(context, RuntimeLineageBootstrapContext):
         if status == "pivot":
             raise ValueError("Bootstrap Attempt report status must be candidate_ready or blocked")
@@ -1391,8 +1407,10 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         {"record_id", "finding", "application"},
     )
     findings = request.get("findings")
-    if not isinstance(findings, list) or not findings:
-        raise ValueError("Attempt report findings must be a non-empty array")
+    if not isinstance(findings, list):
+        raise ValueError("Attempt report findings must be an array")
+    if status == "candidate_ready" and not findings:
+        raise ValueError("candidate_ready Attempt report findings must be a non-empty array")
     journal_experiment_ids = {experiment["experiment_id"] for experiment in experiments}
     for index, item in enumerate(findings):
         finding = _exact_object(
@@ -1446,6 +1464,19 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         "experiments": experiments,
         "direction_events": direction_events,
     }
+    max_report_bytes = int(os.environ.get("ATREX_ATTEMPT_REPORT_MAX_BYTES", str(1024 * 1024)))
+    if max_report_bytes <= 0:
+        raise ValueError("Attempt report byte limit must be positive")
+    report_bytes = len(
+        json.dumps(
+            report, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    )
+    if report_bytes > max_report_bytes:
+        raise ValueError(
+            f"Attempt report exceeds byte limit: actual_bytes={report_bytes}, "
+            f"max_bytes={max_report_bytes}; summarize evidence and reference recorded Trials"
+        )
     _register_attempt_report(context, report)
     _atomic_json(context.report_path, report, exclusive=True)
     return {

@@ -17,6 +17,9 @@ python3 {{RUNTIME_TOOL}} load-experiment --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} attempt-report --request scratch/<request>.json
 ```
 
+Each local `--request` JSON file is limited to 1 MiB (1,048,576 bytes), including whitespace.
+This general limit does not replace the smaller per-field input/Shape limits below.
+
 `gateway-execute` uploads the current `work/kernel` tree by default. For `evaluate`,
 `candidate_path` may select Candidate B and `comparison.baseline_path` selects baseline A when
 comparing. Trusted Runtime fields are injected automatically. Never embed `baseline` or `candidate`
@@ -61,8 +64,11 @@ be supplied independently, and an omitted component is reused from the private c
 being exposed. Custom source must implement the Agate `_make_inputs` interface for the public ABI.
 For `evaluate`, `mode: "correctness_only"` checks correctness without performance measurement or automatic profiling.
 Custom inputs or Shapes and correctness-only calls provide exploratory evidence; before
-`candidate_ready`, the exact current Kernel still requires a successful full evaluation using
-the trusted contract, requested with `{"operation":"evaluate"}`.
+`candidate_ready`, the exact current Kernel requires a successful ordinary full Evaluate using
+the trusted contract. Request it with `{"operation":"evaluate"}` when no matching evidence exists.
+For exact historical source with matching trusted full-Evaluate evidence, register `action: "adopt"`
+in this Attempt's Experiment Journal as described below; do not repeat that measurement merely to
+obtain a new Trial ID. Runtime validates whether the historical evidence qualifies for nomination.
 
 `evaluate` accepts optional `candidate_path`; omitting it uploads the current `work/kernel` tree.
 To compare against baseline A, add `comparison` with `method: "abba"` and required
@@ -79,6 +85,11 @@ Each Shape batch runs both sides within one allocation; different Shape batches 
 allocations. ABBA requires full correctness and timing; omit `mode` or set it to `"full"`.
 It is always exploratory, does not retain or promote a Kernel or Agent, and does not satisfy the
 full trusted-contract Evaluate required for `candidate_ready`.
+Agent ABBA and Runtime's authoritative ABBA are separate paths. Runtime performs its retention
+comparison only after a successful terminal Report handoff; it records authoritative measurements,
+not an Agent Kernel Trial. Never wait for that later ABBA to create a `gtrial_` for an Experiment
+or to make the Report submittable. An Agent ABBA observation belongs to Candidate B's Trial;
+the same exact B in the same Attempt and recovery generation keeps the same Trial ID.
 
 A Gateway call blocks until its Job reaches a terminal state, which for `evaluate`, `profile`,
 `check`, and `disassemble` may take a long time. Let the command finish and keep stderr out of the
@@ -146,7 +157,44 @@ Correctness-only evaluation on the contract inputs and Shapes:
 {"operation": "evaluate", "mode": "correctness_only"}
 ```
 
-Correctness-only evaluation using your own input generator and Shape records:
+For a public VecAdd ABI `Model.forward(left, right)`, the following paired files demonstrate
+custom inputs. Adapt the argument names, shapes, dtype, and device to your actual public task ABI;
+these are illustrative cases, not private evaluator cases.
+
+Contents of `scratch/custom-input.py`:
+
+```python
+import torch
+
+
+def _make_inputs(num_elements: int) -> dict[str, torch.Tensor]:
+    left = torch.randn((num_elements,), device="cuda", dtype=torch.float32)
+    return {"left": left, "right": torch.randn_like(left)}
+```
+
+Contents of `scratch/custom-shapes.json`:
+
+```json
+{
+  "0": {
+    "input_kwargs": {"num_elements": 1024},
+    "init_kwargs": null
+  },
+  "1": {
+    "input_kwargs": {"num_elements": 4097},
+    "init_kwargs": null
+  }
+}
+```
+
+Each `input_kwargs` object supplies keyword arguments to `_make_inputs`, not Tensor definitions.
+The returned dictionary keys must match `Model.forward` argument names. `init_kwargs` supplies
+`Model` constructor arguments; use `null` or `{}` for a no-argument constructor. Do not hard-code
+a random seed in the generator. Prefer supplying both custom files together: overriding only one
+component can leave it incompatible with the private contract component reused for the other.
+Use the public ABI to author your own cases; do not infer or reconstruct private cases.
+
+Correctness-only evaluation using these input and Shape files:
 
 ```json
 {"operation": "evaluate", "mode": "correctness_only", "input_path": "scratch/custom-input.py", "shapes_path": "scratch/custom-shapes.json"}
@@ -177,7 +225,8 @@ The returned Kernel Trial and Kernel Artifact identities belong to B. The nested
 as (A-B)/A × 100. It retains `schedule` and all `measurements`, plus `mode` and `input_scope`.
 Read the retained comparison with `result-artifact-read`, or find its digest with
 `kernel-trial-show`; comparison results do not create an ordinary Evaluate record. Record the comparison as
-experiment evidence, then run a standard full Evaluate before nomination.
+experiment evidence. Nomination still requires a successful ordinary full Evaluate or an explicit,
+Runtime-accepted `adopt` decision binding matching historical full-Evaluate evidence.
 
 Runtime-local query commands infer their operation from the command name. Their request JSON must
 not contain `operation`. Examples are `{"kernel_trial_id":"gtrial_<id>"}` for
@@ -269,7 +318,15 @@ Each `record-experiment` request must contain exactly these fields:
 `before` and `after` identify both measured sides using only their Kernel Trial IDs. Runtime resolves
 and freezes each Trial's exact Kernel Artifact and all Result Artifacts when it records the
 Experiment; do not submit those derived identities yourself. Record the entry before changing or
-reverting the candidate. For `keep_after` and `restore_before`, both sides are required.
+reverting the candidate. For `keep_after`, `restore_before`, and `adopt`, both sides are required.
+Use `adopt` when choosing exact already-measured historical source: restore its complete Kernel
+tree into `work/kernel/`, then record this Attempt's decision with the real `before` and `after`
+Trial IDs. Only `adopt` permits a historical Trial as `after`; ordinary actions require `after`
+to belong to the current Attempt. Runtime verifies visibility, the same Lineage, DSL, hardware,
+and evaluation contract, and a successful ordinary full Evaluate for that exact Kernel and Result.
+The adopted Trial keeps its original ownership; adoption creates a decision, not a new measurement
+or a replacement Trial. It can qualify the exact restored Kernel for `candidate_ready` without
+rerunning Evaluate. A custom-input, correctness-only, or Agent ABBA result does not qualify.
 For `abandon_direction` before any identity-bearing operation, set both `before` and `after` to
 `null`; never set only one side to `null`. The phase Prompt may additionally permit Bootstrap-only
 `baseline`, which requires `before=null` and a measured `after` Trial. A `dev` result alone supplies no
@@ -280,7 +337,7 @@ experiment later. It does not echo the Agent-authored text, assigned sequence, o
 Keep `evidence` factual: report observations and measurements. Use `analysis` for interpretation,
 the hypothesis verdict, causal explanation, limitations, and remaining uncertainty. Do not use a
 top-level `result` field; that term is reserved for Gateway responses. `action` records what you
-actually did after analysis and normally must be `keep_after`, `restore_before`, or
+actually did after analysis and normally must be `keep_after`, `restore_before`, `adopt`, or
 `abandon_direction`; use `baseline` only when the phase Prompt explicitly permits it.
 After each receipt, update the working terminal Report draft
 `scratch/attempt-report-draft.json`. Accumulate the Experiment ID in the relevant Finding and
@@ -295,6 +352,10 @@ compact receipt such as
 error response publishes nothing: correct the same draft using
 `issues`, `request_schema`, and `recovery`, then call `attempt-report` again. Never call it again
 after a successful response.
+
+A final chat message does not replace a successful `attempt-report` call. If you are brought
+back solely to complete the handoff, use the existing Journal, draft, and measured evidence;
+do not restart optimization or invent missing results.
 
 Each `attempt-report` request must contain
 exactly these fields:
@@ -356,6 +417,12 @@ Use `candidate_ready` when nominating the current Kernel for the controller-owne
 infrastructure blocker. `candidate_ready` does not mean the Kernel is retained or registered; only
 Runtime policy can make that decision. `candidate_ready` requires `final_candidate` and a null `blocker`; `pivot`
 requires both to be null; `blocked` requires a non-empty `blocker` and null `final_candidate`.
+Only `candidate_ready` requires non-empty Experiments, Direction events, and `findings`.
+If no experiment was completed, `blocked` or `pivot` may carry zero Experiments and `findings: []`;
+the Runtime-supplied Direction event list may also be empty when no Direction was started.
+Still close any `in_progress` Direction with `block` or `defer` before handoff. Explain the actual
+blocker or stopping decision in the structured report; never fabricate an Experiment, Finding,
+Trial, or measurement merely to satisfy a non-empty list.
 Keep `knowledge_used` and `findings` structured as shown. Directions left `proposed` or `deferred`
 are the next available directions and require no duplicate ID list in the report. Every finding
 must state its `resolution`: the applied fix, rollback,

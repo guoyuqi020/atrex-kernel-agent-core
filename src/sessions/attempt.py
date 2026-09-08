@@ -11,6 +11,7 @@ from contexts.attempt import RuntimeAttemptContext
 
 from .common import execute_agent_session, guarded_main
 from .operator_contract import public_operator_contract
+from .report_completion import report_completion_prompt
 
 _RUNTIME_TOOL = "agent/optimizer/src/runtime_tools.py"
 _TEMPLATE_PLACEHOLDER = re.compile(r"\{\{([^{}\n]+)\}\}")
@@ -89,6 +90,9 @@ def run() -> int:
         config,
         render_prompt(context, config),
         system_prompt=render_system_prompt(context, config),
+        completion_check=lambda remaining_timeout_seconds: report_completion_prompt(
+            context, remaining_timeout_seconds
+        ),
     )
 
 

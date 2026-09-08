@@ -497,6 +497,26 @@ def test_request_must_be_a_bounded_regular_file_under_scratch(tmp_path: Path) ->
         _request_object(context, outside, "gateway-execute")
 
 
+@pytest.mark.parametrize("command", ["gateway-execute", "attempt-report"])
+@pytest.mark.parametrize("size_bytes", [256 * 1024 + 1, 1024 * 1024, 1024 * 1024 + 1])
+def test_request_json_enforces_one_mib_byte_limit(
+    tmp_path: Path, command: str, size_bytes: int
+) -> None:
+    context = _context(tmp_path)
+    request = tmp_path / "scratch/request.json"
+    overhead = len(json.dumps({"evidence": ""}, separators=(",", ":")).encode("utf-8"))
+    value = {"evidence": "x" * (size_bytes - overhead)}
+    request.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
+    assert request.stat().st_size == size_bytes
+    assert runtime_tools._MAX_REQUEST_BYTES == 1024 * 1024
+
+    if size_bytes > 1024 * 1024:
+        with pytest.raises(ValueError, match=f"{command} request exceeds its byte limit"):
+            _request_object(context, Path("scratch/request.json"), command)
+    else:
+        assert _request_object(context, Path("scratch/request.json"), command) == value
+
+
 def test_runtime_http_error_preserves_structured_repair_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -675,6 +695,26 @@ def test_attempt_report_registers_with_runtime_before_publishing(tmp_path: Path)
     attempt_report(context, _report(receipt["experiment_id"]))
 
     assert [json.loads(context.report_path.read_text(encoding="utf-8"))] == _REGISTERED_REPORTS
+
+
+def test_report_byte_limit_is_checked_before_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context(tmp_path)
+    _, receipt = _completed_test_experiment(context)
+    # The request is small, but the assembled report also includes its Journals.
+    request = _report(receipt["experiment_id"])
+    monkeypatch.setenv("ATREX_ATTEMPT_REPORT_MAX_BYTES", "1")
+    with pytest.raises(ValueError, match=r"actual_bytes=\d+, max_bytes=1"):
+        attempt_report(context, request)
+    assert not context.report_path.exists()
+    assert not _REGISTERED_REPORTS
+
+    # A failed size check does not consume the write-once terminal handoff.
+    monkeypatch.setenv("ATREX_ATTEMPT_REPORT_MAX_BYTES", "1048576")
+    assert attempt_report(context, request)["status"] == "published"
+    assert len(_REGISTERED_REPORTS) == 1
 
 
 def test_a_refused_nomination_publishes_nothing(

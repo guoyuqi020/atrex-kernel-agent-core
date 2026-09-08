@@ -20,6 +20,7 @@ class AgentConfig:
     runtime_bound: bool = False
     model: str | None = None
     prompt_fragment_paths: Mapping[str, Path] = field(default_factory=dict)
+    report_completion_retries: int = 2
 
     @classmethod
     def load(
@@ -44,10 +45,14 @@ class AgentConfig:
             "prompts",
             "prompt_fragments",
             "prompt_root",
+            "report_completion_retries",
         }
         unknown = set(value) - allowed
         if unknown:
             raise ValueError(f"unknown Agent config fields: {sorted(unknown)}")
+        report_retries = value.get("report_completion_retries", 2)
+        if type(report_retries) is not int or not 0 <= report_retries <= 10:
+            raise ValueError("report_completion_retries must be an integer from 0 to 10")
         prompt_root = value.get("prompt_root", "repository")
         if not isinstance(prompt_root, str) or prompt_root not in {"repository", "workspace"}:
             raise ValueError("prompt_root must be repository or workspace")
@@ -103,6 +108,17 @@ class AgentConfig:
                 raise ValueError(f"Agent prompt fragment is unavailable: {name}")
             prompt_fragment_paths[name] = fragment
         binding = os.environ if environment is None else environment
+        if "ATREX_REPORT_COMPLETION_RETRIES" in binding:
+            raw_retries = binding["ATREX_REPORT_COMPLETION_RETRIES"]
+            if not raw_retries.isascii() or not raw_retries.isdigit():
+                raise ValueError(
+                    "Runtime report_completion_retries must be an integer from 0 to 10"
+                )
+            report_retries = int(raw_retries)
+            if not 0 <= report_retries <= 10:
+                raise ValueError(
+                    "Runtime report_completion_retries must be an integer from 0 to 10"
+                )
         binding_keys = {
             "ATREX_AGENT_BACKEND",
             "ATREX_AGENT_MODEL",
@@ -139,6 +155,7 @@ class AgentConfig:
             runtime_bound=runtime_bound,
             model=model_value,
             prompt_fragment_paths=prompt_fragment_paths,
+            report_completion_retries=report_retries,
         )
 
     def prompt_path(self, phase: str) -> Path:

@@ -40,7 +40,9 @@ Evidence in order, then use the Journal indexes to locate only the Directions an
 relevant to the present bottleneck. Do not replay the entire lineage by default.
 
 Honor the injected measurement-reuse policy. Reuse matching trusted measurements and exact source;
-do not repeat work merely because an earlier Agent's interpretation may be wrong.
+do not repeat work merely because an earlier Agent's interpretation may be wrong. To nominate exact
+historical source, record this Attempt's `adopt` decision using real before/after Trial IDs; Runtime
+validates the historical full-Evaluate evidence and keeps the Trial's original ownership.
 
 ### 2. Choose and plan one causal hypothesis
 
@@ -96,11 +98,15 @@ when needed, and pivot when no evidence-based repair remains.
 ### 6. Validate the exact candidate
 
 Development and check operations may accelerate repair, but a nominated candidate requires a
-completed full Evaluate for the exact current `work/kernel/` tree. Require reported correctness,
+successful ordinary full Evaluate for the exact current `work/kernel/` tree, either measured here
+or bound by a Runtime-accepted historical `adopt` decision. Require reported correctness,
 finite positive latency, and credible performance evidence. An exploratory result is evidence for
 the nomination; only controller policy decides whether the Kernel or Agent is retained.
 
-Publish a mature candidate promptly. Secondary hypotheses belong to another Direction or Attempt.
+Publish a mature candidate promptly. Agent ABBA is exploratory and cannot replace that full
+Evaluate. Runtime's authoritative ABBA happens after terminal Report handoff and creates no Agent
+Trial; never wait for it before recording an adoption or finishing the Report.
+Secondary hypotheses belong to another Direction or Attempt.
 
 ### 7. Record as work proceeds
 
@@ -111,7 +117,8 @@ Negative results are first-class evidence.
 
 Follow the Session-tool contracts for Direction state, Experiment linkage, incremental Report
 construction, retry behavior, and terminal validation; do not reconstruct the Journal from memory
-at the end.
+at the end. If no experiment was completed, `blocked` or `pivot` may have zero Experiments and empty
+Findings. Close any `in_progress` Direction with `block` or `defer`; do not fabricate evidence to finish.
 
 ### 8. Deposit what the next Attempt would otherwise re-derive
 

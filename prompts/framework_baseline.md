@@ -160,7 +160,10 @@ optimization ideas as `proposed` or `deferred` Directions so later optimization 
 and advance them without reconstructing the Bootstrap session.
 
 A `candidate_ready` Bootstrap report requires exactly one `baseline` Experiment. A blocked report
-may omit it only when no candidate reached an identity-bearing Gateway result.
+may contain zero Experiments and empty `findings`; do not manufacture evidence just to terminate.
+It may omit the baseline Experiment when no recorded Experiment has identity-bearing Gateway
+evidence. If a Direction is still `in_progress`, close it with `block` or `defer` first; if no
+Direction was started, an empty Runtime Direction event list is valid for `blocked`.
 
 Use the shared report fields with Bootstrap semantics: `diagnosis` names the bring-up or correctness
 issue, `approach` explains the construction or repair, and `expected_impact` states the expected

@@ -222,7 +222,11 @@ def test_evaluate_prompt_explains_overrides_and_full_contract_requirement() -> N
         request.get("mode", "full") in {"full", "correctness_only"} for request in evaluations
     )
     assert "without performance measurement or automatic profiling" in text
-    assert "requires a successful full evaluation using" in text
+    assert "requires a successful ordinary full Evaluate using" in text
+    assert 'register `action: "adopt"`' in text
+    assert "Only `adopt` permits a historical Trial as `after`" in text
+    assert "not an Agent Kernel Trial" in text
+    assert "Only `candidate_ready` requires non-empty Experiments" in text
     assert "input_scope" in text
     assert "input_py" in text and "shapes" in text
     assert "no further fields" not in text
@@ -246,6 +250,9 @@ def test_attempt_tool_example_uses_the_trusted_lineage_dsl() -> None:
     instructions = _tool_instructions(config, "triton")
 
     assert "## Session tools (triton)" in instructions
+    assert "1 MiB (1,048,576 bytes), including whitespace" in instructions
+    assert "input generator (at most 128 KiB)" in instructions
+    assert "Agate Shape records (at most 256 KiB)" in instructions
     assert "wiki-read" not in instructions
     assert "wiki-query" not in instructions
     assert "CUDA vectorized load requirements" not in instructions

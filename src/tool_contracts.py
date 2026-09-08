@@ -83,7 +83,11 @@ def _evaluate_schema() -> dict[str, Any]:
                     {"type": "string", "minLength": 1, "maxLength": 131_072},
                     {"type": "null"},
                 ],
-                "description": "Nonblank Agate _make_inputs source, at most 128 KiB in UTF-8.",
+                "description": (
+                    "Nonblank Agate _make_inputs(**input_kwargs) source, at most 128 KiB in UTF-8. "
+                    "Return a dictionary keyed by Model.forward argument names; do not hard-code "
+                    "a random seed. Prefer pairing custom source with matching custom shapes."
+                ),
             },
             "shapes": {
                 "anyOf": [
@@ -95,14 +99,17 @@ def _evaluate_schema() -> dict[str, Any]:
                     {"type": "null"},
                 ],
                 "description": (
-                    "Shape IDs must be integer-parseable strings; each record must be an "
-                    "Agate Shape object compatible with the input generator."
+                    "Shape IDs must be integer-parseable strings. Each Agate Shape record maps "
+                    "input_kwargs to _make_inputs keyword arguments, not Tensor definitions, "
+                    "and optional init_kwargs to Model constructor arguments (null or {} for "
+                    "no arguments). Match the input generator and public Model.forward ABI."
                 ),
             },
             "input_path": {
                 **_text(),
                 "description": (
                     "Workspace-relative regular UTF-8 source file, at most 128 KiB. "
+                    "Contents must implement _make_inputs; see input_py for the public ABI. "
                     "No absolute/traversal paths, links, or .runtime control paths."
                 ),
             },
@@ -110,7 +117,9 @@ def _evaluate_schema() -> dict[str, Any]:
                 **_text(),
                 "description": (
                     "Workspace-relative regular UTF-8 JSON file, at most 256 KiB; contents "
-                    "must match shapes. No absolute/traversal paths, links, or .runtime paths."
+                    "must match shapes. input_kwargs maps to _make_inputs parameters; "
+                    "init_kwargs maps to Model constructor arguments. "
+                    "No absolute/traversal paths, links, or .runtime paths."
                 ),
             },
         },
@@ -151,10 +160,10 @@ def _direction_schema() -> dict[str, Any]:
 
 def _experiment_schema(*, allow_baseline: bool) -> dict[str, Any]:
     nullable_subject = {"oneOf": [_subject(), {"type": "null"}]}
-    actions = ["keep_after", "restore_before", "abandon_direction"]
+    actions = ["keep_after", "restore_before", "abandon_direction", "adopt"]
     if allow_baseline:
         actions.append("baseline")
-    return _object(
+    schema = _object(
         {
             "direction_id": _identifier("direction_"),
             "name": _text(),
@@ -167,6 +176,13 @@ def _experiment_schema(*, allow_baseline: bool) -> dict[str, Any]:
             "action": {"enum": actions},
         }
     )
+    schema["allOf"] = [
+        {
+            "if": {"properties": {"action": {"const": "adopt"}}, "required": ["action"]},
+            "then": {"properties": {"before": _subject(), "after": _subject()}},
+        }
+    ]
+    return schema
 
 
 def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
@@ -194,7 +210,7 @@ def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
             },
         }
     )
-    return _object(
+    schema = _object(
         {
             "status": {
                 "enum": (
@@ -225,7 +241,6 @@ def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
             },
             "findings": {
                 "type": "array",
-                "minItems": 1,
                 "items": _object(
                     {
                         "category": _text(),
@@ -252,6 +267,16 @@ def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
             "blocker": {"oneOf": [_text(), {"type": "null"}]},
         }
     )
+    schema["allOf"] = [
+        {
+            "if": {
+                "properties": {"status": {"const": "candidate_ready"}},
+                "required": ["status"],
+            },
+            "then": {"properties": {"findings": {"minItems": 1}}},
+        }
+    ]
+    return schema
 
 
 _SCRATCH_FILE = _object({"file": {"type": "string", "pattern": r"^scratch/.+"}})
@@ -353,7 +378,9 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         {
             "instruction": (
                 "Set each non-null before/after subject to exactly one visible kernel_trial_id; "
-                "Runtime resolves the Kernel and Result Artifacts"
+                "Runtime resolves the Kernel and Result Artifacts. For exact historical source "
+                "reuse, use action=adopt with both real Trials; historical after is permitted "
+                "only when Runtime validates its matching successful full Evaluate"
             )
         },
     ],
@@ -376,7 +403,8 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
             "instruction": (
                 "Read both indexes and close every in_progress Direction with update-direction "
                 "before retrying attempt-report. Use defer or block when no Experiment exists; "
-                "complete or abandon requires a supporting Experiment"
+                "complete or abandon requires a supporting Experiment. blocked/pivot may have "
+                "zero Experiments and empty findings; never fabricate evidence to end a session"
             )
         },
         {
@@ -407,8 +435,10 @@ def _evaluate_recovery(detail: str) -> list[dict[str, Any]]:
     elif field == "shapes_path" and code in {"invalid_json", "invalid_shape_file"}:
         instruction = (
             "Fix the shapes_path file as a non-empty JSON object keyed by numeric Shape IDs, "
-            "not an array or quoted JSON string; each value must be an Agate Shape object "
-            "compatible with the input generator (input_kwargs and optional init_kwargs)."
+            "not an array or quoted JSON string. Each record's input_kwargs supplies "
+            "_make_inputs keyword arguments, not Tensor definitions; optional init_kwargs "
+            "supplies Model constructor arguments (null or {} for no arguments). Match the "
+            "paired custom input generator and public Model.forward ABI."
         )
     elif code == "invalid_encoding":
         instruction = f"Save the file named by {field} as UTF-8 text, not binary data."
@@ -420,6 +450,20 @@ def _evaluate_recovery(detail: str) -> list[dict[str, Any]]:
             f"Set {field} to an existing regular UTF-8 file under real workspace directories, "
             "for example scratch/custom-input.py or scratch/custom-shapes.json. "
             "Do not use absolute paths, dot/traversal components, symlinks, or .runtime files."
+        )
+    elif field == "input_py":
+        instruction = (
+            "Define _make_inputs with parameters matching the Shape records' input_kwargs; "
+            "return a dictionary keyed by public Model.forward argument names. Do not "
+            "hard-code a random seed. Adapt the paired custom input/Shape examples in the "
+            "tool instructions to your task ABI."
+        )
+    elif field == "shapes":
+        instruction = (
+            "Use numeric Shape ID keys and records with input_kwargs for _make_inputs "
+            "keyword arguments, not Tensor definitions, and optional init_kwargs for Model "
+            "constructor arguments (null or {} for no arguments). Adapt the paired custom "
+            "input/Shape examples in the tool instructions to your public task ABI."
         )
     elif field in {"comparison.baseline_path", "candidate_path"}:
         instruction = (

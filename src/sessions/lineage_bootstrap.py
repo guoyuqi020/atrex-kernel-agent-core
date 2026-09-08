@@ -10,6 +10,7 @@ from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
 from .attempt import _tool_instructions
 from .common import execute_agent_session, guarded_main
 from .operator_contract import public_operator_contract
+from .report_completion import report_completion_prompt
 
 
 def _trusted_context(context: RuntimeLineageBootstrapContext) -> str:
@@ -61,6 +62,9 @@ def run() -> int:
         config,
         render_prompt(context, config),
         system_prompt=render_system_prompt(context, config),
+        completion_check=lambda remaining_timeout_seconds: report_completion_prompt(
+            context, remaining_timeout_seconds
+        ),
     )
 
 
