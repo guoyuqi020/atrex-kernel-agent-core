@@ -261,7 +261,6 @@ def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
             "contributing_kernel_trial_ids": {
                 "type": "array",
                 "maxItems": 64,
-                "uniqueItems": True,
                 "items": _identifier("gtrial_"),
             },
             "blocker": {"oneOf": [_text(), {"type": "null"}]},
@@ -374,7 +373,13 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
             "tool": "list-directions",
             "request": {"file": "scratch/directions-index.json"},
         },
-        {"instruction": "Bind the Experiment to a visible Direction whose status is in_progress"},
+        {
+            "instruction": (
+                "Bind the Experiment to a visible in_progress, completed, abandoned, blocked, "
+                "or deferred Direction. Late evidence can be recorded after closure without "
+                "reopening or changing its status. A proposed Direction must be started first"
+            )
+        },
         {
             "instruction": (
                 "Set each non-null before/after subject to exactly one visible kernel_trial_id; "

@@ -1322,7 +1322,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
             raise ValueError("Attempt report profile_evidence.supporting_results must be non-empty")
         if len(supporting_results) > 32:
             raise ValueError("Attempt report profile_evidence supports at most 32 results")
-        journal_bindings: set[tuple[str, str, str]] = set()
+        profile_bindings: set[tuple[str, str, str]] = set()
         for citable in citable_profile_results:
             identity = _exact_object(
                 citable,
@@ -1333,7 +1333,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                     "result_artifact_digest",
                 },
             )
-            journal_bindings.add(
+            profile_bindings.add(
                 (
                     str(identity["kernel_artifact_digest"]),
                     str(identity["kernel_trial_id"]),
@@ -1371,10 +1371,12 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                 subject["kernel_trial_id"],
                 subject["result_artifact_digests"][0],
             )
-            if binding not in journal_bindings:
+            if binding not in profile_bindings:
                 raise ValueError(
-                    "Profile supporting result is not referenced by any visible Experiment: "
-                    f"{binding[2]}"
+                    "Profile supporting result does not match a visible Runtime-recorded "
+                    f"Profile observation: {binding[2]}. Use the exact kernel_artifact_digest, "
+                    "kernel_trial_id, and result_artifact_digest returned by Runtime; "
+                    "an Experiment reference is not required."
                 )
             if binding[2] in seen_results:
                 raise ValueError("Profile supporting Gateway results must be unique")
@@ -1453,14 +1455,11 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
             raise ValueError(
                 f"Attempt report contributing_kernel_trial_ids[{index}] must be a Kernel Trial ID"
             )
-    if len(set(contributing)) != len(contributing):
-        raise ValueError("Attempt report contributing_kernel_trial_ids must be unique")
-    if contributing != sorted(contributing):
-        raise ValueError("Attempt report contributing_kernel_trial_ids must be sorted")
     report = {
         "schema_version": 12,
         "attempt_id": context.attempt_id,
         **request,
+        "contributing_kernel_trial_ids": sorted(set(contributing)),
         "experiments": experiments,
         "direction_events": direction_events,
     }

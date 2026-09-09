@@ -76,12 +76,34 @@ def test_simple_read_contracts_are_exact_and_bounded() -> None:
     assert artifact["additionalProperties"] is False
 
 
+def test_contributing_trials_schema_accepts_duplicates_and_keeps_input_limit() -> None:
+    schema = tool_request_schema("attempt-report")
+
+    assert schema is not None
+    field = schema["properties"]["contributing_kernel_trial_ids"]
+    assert field["maxItems"] == 64
+    assert "uniqueItems" not in field
+    assert field["items"]["pattern"] == r"^gtrial_[0-9a-f]{32}$"
+
+
 def test_validator_message_becomes_compact_repair_issue() -> None:
-    assert local_validation_issue("Experiment Direction must be in progress") == {
+    message = "Experiment Direction must be in progress or closed; current status is proposed"
+    assert local_validation_issue(message) == {
         "path": "direction_id",
         "code": "invalid_state",
-        "message": "Experiment Direction must be in progress",
+        "message": message,
     }
+
+
+def test_experiment_recovery_allows_late_evidence_without_reopening() -> None:
+    recovery = tool_recovery("record-experiment")
+
+    assert recovery is not None
+    instruction = recovery[1]["instruction"]
+    for status in ("in_progress", "completed", "abandoned", "blocked", "deferred"):
+        assert status in instruction
+    assert "without reopening or changing its status" in instruction
+    assert "proposed Direction must be started first" in instruction
 
 
 def test_direction_limit_and_terminal_state_errors_name_the_repair_target() -> None:

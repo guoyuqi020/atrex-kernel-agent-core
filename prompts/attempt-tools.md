@@ -299,6 +299,13 @@ starting another, close the current one with `complete`, `abandon`, `defer`, or 
 remain `in_progress` at handoff. Without an Experiment use `defer` or `block`; `complete` and
 `abandon` require supporting Experiments.
 
+If evidence was omitted before closure, `record-experiment` can append it to a visible
+`completed`, `abandoned`, `blocked`, or `deferred` Direction without reopening it. The receipt
+does not change its status or prior events; `load-direction` automatically includes the new
+Experiment in its supporting IDs. A merely `proposed` Direction must still be started first.
+Late recording uses the same Trial visibility, ownership, and evidence checks as ordinary recording.
+Use it to complete the Journal before terminal handoff, not to resume research without `start`.
+
 Each `record-experiment` request must contain exactly these fields:
 
 ```json
@@ -431,13 +438,17 @@ unique `supporting_experiment_ids`
 returned by `record-experiment`; each ID must belong to this Attempt's Experiment Journal.
 `profile_evidence` must describe evidence returned by Runtime-bound profiling and
 bind every supporting Profile result to the exact Kernel Artifact, Kernel Trial, and Result
-Artifact identifiers returned by Runtime. Those exact identifiers must also occur in a `before` or
-`after` subject of some Experiment in the visible history, so a Profile recorded by an earlier
-Attempt stays citable. Include at least one `profile` result, set `profile_evidence`
-to `null` if no Profile was executed, and never invent profiler evidence.
+Artifact identifiers returned by Runtime. Any Runtime-recorded Profile result in your visible
+history is citable, including an earlier Profile or one obtained after recording an Experiment.
+No Experiment reference is required: do not create a diagnostic Experiment or reopen a Direction
+solely to make a Profile citable. Runtime verifies the exact identities and the `profile` operation
+against its own observations, not your prose. Include at least one `profile` result, set
+`profile_evidence` to `null` when you have no recorded Profile evidence, and never invent it.
 Use `contributing_kernel_trial_ids` to name the historical Kernel Trials whose code or approach this
-Attempt actually drew on, sorted and unique, using the Trial identifiers Runtime returned. Use `[]`
-when you drew on none. It records where your work came from for whoever reads this Attempt later; it
+Attempt actually drew on, using the Trial identifiers Runtime returned. Supply at most 64 entries
+in any order; the tool and Runtime automatically sort and deduplicate them. ID format validation
+still applies to every entry. Use `[]` when you drew on none.
+It records where your work came from for whoever reads this Attempt later; it
 is a claim rather than a measured fact, and it neither replaces nor duplicates the Experiment
 `before` and `after` bindings. Do not include the
 Journal in the terminal request; the CLI obtains the authoritative current-Attempt snapshot from

@@ -69,6 +69,7 @@ def _bootstrap_context(root: Path) -> RuntimeLineageBootstrapContext:
 
 _FAKE_JOURNALS: dict[str, dict[str, list[dict[str, Any]]]] = {}
 _FAKE_HISTORY: dict[str, dict[str, list[dict[str, Any]]]] = {}
+_FAKE_PROFILES: dict[str, list[dict[str, Any]]] = {}
 _REGISTERED_REPORTS: list[dict[str, Any]] = []
 
 
@@ -120,27 +121,19 @@ def _fake_direction_views(context: Any) -> dict[str, dict[str, Any]]:
 
 
 def _fake_citable_profile_results(context: Any) -> list[dict[str, Any]]:
-    identities: list[dict[str, Any]] = []
-    for experiment in _fake_visible(context, "experiments"):
-        for side_name in ("before", "after"):
-            side = experiment.get(side_name)
-            if side is None:
-                continue
-            for result_digest in side["result_artifact_digests"]:
-                identity = {
-                    "kernel_artifact_digest": side["kernel_artifact_digest"],
-                    "kernel_trial_id": side["kernel_trial_id"],
-                    "result_artifact_digest": result_digest,
-                }
-                if identity not in identities:
-                    identities.append(identity)
-    return identities
+    # The Runtime projection comes from observations, not Experiment subjects.
+    return deepcopy(_FAKE_PROFILES.setdefault(str(context.workspace), [{
+        "kernel_artifact_digest": "sha256:" + "d" * 64,
+        "kernel_trial_id": "gtrial_" + "e" * 32,
+        "result_artifact_digest": "sha256:" + "f" * 64,
+    }]))
 
 
 @pytest.fixture(autouse=True)
 def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
     _FAKE_JOURNALS.clear()
     _FAKE_HISTORY.clear()
+    _FAKE_PROFILES.clear()
 
     def journal(context: Any, command: str, request: dict[str, Any]) -> dict[str, Any]:
         state = _fake_state(context)
@@ -259,8 +252,14 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                     "Bootstrap Experiment journal may contain only one baseline action"
                 )
             direction = _fake_direction_views(context).get(str(request["direction_id"]))
-            if direction is None or direction["status"] != "in_progress":
-                raise ValueError("Experiment Direction must be in progress")
+            if direction is None:
+                raise ValueError("Experiment Direction is outside visible history")
+            if direction["status"] not in {
+                "in_progress", "completed", "abandoned", "blocked", "deferred",
+            }:
+                raise ValueError(
+                    "Experiment Direction must be in progress or closed; current status is proposed"
+                )
             experiment = {
                 "experiment_id": f"experiment_{uuid4().hex}",
                 "sequence": len(state["experiments"]) + 1,
@@ -589,7 +588,9 @@ def test_cli_local_validation_adds_schema_and_recovery(
     monkeypatch.setattr(runtime_tools, "_context", lambda _command: object())
 
     def reject(*_args: object) -> dict[str, object]:
-        raise ValueError("Experiment Direction must be in progress")
+        raise ValueError(
+            "Experiment Direction must be in progress or closed; current status is proposed"
+        )
 
     monkeypatch.setattr(runtime_tools, "_request_object", reject)
     status = runtime_tools.main(["record-experiment", "--request", "scratch/request.json"])
@@ -600,7 +601,9 @@ def test_cli_local_validation_adds_schema_and_recovery(
         {
             "path": "direction_id",
             "code": "invalid_state",
-            "message": "Experiment Direction must be in progress",
+            "message": (
+                "Experiment Direction must be in progress or closed; current status is proposed"
+            ),
         }
     ]
     assert set(response["request_schema"]["required"]) == runtime_tools._EXPERIMENT_FIELDS
@@ -1082,31 +1085,41 @@ def test_attempt_report_rejects_invalid_lists_before_publication(tmp_path: Path)
     assert context.report_path.is_file()
 
 
-def test_attempt_report_rejects_invalid_contributing_kernel_trial_ids(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "trials",
+    [["not-a-trial"], ["not-a-trial"] * 2, [123], ["gtrial_" + "a" * 32] * 65],
+)
+def test_attempt_report_rejects_invalid_contributing_kernel_trial_ids(
+    tmp_path: Path, trials: list[object],
+) -> None:
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
     report = _report(receipt["experiment_id"])
-    first = "gtrial_" + "a" * 32
-    second = "gtrial_" + "b" * 32
 
-    report["contributing_kernel_trial_ids"] = ["not-a-trial"]
-    with pytest.raises(ValueError, match=r"contributing_kernel_trial_ids\[0\]"):
-        attempt_report(context, report)
-
-    report["contributing_kernel_trial_ids"] = [first, first]
-    with pytest.raises(ValueError, match="contributing_kernel_trial_ids must be unique"):
-        attempt_report(context, report)
-
-    report["contributing_kernel_trial_ids"] = [second, first]
-    with pytest.raises(ValueError, match="contributing_kernel_trial_ids must be sorted"):
+    report["contributing_kernel_trial_ids"] = trials
+    with pytest.raises(ValueError, match="contributing_kernel_trial_ids"):
         attempt_report(context, report)
     assert not context.report_path.exists()
+    assert _REGISTERED_REPORTS == []
 
-    report["contributing_kernel_trial_ids"] = [first, second]
+
+@pytest.mark.parametrize("suffixes", ["", "ab", "ba", "baba", "a" * 64])
+def test_attempt_report_normalizes_contributing_kernel_trial_ids(
+    tmp_path: Path, suffixes: str,
+) -> None:
+    context = _context(tmp_path)
+    _direction_id, receipt = _completed_test_experiment(context)
+    report = _report(receipt["experiment_id"])
+    trials = ["gtrial_" + suffix * 32 for suffix in suffixes]
+    report["contributing_kernel_trial_ids"] = trials
+    original = deepcopy(report)
+
     published = attempt_report(context, report)
     assert published["report_status"] == "candidate_ready"
     stored = json.loads(context.report_path.read_text(encoding="utf-8"))
-    assert stored["contributing_kernel_trial_ids"] == [first, second]
+    assert stored["contributing_kernel_trial_ids"] == sorted(set(trials))
+    assert _REGISTERED_REPORTS[-1] == stored
+    assert report == original
 
 
 def test_attempt_report_rejects_incomplete_profile_evidence(tmp_path: Path) -> None:
@@ -1122,7 +1135,14 @@ def test_attempt_report_rejects_incomplete_profile_evidence(tmp_path: Path) -> N
     assert not context.report_path.exists()
 
 
-def test_attempt_report_rejects_profile_result_absent_from_journal(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("field", "value"), [
+    ("kernel_artifact_digest", "sha256:" + "1" * 64),
+    ("kernel_trial_id", "gtrial_" + "1" * 32),
+    ("result_artifact_digest", "sha256:" + "1" * 64),
+])
+def test_attempt_report_rejects_profile_not_observed_by_runtime(
+    tmp_path: Path, field: str, value: str,
+) -> None:
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
     report = _report(receipt["experiment_id"])
@@ -1130,39 +1150,23 @@ def test_attempt_report_rejects_profile_result_absent_from_journal(tmp_path: Pat
     assert isinstance(profile, dict)
     results = profile["supporting_results"]
     assert isinstance(results, list)
-    results[0]["result_artifact_digest"] = "sha256:" + "1" * 64
+    results[0][field] = value
 
-    with pytest.raises(ValueError, match="not referenced by any visible Experiment"):
+    with pytest.raises(ValueError, match="does not match a visible Runtime-recorded Profile"):
         attempt_report(context, report)
     assert not context.report_path.exists()
 
 
-def test_attempt_report_can_cite_a_historical_profile_result(tmp_path: Path) -> None:
+def test_attempt_report_can_cite_a_profile_without_any_experiment_reference(tmp_path: Path) -> None:
     context = _context(tmp_path)
-    historical_experiment = {
-        "experiment_id": "experiment_" + "8" * 32,
-        "sequence": 1,
-        "recorded_at": "2026-08-24T00:00:00+00:00",
-        **{
-            **_experiment(),
-            "before": _materialized_subject(_experiment()["before"]),
-            "after": _materialized_subject(_experiment()["after"]),
-        },
-    }
-    historical_after = historical_experiment["after"]
-    assert isinstance(historical_after, dict)
-    historical_after.update(
-        {
-            "kernel_artifact_digest": "sha256:" + "2" * 64,
-            "kernel_trial_id": "gtrial_" + "3" * 32,
-            "result_artifact_digests": ["sha256:" + "4" * 64],
-        }
-    )
-    _FAKE_HISTORY[str(context.workspace)] = {
-        "direction_events": [],
-        "experiments": [historical_experiment],
-    }
     _direction_id, receipt = _completed_test_experiment(context)
+    prior_journal = deepcopy(_fake_state(context))
+    # A visible historical or newly measured Profile need not be in this Journal.
+    _FAKE_PROFILES[str(context.workspace)] = [{
+        "kernel_artifact_digest": "sha256:" + "2" * 64,
+        "kernel_trial_id": "gtrial_" + "3" * 32,
+        "result_artifact_digest": "sha256:" + "4" * 64,
+    }]
     report = _report(str(receipt["experiment_id"]))
     profile = report["profile_evidence"]
     assert isinstance(profile, dict)
@@ -1176,6 +1180,19 @@ def test_attempt_report_can_cite_a_historical_profile_result(tmp_path: Path) -> 
     ]
 
     assert attempt_report(context, report)["report_status"] == "candidate_ready"
+    assert _fake_state(context) == prior_journal
+    assert _REGISTERED_REPORTS[-1]["profile_evidence"] == profile
+
+
+def test_blocked_report_can_cite_profile_without_creating_a_journal(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    report = _report("unused")
+    report.update(status="blocked", final_candidate=None, blocker="cannot repair the candidate",
+                  findings=[], contributing_kernel_trial_ids=[])
+
+    assert attempt_report(context, report)["report_status"] == "blocked"
+    assert _REGISTERED_REPORTS[-1]["experiments"] == []
+    assert _REGISTERED_REPORTS[-1]["direction_events"] == []
 
 
 def test_attempt_report_rejects_finding_from_another_experiment(tmp_path: Path) -> None:
