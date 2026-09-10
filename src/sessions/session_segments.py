@@ -81,6 +81,13 @@ def _aggregate_usage(context: common.SessionContext, segments: list[_Segment]) -
         report["usage_complete"] = not unknown and all(
             common.usage_report(context, result)["usage_complete"] for result in results
         )
+        report["usage_warnings"] = sorted(
+            {
+                warning
+                for result in results
+                for warning in common.usage_report(context, result)["usage_warnings"]
+            }
+        )
     report["session_count"] = sum(segment.started for segment in segments)
     # Runtime validates this equality against the original logical-session budget.
     report["budget_exhausted"] = report["consumed"] >= context.usage_budget
@@ -193,11 +200,12 @@ def _publish_trace(
         "policy_diagnostics": [item for result in results for item in result.policy_diagnostics],
         "segments": index,
         "report_completion": dict(completion),
+        "accounting_usage": _aggregate_usage(context, segments),
         "normalizations": {
             "conversation": "fresh segments concatenated; segment_sequence retains local order",
             "provider_paths": "relative to each record's segment_path",
             "events": "each segment retains its own events.jsonl; no terminal/delta double count",
-            "usage": "sum of fresh invocation terminal usage; no native history replay",
+            "usage": "sum of fresh invocation accounting usage; no native history replay",
         },
     }
     common.atomic_json(root / "session.json", metadata)
@@ -294,9 +302,19 @@ def execute_report_completion(
                 exit_status = result.exit_status
             elif (
                 not result.raw_provider_capture_complete
-                or not usage["usage_complete"]
-                or result.response_usage_complete is False
                 or result.policy_diagnostics
+                or (
+                    (not usage["usage_complete"] or result.response_usage_complete is False)
+                    and not all(
+                        common.recoverable_usage_warning(segment.result)
+                        or (
+                            common.usage_report(context, segment.result)["usage_complete"]
+                            and segment.result.response_usage_complete is not False
+                        )
+                        for segment in segments
+                        if segment.result is not None
+                    )
+                )
             ):
                 exit_status = 126
             if exit_status is not None:

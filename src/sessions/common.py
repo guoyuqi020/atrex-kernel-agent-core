@@ -15,6 +15,7 @@ from typing import Any, Protocol
 
 import backends
 from agent_config import AgentConfig
+from backends.claude_ledger import CLAUDE_USAGE_UNRECONCILED, CLAUDE_USAGE_WARNINGS
 from session_transcript import (
     FILTERED_PROVIDER_EVENTS,
     encode_records,
@@ -53,6 +54,32 @@ class SessionContext(Protocol):
 
 def _usage_value(value: int | None) -> int:
     return value if value is not None and value >= 0 else 0
+
+
+def recoverable_usage_warning(result: backends.AgentRunResult) -> bool:
+    """A known Claude accounting gap is not a process or evidence-capture failure."""
+    usage = result.terminal_usage
+    return (
+        result.runtime_id == "claude"
+        and result.exit_status == 0
+        and not result.timed_out
+        and result.raw_provider_capture_complete
+        and not result.policy_diagnostics
+        and CLAUDE_USAGE_UNRECONCILED in result.observation_errors
+        and set(result.observation_errors) <= CLAUDE_USAGE_WARNINGS
+        and usage.measurement == "partial"
+        and usage.total_tokens is not None
+        and usage.total_tokens > 0
+        and all(
+            value is not None
+            for value in (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_tokens,
+                usage.cache_write_tokens,
+            )
+        )
+    )
 
 
 def usage_report(
@@ -101,6 +128,11 @@ def usage_report(
         "session_count": 1 if result is not None else 0,
         "model_request_count": request_count,
         "usage_complete": complete,
+        "usage_warnings": (
+            [warning for warning in result.observation_errors if warning in CLAUDE_USAGE_WARNINGS]
+            if result is not None and result.runtime_id == "claude"
+            else []
+        ),
     }
 
 
@@ -385,6 +417,7 @@ def write_trace(
             "provider_event_filters": list(FILTERED_PROVIDER_EVENTS),
             "observation_errors": list(result.observation_errors),
             "policy_diagnostics": list(result.policy_diagnostics),
+            "accounting_usage": usage_report(context, result),
         },
     )
 

@@ -1,8 +1,8 @@
 """Capture Claude's native, session-scoped transcript and settled message usage.
 
-The print stream can contain provisional counters. Never add that stream to the
-native ledger: both describe the same responses. The result event remains the
-authority for the session bill, even when response attribution is incomplete.
+The print stream can contain provisional counters. Never add duplicate stream and
+native messages. A terminal result can cover either the main session or the whole
+session tree; reconcile that scope before using it for accounting.
 """
 
 from __future__ import annotations
@@ -23,6 +23,39 @@ from .model import (
     resequence_agent_events,
     sum_token_usages,
 )
+
+CLAUDE_USAGE_UNRECONCILED = "claude_response_usage_incomplete_or_unreconciled"
+CLAUDE_MAIN_ONLY_USAGE = "claude_terminal_usage_excludes_subagents"
+CLAUDE_USAGE_WARNINGS = frozenset((CLAUDE_USAGE_UNRECONCILED, CLAUDE_MAIN_ONLY_USAGE))
+_MAIN_TRANSCRIPT = "provider/claude-session.raw-jsonl"
+_COMPONENTS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+
+
+def _same_usage(left: TokenUsage, right: TokenUsage) -> bool:
+    return all(
+        getattr(left, key) is not None and getattr(left, key) == getattr(right, key)
+        for key in (*_COMPONENTS, "total_tokens")
+    )
+
+
+def _conservative_usage(observed: TokenUsage, terminal: TokenUsage) -> TokenUsage:
+    """Keep the larger known count per bucket without adding overlapping bills."""
+    components: dict[str, int | None] = {}
+    for key in _COMPONENTS:
+        known = [
+            value for value in (getattr(observed, key), getattr(terminal, key)) if value is not None
+        ]
+        components[key] = max(known) if known else None
+    known_total = sum(value for value in components.values() if value is not None)
+    available = any(value is not None for value in components.values())
+    return TokenUsage(
+        input_tokens=components["input_tokens"],
+        output_tokens=components["output_tokens"],
+        cache_read_tokens=components["cache_read_tokens"],
+        cache_write_tokens=components["cache_write_tokens"],
+        total_tokens=known_total if available else None,
+        measurement="partial" if available else "unavailable",
+    )
 
 
 class ClaudeSessionLedger:
@@ -118,6 +151,13 @@ def observe_claude_usage(
                     missing_usage.add(message_id)
                 continue
             missing_usage.discard(message_id)
+            # A child's copied parent context is not an additional model response.
+            if (
+                message_id in responses
+                and responses[message_id].source_path == _MAIN_TRANSCRIPT
+                and file.relative_path != _MAIN_TRANSCRIPT
+            ):
+                continue
             responses[message_id] = NormalizedAgentEvent(
                 sequence=0,
                 kind="usage_delta",
@@ -134,33 +174,37 @@ def observe_claude_usage(
     ]
     events = [*responses.values(), *stream_only]
     observed = sum_token_usages([event.usage for event in events if event.usage is not None])
-    components = (
-        "input_tokens",
-        "output_tokens",
-        "cache_read_tokens",
-        "cache_write_tokens",
-        "total_tokens",
+    main = sum_token_usages(
+        [
+            event.usage
+            for event in responses.values()
+            if event.source_path == _MAIN_TRANSCRIPT and event.usage is not None
+        ]
     )
-    complete = (
+    structurally_complete = (
         bool(responses)
         and not (malformed or missing_usage or stream_only)
-        and all(
-            getattr(observed, key) is not None and getattr(observed, key) == getattr(terminal, key)
-            for key in components
-        )
         and terminal.measurement == "exact"
     )
+    whole_tree_matches = _same_usage(observed, terminal)
+    main_only_matches = _same_usage(main, terminal)
+    complete = structurally_complete and (whole_tree_matches or main_only_matches)
     errors: tuple[str, ...] = ()
-    if not complete:
-        errors = ("claude_response_usage_incomplete_or_unreconciled",)
+    if complete:
+        if not whole_tree_matches:
+            errors = (CLAUDE_MAIN_ONLY_USAGE,)
+        # Charge every unique response, including children excluded by the terminal
+        # result. When terminal includes children this is the same bill, not a sum.
+        terminal = observed
+    else:
+        errors = (CLAUDE_USAGE_UNRECONCILED,)
         events = [
             replace(event, usage=replace(event.usage, measurement="partial"))
             if event.usage is not None
             else event
             for event in events
         ]
-    if terminal.measurement != "exact" and observed.total_tokens is not None:
-        terminal = replace(observed, measurement="partial")
+        terminal = _conservative_usage(observed, terminal)
     if terminal.total_tokens is not None:
         events.append(NormalizedAgentEvent(0, "terminal_usage", terminal))
     return resequence_agent_events(events), terminal, complete, errors

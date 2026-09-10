@@ -50,6 +50,8 @@ class _Outcome:
     request_count: int = 1
     elapsed: float = 0
     error: Exception | None = None
+    observation_errors: tuple[str, ...] = ()
+    policy_diagnostics: tuple[str, ...] = ()
 
 
 class _Runtime:
@@ -100,14 +102,14 @@ class _Runtime:
                 for sequence in range(outcome.request_count)
             ),
             capabilities=AgentRuntimeCapabilities(terminal_usage=True, usage_delta=True),
-            observation_errors=(),
+            observation_errors=outcome.observation_errors,
             stdout=stdout,
             stderr=f"diagnostic for segment {index}\n",
             raw_session_files=(
                 RawSessionFile("provider/codex-rollout.raw-jsonl", stdout.encode()),
             ),
             raw_provider_capture_complete=outcome.raw_provider_capture_complete,
-            policy_diagnostics=(),
+            policy_diagnostics=outcome.policy_diagnostics,
             session_id=request.session_id or "",
             budget_exhausted=outcome.budget_exhausted,
             response_usage_complete=outcome.response_usage_complete,
@@ -750,3 +752,107 @@ def test_later_incomplete_usage_does_not_erase_prior_token_components(
     assert report["consumed"] == 16
     assert report["usage_complete"] is False
     assert report["token_usage"]["uncached_input_tokens"] == 10
+
+
+@pytest.mark.parametrize("partial_segment", [0, 1])
+def test_claude_accounting_gap_still_completes_report_and_preserves_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    partial_segment: int,
+) -> None:
+    outcomes = [_Outcome(), _Outcome()]
+    outcomes[partial_segment] = _Outcome(
+        usage=TokenUsage(10, 3, 2, 1, 16, "partial"),
+        response_usage_complete=False,
+        observation_errors=("claude_response_usage_incomplete_or_unreconciled",),
+    )
+    context, runtime, _clock = _setup(tmp_path, monkeypatch, outcomes)
+    runtime.id = "claude"
+    successes: list[bool] = []
+    assert (
+        execute_agent_session(
+            context,
+            _config(),
+            "prompt",
+            completion_check=lambda _remaining: (
+                "Submit report" if len(runtime.requests) == 1 else None
+            ),
+            on_success=lambda: successes.append(True),
+        )
+        == 0
+    )
+    assert successes == [True]
+    assert runtime.requests[1].usage_budget == 984
+    report = _read_json(context.token_usage_path)
+    assert report["consumed"] == 32
+    assert report["usage_complete"] is False
+    assert report["usage_warnings"] == ["claude_response_usage_incomplete_or_unreconciled"]
+    assert context.session_trace_path is not None
+    metadata = _read_json(context.session_trace_path / "session.json")
+    assert metadata["response_usage_complete"] is False
+    assert metadata["accounting_usage"] == report
+    assert metadata["report_completion"]["state"] == "complete"
+
+
+@pytest.mark.parametrize("failure", ["capture", "policy", "process", "unknown", "budget", "empty"])
+def test_claude_usage_warning_cannot_mask_other_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    outcome = _Outcome(
+        usage=TokenUsage(10, 3, 2, 1, 16, "partial"),
+        response_usage_complete=False,
+        observation_errors=("claude_response_usage_incomplete_or_unreconciled",),
+    )
+    expected = 126
+    if failure == "capture":
+        outcome = replace(outcome, raw_provider_capture_complete=False)
+    elif failure == "policy":
+        outcome = replace(outcome, policy_diagnostics=("dependency policy violation",))
+    elif failure == "process":
+        outcome = replace(outcome, exit_status=7)
+        expected = 7
+    elif failure == "unknown":
+        outcome = replace(
+            outcome, observation_errors=(*outcome.observation_errors, "unknown_error")
+        )
+    elif failure == "empty":
+        outcome = replace(outcome, usage=TokenUsage.unavailable())
+    else:
+        outcome = replace(outcome, usage=TokenUsage(1_000, 0, 0, 0, 1_000, "partial"))
+        expected = 125
+    context, runtime, _clock = _setup(tmp_path, monkeypatch, [outcome])
+    runtime.id = "claude"
+
+    def unexpected(_remaining: float) -> None:
+        pytest.fail("non-accounting failures must still block report completion")
+
+    assert (
+        execute_agent_session(context, _config(), "prompt", completion_check=unexpected) == expected
+    )
+
+
+def test_reconciled_child_usage_counts_towards_budget_before_report_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, runtime, _clock = _setup(
+        tmp_path,
+        monkeypatch,
+        [
+            _Outcome(
+                usage=TokenUsage(6, 313_121, 40, 20, 313_187, "exact"),
+                observation_errors=("claude_terminal_usage_excludes_subagents",),
+            )
+        ],
+        usage_budget=310_000,
+    )
+    runtime.id = "claude"
+
+    def unexpected(_remaining: float) -> None:
+        pytest.fail("child usage must exhaust the logical session budget")
+
+    assert execute_agent_session(context, _config(), "prompt", completion_check=unexpected) == 125
+    report = _read_json(context.token_usage_path)
+    assert report["consumed"] == 313_187 and report["budget_exhausted"]

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from backends.adapter import ClaudeAdapter
-from backends.claude_ledger import ClaudeSessionLedger, observe_claude_usage
+from backends.claude_ledger import (
+    CLAUDE_MAIN_ONLY_USAGE,
+    CLAUDE_USAGE_UNRECONCILED,
+    ClaudeSessionLedger,
+    observe_claude_usage,
+)
 from backends.model import AgentRunRequest, TokenUsage
 from backends.process import ProcessObserver, ProcessResult
 from backends.runtime import ClaudeRuntime, TokenBudgetObserver
@@ -104,14 +110,52 @@ def test_capture_preserves_line_endings_and_filters_only_estimate_telemetry(tmp_
     assert observer.capture()[0].payload == payload
 
 
-def test_reconciliation_gap_does_not_replace_terminal_bill(tmp_path: Path) -> None:
+def test_reconciliation_gap_keeps_larger_terminal_counts_but_not_exact_label(
+    tmp_path: Path,
+) -> None:
     observer, path = ledger(tmp_path)
     path.write_text(message())
     terminal = TokenUsage(6, 14, 40, 20, 80, "exact")
     events, actual, complete, errors = observe_claude_usage(observer.capture(), (), terminal)
     assert not complete and errors
-    assert actual == terminal
+    assert actual == replace(terminal, measurement="partial")
     assert events[0].usage is not None and events[0].usage.measurement == "partial"
+
+
+def test_main_only_terminal_includes_children_in_accounting_once(tmp_path: Path) -> None:
+    observer, path = ledger(tmp_path)
+    path.write_text(message(output=303_051))
+    child = path.with_suffix("") / "subagents/agent-child.jsonl"
+    child.parent.mkdir(parents=True)
+    # Copied parent context and repeated child snapshots must not be charged twice.
+    child.write_text(message(output=1) + message("child", output=10_070) * 2)
+    terminal = TokenUsage(3, 303_051, 20, 10, 303_084, "exact")
+    events, actual, complete, errors = observe_claude_usage(observer.capture(), (), terminal)
+    assert complete
+    assert errors == (CLAUDE_MAIN_ONLY_USAGE,)
+    assert actual == TokenUsage(6, 313_121, 40, 20, 313_187, "exact")
+    assert len(events) == 3
+    assert events[-1].usage == actual
+    assert events[0].usage == terminal
+
+
+def test_stalled_terminal_uses_native_counts_as_partial_accounting(tmp_path: Path) -> None:
+    observer, path = ledger(tmp_path)
+    path.write_text(message(output=611_806, cached=42_600_000))
+    terminal = TokenUsage(3, 22_136, 1_500_000, 10, 1_522_149, "exact")
+    _events, actual, complete, errors = observe_claude_usage(observer.capture(), (), terminal)
+    assert not complete
+    assert errors == (CLAUDE_USAGE_UNRECONCILED,)
+    assert actual == TokenUsage(3, 611_806, 42_600_000, 10, 43_211_819, "partial")
+
+
+def test_mixed_bucket_disagreement_never_erases_known_consumption(tmp_path: Path) -> None:
+    observer, path = ledger(tmp_path)
+    path.write_text(message(output=100, cached=5))
+    terminal = TokenUsage(3, 10, 20, 10, 43, "exact")
+    _events, actual, complete, _errors = observe_claude_usage(observer.capture(), (), terminal)
+    assert not complete
+    assert actual == TokenUsage(3, 100, 20, 10, 133, "partial")
 
 
 def test_interrupted_native_usage_stays_partial(tmp_path: Path) -> None:

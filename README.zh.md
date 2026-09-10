@@ -133,7 +133,9 @@ Claude/Codex 原生会话捕获不完整时，阶段会失败，不会把不完�
 原生会话；这份实时视图尚未封存。进程回收后，Core 会丢弃实时视图，用捕获文件重建完整终态目录，
 再交给 Runtime 封存 Artifact。Coding Agent 不能预先创建或重定向 Runtime 选定的 Session 路径。
 
-Claude 使用全新 Session ID 并启用原生持久化，不恢复旧上下文。主会话和子会话 JSONL 分别保存在 `provider/claude-session.raw-jsonl`、`provider/claude-subagents/`，超时或失败时也尽力保留。`events.jsonl` 每个响应只保留最新 usage，并通过 `message_id`、`source_path` 关联原始工具调用。stdout 中间计数属于暂定值，重复更新替换旧值。只有原生逐响应计数与终态总账核对一致时，`session.json.response_usage_complete` 才为 true；缺失或不一致会标为 partial 并记录诊断，不用估算值替换终态总账。统计时不要重复累加 native/stdout 副本，也不要把终态总账再加到逐响应用量上。
+Claude 使用全新 Session ID 并启用原生持久化，不恢复旧上下文。主会话和子会话 JSONL 分别保存在 `provider/claude-session.raw-jsonl`、`provider/claude-subagents/`，超时或失败时也尽力保留。`events.jsonl` 每个响应只保留最新 usage，并通过 `message_id`、`source_path` 关联原始工具调用。stdout 中间计数属于暂定值，重复更新替换旧值。对账支持 terminal 覆盖主会话或整个会话树两种口径；记账始终对每个唯一子代理响应计费一次。主会话口径记录 `claude_terminal_usage_excludes_subagents`。无法对账时，对每个 Token 桶取 native/terminal 已知计数的较大值，标为 partial 并记录 `claude_response_usage_incomplete_or_unreconciled`，不声称是已核实账单。原始 terminal 事件保持不变。查看 `session.json.accounting_usage` 和 `response_usage_complete`；不要重复累加 native/stdout 副本，也不要把记账总量再加到逐响应用量上。
+
+单纯的已知 Claude 记账异常不再触发 `126` 或跳过报告补交。日志捕获失败、用量不可用、策略违规、Provider 非零退出及配额耗尽仍然阻断。Runtime 也必须支持 partial 记账报告，否则仍会拒绝交接；已冻结的 Bundle 不会自动升级。
 
 封存后的 `conversation.jsonl` 是阅读视图：Claude 优先使用原生内容，省去已被完整覆盖的 stdout 消息副本，保留不同的 thinking/text/tool 内容块、未被覆盖的 stdout 内容、诊断、压缩边界和终态结果。重复的初始 Prompt，以及原生队列、标题、文件历史等内部管理事件只从阅读视图中省去。封存前的实时视图仍跟随 stdout。原始 Provider 文件及规范化 usage 索引不变。
 
