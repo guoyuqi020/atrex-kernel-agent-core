@@ -40,7 +40,7 @@ def test_managed_prompt_paths_read_workspace_state(tmp_path: Path) -> None:
 
 
 def test_core_contains_indexed_initial_runtime_state() -> None:
-    for name in ("prompts", "memory", "knowledge", "skills", "tools", "hooks"):
+    for name in ("prompts", "insights", "skills", "tools"):
         readme = (CORE_ROOT / name / "README.md").read_text()
         assert "Whenever you add, change, rename, or remove" in readme
         assert "README" in readme

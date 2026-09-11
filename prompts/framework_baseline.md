@@ -16,12 +16,10 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 | writable baseline candidate copied from the seed | `work/kernel/` |
 | immutable Agent implementation and included Skills | `agent/optimizer/` |
 | read-only pinned upstream GPU kernel projects | `reference/` |
-| writable reusable search memories and lessons | `memory/` |
+| writable scoped, evidence-derived search conclusions | `insights/` |
 | writable inherited phase prompts and instructions | `prompts/` |
-| writable reusable knowledge and reference notes | `knowledge/` |
 | writable reusable procedures | `skills/` |
 | writable reusable tool scripts | `tools/` |
-| writable reusable Claude/Codex hook scripts and configuration snippets | `hooks/` |
 | temporary plans, requests, and notes | `scratch/` |
 
 Private evaluator inputs and exact cases are absent. The trusted task context below is authoritative
@@ -35,15 +33,16 @@ or an instruction selection, then write your own baseline. Copying a file wholes
 
 ## Execution boundary
 
-- Modify Kernel files only under `work/kernel/`; temporary files belong in `scratch/`. Deposit search
-  lessons before finishing in `memory/`, DSL/API and hardware knowledge in `knowledge/`, reusable procedures in `skills/`,
-  scripts in `tools/`, and Claude/Codex hook scripts/configuration snippets in `hooks/`.
-  These six State directories seed later Trajectories under the injected
+- Modify Kernel files only under `work/kernel/`; temporary files belong in `scratch/`. Deposit only
+  scoped conclusions that change later search decisions in `insights/`, reusable procedures in `skills/`,
+  and scripts in `tools/`.
+  These four State directories seed later Trajectories under the injected
   inheritance policy. Read their indexes first and update the corresponding `README.md` whenever
-  content is added, changed, renamed, or removed. Keep concise, reusable notes with source/evidence
-  references, not credentials or raw one-off measurements.
-  For hooks, document backend, event, invocation and verification status. Follow the injected
-  session-local Skill/Hook installation contract; never change host/global CLI configuration.
+  content is added, changed, renamed, or removed. Insights must cite their supporting identities and
+  state scope, decision effect, contrary evidence, and revisit condition. Do not restate Journal facts;
+  static reference material belongs in a Skill's references. Never store credentials or raw one-off measurements.
+  Follow the injected session-local Skill installation contract; never change host/global CLI
+  configuration.
 - Give every `Model` constructor parameter a default: `check` constructs `Model()` bare and reports
   the failure as an `error` diagnostic inside a `succeeded` job.
 - Candidate source importing `builtins` `cffi` `ctypes` `ftplib` `http` `importlib`

@@ -110,11 +110,9 @@ input/evidence/epochs/
 agent/optimizer/
 work/kernel/
 prompts/README.md
-memory/README.md
-knowledge/README.md
+insights/README.md
 skills/README.md
 tools/README.md
-hooks/README.md
 sessions/
 scratch/
 ```
@@ -126,20 +124,21 @@ ordinary Attempt, with Bootstrap-specific methodology and no prior Lineage histo
 Kernel Trials, and Agent-visible Result Artifacts become the root history inherited by later Optimizer Attempts.
 
 The Agent Problem is an internal Core input projected into the final Agent Prompt; its workspace
-path is not advertised to the Optimizer. The Agent may write `work/kernel`, `prompts/`, `memory/`, `knowledge/`, `skills/`, `tools/`, and
-`hooks/` and `scratch/`; `sessions/` is managed by Core and the Provider, while all declared inputs are read-only.
+path is not advertised to the Optimizer. The Agent may write `work/kernel`, `prompts/`, `insights/`, `skills/`, `tools/`, and
+`scratch/`; `sessions/` is managed by Core and the Provider, while all declared inputs are read-only.
 Runtime owns mount policy and may enforce that boundary with bubblewrap and cgroup v2. The Evaluation
 Contract is represented by a digest and never materialized for the Agent.
 
-`prompts/`, `memory/`, `knowledge/`, `skills/`, `tools/`, and `hooks/` are reusable across serial Attempts in one Epoch. Runtime scopes them
+`prompts/`, `insights/`, `skills/`, and `tools/` are reusable across serial Attempts in one Epoch. Runtime scopes them
 by Lineage, Agent revision, and Trajectory to avoid concurrent writers. At the next Epoch boundary,
 each Active Trajectory starts from an independent copy of the prior winner's best-Kernel Trajectory
 terminal State; each Challenger starts from its Evolver-sealed revision State. Bootstrap publishes
 the initial revision-wide seed copied into each new trajectory. Every reusable tool must be documented in
-`tools/README.md`. All six directories have a mandatory README index updated whenever content
-changes. Memory holds search lessons; Knowledge holds knowledge; Skills holds procedures; Tools holds
-scripts; Hooks holds Claude/Codex hook scripts and configuration snippets. With no inherited State,
-Runtime copies the six initial directories from the pinned Core.
+`tools/README.md`. All four directories have a mandatory README index updated whenever content
+changes. Insights hold scoped, evidence-derived conclusions that alter later search decisions;
+factual history remains in Runtime Journal and static reference material belongs in Skill references.
+Skills hold procedures and Tools hold scripts. With no inherited State, Runtime copies the four
+initial directories from the pinned Core.
 Reset-state ablation arms restore those Core seeds on every Attempt/retry.
 
 `runtime_tools.py` is the canonical Core client for Runtime HTTP capabilities. The delegated,

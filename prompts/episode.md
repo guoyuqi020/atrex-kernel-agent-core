@@ -125,16 +125,17 @@ Findings. Close any `in_progress` Direction with `block` or `defer`; do not fabr
 Use writable `prompts/` for reusable phase instructions; preserve configured paths and maintain its
 README. Prompt edits apply to later fresh sessions, not to the current conversation.
 
-Before the terminal Report, review this Attempt for knowledge that cost real effort and would be
-paid for again from scratch. Record reusable search lessons and dead ends in `memory/`, reusable DSL/API or
-hardware knowledge in `knowledge/`, repeatable procedures in `skills/`, scripts in `tools/`, and
-reusable Claude/Codex hook scripts and configuration snippets in `hooks/`. Read the
-six README indexes before adding content. Whenever you add, change, rename, or remove content,
+Before the terminal Report, review this Attempt for conclusions that cost real effort and would be
+paid for again from scratch. Record only scoped, evidence-derived conclusions that change later
+search decisions in `insights/`, repeatable procedures in `skills/`, and scripts in `tools/`. Read
+the four README indexes before adding content. Whenever you add, change, rename, or remove content,
 update the corresponding `README.md`; prefer improving an existing entry over a near-duplicate.
-Link relevant Journal/measurement identities, distinguish facts from analysis, and follow the
-injected Runtime State inheritance policy.
-For hooks, document backend, event, invocation and verification status. Follow the injected
-session-local Skill/Hook installation contract; never change host/global CLI configuration.
+Do not copy Journal facts such as Kernel versions, latency, changes, or outcomes into Insights.
+Every Insight must cite relevant Journal/measurement identities and state its scope, decision
+effect, contrary evidence, and revisit condition. Static reference material belongs in a Skill's
+references. Follow the injected Runtime State inheritance policy.
+Follow the injected session-local Skill installation contract; never change host/global CLI
+configuration.
 
 This is a required step, not an option. A retained method is worth more than a retained result, so
 deposit the reusable form rather than this Attempt's specific numbers. If nothing this Attempt

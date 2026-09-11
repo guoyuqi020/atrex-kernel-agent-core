@@ -56,7 +56,7 @@ Attempts from the currently selected revision. Active/Challenger roles are not e
 
 ## Runtime workspace
 
-The repository's `prompts/`, `memory/`, `knowledge/`, `skills/`, `tools/`, and `hooks/` contain initial Runtime State,
+The repository's `prompts/`, `insights/`, `skills/`, and `tools/` contain initial Runtime State,
 including an Agent-maintained README index in each. Runtime copies these from the pinned Core
 Revision into writable workspace directories when there is no inherited State. Bootstrap deposits
 and later checkpoints take precedence; they are not overwritten by these defaults. Reset-state
@@ -77,11 +77,9 @@ Core validates the Runtime-owned manifest before launching an Agent. A normal At
 ├── agent/optimizer/            # read-only implementation/config; initial State copies omitted
 ├── work/kernel/                # writable candidate
 ├── prompts/                    # writable, inherited phase prompts
-├── memory/                     # writable, inherited search memories
-├── knowledge/                  # writable, inherited knowledge
+├── insights/                   # writable, inherited decision guidance
 ├── skills/                     # writable, inherited procedures
 ├── tools/                      # writable, inherited scripts
-├── hooks/                      # writable, inherited hook definitions
 ├── sessions/                   # unredacted Agent-session artifacts
 └── scratch/                    # writable state owned by this Attempt
     ├── directions.json         # only Direction events added by this Attempt
@@ -91,7 +89,7 @@ Core validates the Runtime-owned manifest before launching an Agent. A normal At
     └── ...                     # Agent-facing requests, reports, and recovered files
 ```
 
-The Source workspace copy omits the six initial State directories; only the root-level State is
+The Source workspace copy omits the four initial State directories; only the root-level State is
 used by Optimizer. Edits to `prompts/` affect later fresh Sessions, not the already sent Prompt.
 The sealed Source Artifact remains complete.
 
@@ -218,11 +216,9 @@ an invalid/incomplete accounting outcome rather than guessed.
 │   ├── sessions/                     # phase prompts, execution, trace, and token reports
 │   └── backends/                     # Claude, Codex, Pi, and Qoder adapters
 ├── prompts/                          # phase methodology and protocol templates
-├── memory/                           # initial search memories and README index
-├── knowledge/                        # initial knowledge and README index
+├── insights/                         # initial scoped Insights and README index
 ├── skills/                           # initial reusable procedures and README index
 ├── tools/                            # initial tool scripts and README index
-├── hooks/                            # initial Claude/Codex hooks and README index
 ├── tests/                            # Core-owned unit and protocol-client tests
 ├── pyproject.toml                    # standalone Ruff, mypy, and pytest policy
 └── docs/                             # Core design and Runtime-oriented usage

@@ -1,7 +1,8 @@
 # Skills index
 
 Store reusable procedures: when to apply a method, its steps, prerequisites, and validation criteria.
-Use knowledge/ for reference knowledge, memory/ for search lessons, and tools/ for executable scripts.
+Use a Skill's references for static reference material, insights/ for evidence-derived search
+conclusions, and tools/ for executable scripts.
 
 For CLI discovery, use `<skill-name>/SKILL.md` with YAML `name` and `description` frontmatter;
 place supporting scripts/references inside that Skill directory. Before each Claude/Codex

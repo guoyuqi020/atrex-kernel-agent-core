@@ -137,17 +137,15 @@ def test_codex_installation_identity_is_a_writable_session_copy(tmp_path: Path) 
         assert temporary.close() is None
 
 
-@pytest.mark.parametrize("installed", ["0", "1"])
-def test_codex_hook_trust_is_invocation_local(
+def test_codex_does_not_enable_hook_bypass_from_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    installed: str,
 ) -> None:
     home = tmp_path / "private-codex"
     home.mkdir()
     (home / "hooks.json").write_text('{"hooks":{}}')
     monkeypatch.setenv("CODEX_HOME", str(home))
-    monkeypatch.setenv("ATREX_OPTIMIZER_CODEX_HOOKS", installed)
+    monkeypatch.setenv("ATREX_OPTIMIZER_CODEX_HOOKS", "1")
 
     def runner(
         command: list[str],
@@ -156,7 +154,7 @@ def test_codex_hook_trust_is_invocation_local(
         env: dict[str, str] | None = None,
         observer: ProcessObserver | None = None,
     ) -> ProcessResult:
-        assert ("--dangerously-bypass-hook-trust" in command) == (installed == "1")
+        assert "--dangerously-bypass-hook-trust" not in command
         assert env is not None
         assert env["CODEX_HOME"] != str(home)
         assert (Path(env["CODEX_HOME"]) / "hooks.json").read_text() == '{"hooks":{}}'

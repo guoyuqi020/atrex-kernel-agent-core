@@ -143,7 +143,7 @@ The selected Agent receives fixed paths:
 | public operator contract | injected directly into the final Prompt |
 | read-only Core implementation/config (State seeds omitted) | `agent/optimizer` |
 | read-only pinned upstream GPU kernel projects | `reference` |
-| adaptive phase prompts, memories, knowledge, procedures, scripts, hooks | `prompts`, `memory`, `knowledge`, `skills`, `tools`, `hooks` (each with `README.md`) |
+| adaptive phase prompts, scoped Insights, procedures, scripts | `prompts`, `insights`, `skills`, `tools` (each with `README.md`) |
 | requests, plan, journal, reports | `scratch` |
 | unredacted Agent Session Artifacts and normalized usage index | `sessions` |
 
