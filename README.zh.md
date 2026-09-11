@@ -50,11 +50,12 @@ Runtime 必须显式设置 `ATREX_CORE_PHASE`。每次进程只执行一个全�
 该文件是只读部署投影，不修改 Git 仓库或封存 Source Artifact；执行时仍以 Runtime 环境绑定为准。
 托管配置设置 `prompt_root: "workspace"`，`prompts/...` 相对于工作区根目录解析；独立运行默认
 使用 `prompt_root: "repository"`。Optimizer Source 工作副本省略四个初始 State 目录，只有根级
-可写 State；`prompts/` 的修改由后续新 Session 加载，不改变当前已提交 Prompt。封存 Source 保持完整。
+继承版本；其中 Prompts、Insights 与 Skills 对 Optimizer 只读，Evolver 的修改由后续新 Session
+加载，不改变当前已提交 Prompt。封存 Source 保持完整。
 
 仓库根级 `prompts/`、`insights/`、`skills/`、`tools/` 保存 Runtime State 的初始内容，
-各自包含由 Agent 维护的 README 索引。没有继承 State 时，Runtime 从固定的 Core Revision
-复制到工作区可写目录。Bootstrap 积累和后续 Checkpoint 优先，不会被初始内容覆盖；
+各自包含 README 索引；Evolver 维护前三者，Optimizer 只维护 Tools。没有继承 State 时，Runtime 从固定的 Core Revision
+复制到工作区根目录。Bootstrap 积累和后续 Checkpoint 优先，不会被初始内容覆盖；
 重置 State 的消融臂每次回到 Core 初始内容。工程文档目录 `docs/` 不属于 State。
 
 普通 Attempt 的固定结构为：
@@ -71,9 +72,9 @@ Runtime 必须显式设置 `ATREX_CORE_PHASE`。每次进程只执行一个全�
 │   │   └── epochs/             # trajectories/<n>/attempts/<n>/{report,conversation}
 ├── agent/optimizer/            # 只读实现与配置，不重复展示初始 State
 ├── work/kernel/                # 可写 candidate
-├── prompts/                    # 可写、继承的阶段指令
-├── insights/                   # 可写、继承的决策指导
-├── skills/                     # 可写、继承的复用流程
+├── prompts/                    # 只读、继承的阶段指令
+├── insights/                   # 只读、继承的决策指导
+├── skills/                     # 只读、继承的复用流程
 ├── tools/                      # 可写、继承的脚本
 ├── sessions/                   # 未脱敏 Agent Session Artifact
 └── scratch/                    # 本 Attempt 独占的可写状态

@@ -15,6 +15,10 @@ Whenever you add, change, rename, or remove content here, update this README wit
 claim, scope, evidence identities, decision effect, and superseded conclusion. Read this index before
 adding duplicates. Never store credentials here.
 
+Evolver owns changes to this directory after reviewing completed Session, Journal, and measurement
+evidence. Optimizer and Bootstrap sessions use Insights read-only and put new analysis in the Runtime
+Direction and Experiment Journal.
+
 ## Contents
 
 No initial Insights. Maintain the current file index here.

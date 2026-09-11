@@ -124,18 +124,21 @@ ordinary Attempt, with Bootstrap-specific methodology and no prior Lineage histo
 Kernel Trials, and Agent-visible Result Artifacts become the root history inherited by later Optimizer Attempts.
 
 The Agent Problem is an internal Core input projected into the final Agent Prompt; its workspace
-path is not advertised to the Optimizer. The Agent may write `work/kernel`, `prompts/`, `insights/`, `skills/`, `tools/`, and
-`scratch/`; `sessions/` is managed by Core and the Provider, while all declared inputs are read-only.
+path is not advertised to the Optimizer. The Agent may write `work/kernel`, `tools/`, and
+`scratch/`; `prompts/`, `insights/`, and `skills/` are read-only versioned Agent content.
+`sessions/` is managed by Core and the Provider, while all declared inputs are read-only.
 Runtime owns mount policy and may enforce that boundary with bubblewrap and cgroup v2. The Evaluation
 Contract is represented by a digest and never materialized for the Agent.
 
-`prompts/`, `insights/`, `skills/`, and `tools/` are reusable across serial Attempts in one Epoch. Runtime scopes them
-by Lineage, Agent revision, and Trajectory to avoid concurrent writers. At the next Epoch boundary,
+`prompts/`, `insights/`, `skills/`, and `tools/` are inherited across serial Attempts in one Epoch;
+Optimizer may modify only Tools, while Evolver owns versioned changes to the other three. Runtime
+scopes them by Lineage, Agent revision, and Trajectory. At the next Epoch boundary,
 each Active Trajectory starts from an independent copy of the prior winner's best-Kernel Trajectory
 terminal State; each Challenger starts from its Evolver-sealed revision State. Bootstrap publishes
 the initial revision-wide seed copied into each new trajectory. Every reusable tool must be documented in
-`tools/README.md`. All four directories have a mandatory README index updated whenever content
-changes. Insights hold scoped, evidence-derived conclusions that alter later search decisions;
+`tools/README.md`. All four directories have a mandatory README index; Evolver maintains the first
+three and Optimizer maintains Tools when their content changes. Insights hold scoped,
+evidence-derived conclusions that alter later search decisions;
 factual history remains in Runtime Journal and static reference material belongs in Skill references.
 Skills hold procedures and Tools hold scripts. With no inherited State, Runtime copies the four
 initial directories from the pinned Core.

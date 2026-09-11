@@ -42,8 +42,13 @@ def test_managed_prompt_paths_read_workspace_state(tmp_path: Path) -> None:
 def test_core_contains_indexed_initial_runtime_state() -> None:
     for name in ("prompts", "insights", "skills", "tools"):
         readme = (CORE_ROOT / name / "README.md").read_text()
-        assert "Whenever you add, change, rename, or remove" in readme
         assert "README" in readme
+    assert "read-only" in (CORE_ROOT / "prompts/README.md").read_text()
+    assert "Evolver owns changes" in (CORE_ROOT / "insights/README.md").read_text()
+    assert "Evolver owns changes" in (CORE_ROOT / "skills/README.md").read_text()
+    assert "Whenever you add, change, rename, or remove" in (
+        CORE_ROOT / "tools/README.md"
+    ).read_text()
     assert (CORE_ROOT / "docs/design.md").is_file()
 
 

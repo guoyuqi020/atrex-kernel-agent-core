@@ -76,9 +76,9 @@ Core validates the Runtime-owned manifest before launching an Agent. A normal At
 │   │   └── epochs/             # trajectories/<n>/attempts/<n>/{report,conversation}
 ├── agent/optimizer/            # read-only implementation/config; initial State copies omitted
 ├── work/kernel/                # writable candidate
-├── prompts/                    # writable, inherited phase prompts
-├── insights/                   # writable, inherited decision guidance
-├── skills/                     # writable, inherited procedures
+├── prompts/                    # read-only, inherited phase prompts
+├── insights/                   # read-only, inherited decision guidance
+├── skills/                     # read-only, inherited procedures
 ├── tools/                      # writable, inherited scripts
 ├── sessions/                   # unredacted Agent-session artifacts
 └── scratch/                    # writable state owned by this Attempt
@@ -90,7 +90,8 @@ Core validates the Runtime-owned manifest before launching an Agent. A normal At
 ```
 
 The Source workspace copy omits the four initial State directories; only the root-level State is
-used by Optimizer. Edits to `prompts/` affect later fresh Sessions, not the already sent Prompt.
+used by Optimizer. Evolver's edits to `prompts/` affect later fresh Sessions, not a Prompt already
+sent to a running Session.
 The sealed Source Artifact remains complete.
 
 `.runtime/` is an internal Runtime-to-Core control surface. Core locates it through the launch

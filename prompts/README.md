@@ -1,11 +1,12 @@
 # Prompts index
 
-Store the Agent's phase prompts and tool-protocol instructions. In managed Optimizer workspaces,
-this directory is writable State and is inherited like insights/, skills/, and tools/. Edits
-affect later fresh sessions, not the prompt already sent to the current session.
+Store the Agent's versioned phase prompts and tool-protocol instructions. This directory is
+read-only in managed Optimizer and Bootstrap sessions; Evolver may revise it for a later Agent
+Revision.
 Injected authority, tool schemas, and evaluation rules remain controlled by the trusted controller.
 
-Whenever you add, change, rename, or remove a prompt, update this README with its path, phase,
+When evolving the Agent, update this README after adding, changing, renaming, or removing a prompt,
+including its path, phase,
 purpose, and dependencies. Preserve the paths referenced by the Agent configuration unless that
 configuration is updated too. Do not store credentials, temporary requests, or raw session traces.
 

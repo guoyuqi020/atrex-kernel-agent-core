@@ -16,9 +16,9 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 | writable baseline candidate copied from the seed | `work/kernel/` |
 | immutable Agent implementation and included Skills | `agent/optimizer/` |
 | read-only pinned upstream GPU kernel projects | `reference/` |
-| writable scoped, evidence-derived search conclusions | `insights/` |
-| writable inherited phase prompts and instructions | `prompts/` |
-| writable reusable procedures | `skills/` |
+| read-only scoped, evidence-derived search conclusions | `insights/` |
+| read-only inherited phase prompts and instructions | `prompts/` |
+| read-only reusable procedures installed for Claude | `skills/` |
 | writable reusable tool scripts | `tools/` |
 | temporary plans, requests, and notes | `scratch/` |
 
@@ -33,16 +33,13 @@ or an instruction selection, then write your own baseline. Copying a file wholes
 
 ## Execution boundary
 
-- Modify Kernel files only under `work/kernel/`; temporary files belong in `scratch/`. Deposit only
-  scoped conclusions that change later search decisions in `insights/`, reusable procedures in `skills/`,
-  and scripts in `tools/`.
-  These four State directories seed later Trajectories under the injected
-  inheritance policy. Read their indexes first and update the corresponding `README.md` whenever
-  content is added, changed, renamed, or removed. Insights must cite their supporting identities and
-  state scope, decision effect, contrary evidence, and revisit condition. Do not restate Journal facts;
-  static reference material belongs in a Skill's references. Never store credentials or raw one-off measurements.
-  Follow the injected session-local Skill installation contract; never change host/global CLI
-  configuration.
+- Modify Kernel files only under `work/kernel/`; temporary files belong in `scratch/`.
+  `prompts/`, `insights/`, and `skills/` are read-only Agent Revision content: use them, but do not
+  edit them. Record new hypotheses, evidence, and conclusions through the Runtime Direction and
+  Experiment Journal. Put only genuinely reusable executable helpers in writable `tools/`, and
+  update `tools/README.md` whenever its contents change. Evolver reviews completed Session evidence
+  and owns later changes to Prompts, Insights, and Skills. Never store credentials or raw one-off
+  measurements, and never change host/global CLI configuration.
 - Give every `Model` constructor parameter a default: `check` constructs `Model()` bare and reports
   the failure as an `error` diagnostic inside a `succeeded` job.
 - Candidate source importing `builtins` `cffi` `ctypes` `ftplib` `http` `importlib`

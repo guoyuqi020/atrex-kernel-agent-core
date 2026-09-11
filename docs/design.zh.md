@@ -103,12 +103,13 @@ Bootstrap 被视为 Epoch 之前的一次特殊 Attempt；Agent 可见 Evidence 
 Kernel Trial 和 Agent 可见 Result Artifact 会成为后续 Optimizer Attempt 继承的根历史。
 
 Agent Problem 是 Core 内部输入，由 Core 投影进最终 Agent Prompt；Optimizer 不会获知其工作区
-路径。Agent 可以写入 `work/kernel`、`prompts/`、`insights/`、`skills/`、`tools/` 与 `scratch/`；`sessions/` 由 Core 和
-Provider 管理，其余声明输入均只读。Runtime 通过 Bubblewrap 与 cgroup v2 约束挂载、进程和资源。
+路径。Agent 可以写入 `work/kernel`、`tools/` 与 `scratch/`；`prompts/`、`insights/` 和 `skills/` 是只读的
+版本化 Agent 内容；`sessions/` 由 Core 和 Provider 管理，其余声明输入均只读。Runtime 通过 Bubblewrap 与 cgroup v2 约束挂载、进程和资源。
 Evaluation Contract 只暴露 Digest。
 
-`prompts/`、`insights/`、`skills/` 与 `tools/` 是可写 State，并在同一 Epoch 的串行 Attempt 之间复用。Runtime 按
-Lineage、Agent Revision 和 Trajectory 隔离，避免并发写冲突。进入下一 Epoch 时，每条 Active
+`prompts/`、`insights/`、`skills/` 与 `tools/` 在同一 Epoch 的串行 Attempt 之间继承；Optimizer 只能
+修改 Tools，前三者由 Evolver 进行版本化修改。Runtime 按 Lineage、Agent Revision 和 Trajectory
+隔离。进入下一 Epoch 时，每条 Active
 Trajectory 都从上一 Epoch 获胜分支最佳 Kernel Trajectory 的终态 State 获得独立副本；Challenger
 从 Evolver 封存的 Revision State 开始。Bootstrap 会发布 Revision 级初始 Seed，再复制给每条新
 Trajectory。每个可复用工具

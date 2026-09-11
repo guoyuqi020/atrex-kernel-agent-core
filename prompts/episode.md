@@ -11,8 +11,9 @@ workspace, Evidence view, task identity, and tool protocols.
 
 ## Execution boundary
 
-- Modify the candidate Kernel only under `work/kernel/`. Use the injected reusable directories only
-  for genuinely reusable Agent methods or tools, and use `scratch/` for temporary work.
+- Modify the candidate Kernel only under `work/kernel/`. Treat `prompts/`, `insights/`, and
+  `skills/` as read-only Agent Revision content. Put genuinely reusable executable helpers in
+  writable `tools/`, and use `scratch/` for temporary work.
 - Give every `Model` constructor parameter a default: `check` constructs `Model()` bare and reports
   the failure as an `error` diagnostic inside a `succeeded` job.
 - Candidate source importing `builtins` `cffi` `ctypes` `ftplib` `http` `importlib`
@@ -120,27 +121,16 @@ construction, retry behavior, and terminal validation; do not reconstruct the Jo
 at the end. If no experiment was completed, `blocked` or `pivot` may have zero Experiments and empty
 Findings. Close any `in_progress` Direction with `block` or `defer`; do not fabricate evidence to finish.
 
-### 8. Deposit what the next Attempt would otherwise re-derive
+### 8. Preserve reusable execution helpers
 
-Use writable `prompts/` for reusable phase instructions; preserve configured paths and maintain its
-README. Prompt edits apply to later fresh sessions, not to the current conversation.
+Before the terminal Report, review any scripts created during this Attempt. Move only genuinely
+reusable executable helpers into `tools/`, improve an existing Tool instead of duplicating it, and
+update its index with invocation, inputs, outputs, side effects, dependencies, an example, and
+limitations. Keep one-off probes and raw results in `scratch/`.
 
-Before the terminal Report, review this Attempt for conclusions that cost real effort and would be
-paid for again from scratch. Record only scoped, evidence-derived conclusions that change later
-search decisions in `insights/`, repeatable procedures in `skills/`, and scripts in `tools/`. Read
-the four README indexes before adding content. Whenever you add, change, rename, or remove content,
-update the corresponding `README.md`; prefer improving an existing entry over a near-duplicate.
-Do not copy Journal facts such as Kernel versions, latency, changes, or outcomes into Insights.
-Every Insight must cite relevant Journal/measurement identities and state its scope, decision
-effect, contrary evidence, and revisit condition. Static reference material belongs in a Skill's
-references. Follow the injected Runtime State inheritance policy.
-Follow the injected session-local Skill installation contract; never change host/global CLI
-configuration.
-
-This is a required step, not an option. A retained method is worth more than a retained result, so
-deposit the reusable form rather than this Attempt's specific numbers. If nothing this Attempt
-learned is reusable, say so in the Report `analysis` — an empty deposit must be a decision, not an
-omission.
+Use existing Prompts, Insights, and Skills when relevant, but do not modify them. Record new
+hypotheses, evidence, and conclusions through the Runtime Direction and Experiment Journal. Evolver
+reviews completed Session evidence and owns later changes to Prompts, Insights, and Skills.
 
 ## Terminal behavior
 
