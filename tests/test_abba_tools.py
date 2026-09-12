@@ -115,7 +115,7 @@ def test_evaluate_comparison_uploads_a_and_b_and_preserves_result(
     assert "evaluation" not in response and "schema_version" not in response
 
 
-def test_default_evaluate_keeps_the_original_wire_request_and_idempotency(
+def test_default_evaluate_uses_a_fresh_invocation_identity(
     context: Any, captured_requests: list[dict[str, Any]]
 ) -> None:
     runtime_tools.gateway_execute(context, {"operation": "evaluate"})
@@ -132,10 +132,9 @@ def test_default_evaluate_keeps_the_original_wire_request_and_idempotency(
             ]
         },
     }
-    assert captured_requests[0] == {
-        **expected,
-        "idempotency_key": runtime_tools._idempotency_key("gateway", expected),
-    }
+    sent = captured_requests[0]
+    assert {key: value for key, value in sent.items() if key != "idempotency_key"} == expected
+    assert sent["idempotency_key"].startswith("core-gateway-")
 
 
 @pytest.mark.parametrize("comparison", [None, _comparison()])
@@ -183,7 +182,7 @@ def test_source_directory_preserves_relative_names(
     ]
 
 
-def test_comparison_idempotency_uses_sources_inputs_and_schedule_not_local_paths(
+def test_comparison_uses_fresh_invocation_identities_and_content_payloads(
     context: Any, captured_requests: list[dict[str, Any]]
 ) -> None:
     source = context.workspace / "scratch/input.py"
@@ -209,7 +208,12 @@ def test_comparison_idempotency_uses_sources_inputs_and_schedule_not_local_paths
     (context.workspace / "scratch/baseline.py").rename(context.workspace / "scratch/renamed.py")
     request["comparison"]["baseline_path"] = "scratch/renamed.py"
     runtime_tools.gateway_execute(context, request)
-    assert len({value["idempotency_key"] for value in captured_requests}) == 1
+    assert len({value["idempotency_key"] for value in captured_requests}) == 4
+    normalized = [
+        {key: value for key, value in request.items() if key != "idempotency_key"}
+        for request in captured_requests
+    ]
+    assert all(value == normalized[0] for value in normalized[1:])
 
     source.write_text(_INPUT + "# changed\n", encoding="utf-8")
     runtime_tools.gateway_execute(context, request)
@@ -222,7 +226,7 @@ def test_comparison_idempotency_uses_sources_inputs_and_schedule_not_local_paths
     )
     (context.working_kernel / "kernel.py").write_text("def next_candidate(): pass\n")
     runtime_tools.gateway_execute(context, request)
-    assert len({value["idempotency_key"] for value in captured_requests}) == 6
+    assert len({value["idempotency_key"] for value in captured_requests}) == 9
     assert captured_requests[0]["comparison"] == {"method": "abba", "repeats": 2}
 
 

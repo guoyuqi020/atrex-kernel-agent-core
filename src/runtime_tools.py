@@ -540,7 +540,14 @@ def gateway_execute(context: RuntimeToolContext, request: dict[str, Any]) -> dic
         value["files"] = _dev_files(context, value)
     if operation in _CANDIDATE_OPERATIONS and operation != "evaluate":
         value["candidate"] = _candidate(context.working_kernel)
-    value["idempotency_key"] = _idempotency_key("gateway", value)
+    # A full Evaluate/ABBA invocation must reach Runtime's semantic task guard so
+    # an already measured exact Kernel is rejected with its prior Result Artifact.
+    # Other operations keep content-derived idempotency and safe replay behavior.
+    value["idempotency_key"] = (
+        f"core-gateway-{uuid4().hex}"
+        if operation == "evaluate" and value.get("mode", "full") == "full"
+        else _idempotency_key("gateway", value)
+    )
     response = _post(context.gateway_url, context.gateway_capability, "/v1/operations", value)
     return _agent_gateway_response(response, request)
 

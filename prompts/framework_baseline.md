@@ -105,12 +105,14 @@ Use bounded `gateway-execute` requests with `operation="dev"` or `operation="che
 compilation and correctness repair. Then evaluate the exact current candidate with a full
 `gateway-execute` request containing `{"operation":"evaluate"}`.
 
-Every `evaluate` call is an exploratory measurement of the exact `work/kernel/` tree at that
-moment. You may measure the unchanged seed once during Bootstrap and submit multiple repaired
-candidates. Core assigns their request identities, and the controller durably retains every
-evaluated Kernel and raw result. Record each meaningful repair as an Experiment using the previous
-measured subject as `before` and the newly measured subject as `after`. These measurements are
-evidence, not the authoritative baseline outcome.
+Every accepted `evaluate` is an exploratory measurement of the exact `work/kernel/` tree at that
+moment. It runs three complete measurements and returns their per-Shape median. You may measure the
+unchanged seed once during Bootstrap and submit multiple materially different repaired candidates,
+but the controller rejects a repeated identical Kernel task and points to its prior Result Artifact.
+Core assigns request identities, and the controller durably retains every evaluated Kernel and raw
+result. Record each meaningful repair as an Experiment using the previous measured subject as
+`before` and the newly measured subject as `after`. These measurements are evidence, not the
+authoritative baseline outcome.
 
 The first measured construction has no measured predecessor. Save the request below as
 `scratch/baseline-experiment.json`, then invoke `record-experiment` with that request using the

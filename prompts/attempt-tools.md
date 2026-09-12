@@ -94,9 +94,11 @@ the same exact B in the same Attempt and recovery generation keeps the same Tria
 A Gateway call blocks until its Job reaches a terminal state, which for `evaluate`, `profile`,
 `check`, and `disassemble` may take a long time. Let the command finish and keep stderr out of the
 JSON on stdout, because appending `2>&1` corrupts the result you then have to parse. Runtime owns Job
-tracking and recovery; do not build polling or retry loops. If a local process interruption loses a
-response, run the identical request again. Runtime either reconnects to the in-flight operation or
-replays its recorded Result without spending GPU time or call budget.
+tracking and recovery; do not build polling or retry loops. One accepted full `evaluate` or ABBA
+request runs three complete measurements and returns their per-Shape median. The same exact Kernel
+task cannot be submitted again in this Lineage. A duplicate error reports
+`previous_result_artifact_digest`; load that Result Artifact instead of changing or resubmitting
+unchanged source. Network retries inside one CLI invocation remain idempotent.
 
 An expected tool failure prints one JSON Object and exits nonzero. For request mistakes, repair the
 compact `issues` first, then use the operation-specific `request_schema`; an unknown operation
