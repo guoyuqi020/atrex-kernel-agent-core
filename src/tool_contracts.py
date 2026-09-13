@@ -155,6 +155,39 @@ def _direction_schema() -> dict[str, Any]:
             "analysis": _text(),
         }
     )
+    proposal["properties"].update(
+        {
+            "relationship": {
+                "enum": [
+                    "retry",
+                    "refinement",
+                    "reimplementation",
+                    "correction",
+                    "port",
+                    "combination",
+                ]
+            },
+            "derived_from_direction_ids": {
+                "type": "array",
+                "maxItems": 32,
+                "uniqueItems": True,
+                "items": _identifier("direction_"),
+            },
+            "derived_from_experiment_ids": {
+                "type": "array",
+                "maxItems": 32,
+                "uniqueItems": True,
+                "items": _identifier("experiment_"),
+            },
+            "supersedes_direction_id": {"anyOf": [_identifier("direction_"), {"type": "null"}]},
+        }
+    )
+    proposal["description"] = (
+        "Optional genealogy is declared once at proposal. Parents must be visible; combination "
+        "requires two distinct parent Directions, directly or via Experiments. Only correction "
+        "may supersede a parent. Explain the relationship in rationale. To correct ancestry, "
+        "propose a new derived Direction rather than rewriting the old one."
+    )
     return {"oneOf": [proposal, update]}
 
 

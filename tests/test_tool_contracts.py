@@ -2,8 +2,35 @@
 
 from __future__ import annotations
 
-from runtime_tools import _EXPERIMENT_FIELDS, _REPORT_FIELDS
+from runtime_tools import _EXPERIMENT_FIELDS, _REPORT_FIELDS, _validate_direction_events
 from tool_contracts import local_validation_issue, tool_recovery, tool_request_schema
+
+
+def test_direction_genealogy_schema_and_canonical_journal_round_trip() -> None:
+    schema = tool_request_schema("update-direction")
+    assert schema is not None
+    proposal = schema["oneOf"][0]
+    assert "relationship" not in proposal["required"]
+    assert proposal["properties"]["derived_from_direction_ids"]["uniqueItems"] is True
+    event = {
+        "direction_id": "direction_" + "a" * 32,
+        "direction_event_id": "directionevent_" + "b" * 32,
+        "recorded_at": "2026-01-01T00:00:00+00:00",
+        "action": "propose",
+        "name": "refinement",
+        "hypothesis": "narrower mechanism",
+        "rationale": "prior evidence",
+        "plan": ["implement"],
+        "success_criteria": "faster",
+        "stop_conditions": "no gain",
+        "analysis": None,
+        "supporting_experiment_ids": [],
+        "relationship": "refinement",
+        "derived_from_direction_ids": ["direction_" + "c" * 32],
+        "derived_from_experiment_ids": [],
+        "supersedes_direction_id": None,
+    }
+    assert _validate_direction_events([event], "journal") == [event]
 
 
 def test_complex_local_schemas_track_validator_top_level_fields() -> None:

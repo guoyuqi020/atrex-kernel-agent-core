@@ -907,9 +907,45 @@ def _validate_experiment_id_array(value: object, label: str) -> list[str]:
 
 def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, Any]]:
     validated: list[dict[str, Any]] = []
+    relationship_fields = {
+        "relationship",
+        "derived_from_direction_ids",
+        "derived_from_experiment_ids",
+        "supersedes_direction_id",
+    }
     for event in events:
-        if not isinstance(event, dict) or set(event) != _direction_event_fields():
+        if (
+            not isinstance(event, dict)
+            or set(event) - relationship_fields != _direction_event_fields()
+        ):
             raise ValueError(f"{label} contains a malformed event")
+        if any(event.get(key) for key in relationship_fields):
+            if event.get("action") != "propose":
+                raise ValueError("Direction genealogy belongs only to the immutable proposal")
+            if event.get("relationship") not in {
+                "retry",
+                "refinement",
+                "reimplementation",
+                "correction",
+                "port",
+                "combination",
+            }:
+                raise ValueError("Direction relationship is invalid")
+            parents = _text_array(event.get("derived_from_direction_ids", []), "parent Directions")
+            if len(parents) > 32 or len(set(parents)) != len(parents):
+                raise ValueError(
+                    "Parent Direction IDs must be unique and contain at most 32 entries"
+                )
+            for parent in parents:
+                _validate_direction_id(parent)
+            experiments = _validate_experiment_id_array(
+                event.get("derived_from_experiment_ids", []),
+                "parent Experiments",
+            )
+            if not parents and not experiments:
+                raise ValueError("Direction relationship requires parent references")
+            if event.get("supersedes_direction_id") is not None:
+                _validate_direction_id(event["supersedes_direction_id"])
         _validate_direction_id(event.get("direction_id"))
         event_id = event.get("direction_event_id")
         if (
