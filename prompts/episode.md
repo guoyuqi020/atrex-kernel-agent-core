@@ -42,7 +42,7 @@ relevant to the present bottleneck. Do not replay the entire lineage by default.
 
 Honor the injected measurement-reuse policy. Reuse matching trusted measurements and exact source;
 do not repeat work merely because an earlier Agent's interpretation may be wrong. To nominate exact
-historical source, record this Attempt's `adopt` decision using real before/after Trial IDs; Runtime
+historical source, record this Attempt's `adopt` decision using real before/after Result Artifact digests; Runtime
 validates the historical full-Evaluate evidence and keeps the Trial's original ownership.
 
 ### 2. Choose and plan one causal hypothesis

@@ -124,7 +124,6 @@ def _fake_citable_profile_results(context: Any) -> list[dict[str, Any]]:
     # The Runtime projection comes from observations, not Experiment subjects.
     return deepcopy(_FAKE_PROFILES.setdefault(str(context.workspace), [{
         "kernel_artifact_digest": "sha256:" + "d" * 64,
-        "kernel_trial_id": "gtrial_" + "e" * 32,
         "result_artifact_digest": "sha256:" + "f" * 64,
     }]))
 
@@ -340,8 +339,8 @@ def _experiment(direction_id: str = "direction_" + "a" * 32) -> dict[str, object
         "name": "vectorize load",
         "hypothesis": "one transaction replaces two",
         "change": "use a vector load",
-        "before": {"kernel_trial_id": "gtrial_" + "b" * 32},
-        "after": {"kernel_trial_id": "gtrial_" + "e" * 32},
+        "before": {"result_artifact_digest": "sha256:" + "c" * 64},
+        "after": {"result_artifact_digest": "sha256:" + "f" * 64},
         "evidence": "evaluation result sha256:example",
         "analysis": "the hypothesis held because latency improved",
         "action": "keep_after",
@@ -352,18 +351,16 @@ def _materialized_subject(value: object) -> object:
     if value is None:
         return None
     assert isinstance(value, dict)
-    trial_id = value["kernel_trial_id"]
+    trial_id = value["result_artifact_digest"]
     assert isinstance(trial_id, str)
-    if trial_id == "gtrial_" + "b" * 32:
+    if trial_id == "sha256:" + "c" * 64:
         return {
             "kernel_artifact_digest": "sha256:" + "a" * 64,
-            "kernel_trial_id": trial_id,
             "result_artifact_digests": ["sha256:" + "c" * 64],
         }
-    if trial_id == "gtrial_" + "e" * 32:
+    if trial_id == "sha256:" + "f" * 64:
         return {
             "kernel_artifact_digest": "sha256:" + "d" * 64,
-            "kernel_trial_id": trial_id,
             "result_artifact_digests": ["sha256:" + "f" * 64],
         }
     return value
@@ -460,7 +457,6 @@ def _report(experiment_id: str) -> dict[str, object]:
                 {
                     "operation": "profile",
                     "kernel_artifact_digest": "sha256:" + "d" * 64,
-                    "kernel_trial_id": "gtrial_" + "e" * 32,
                     "result_artifact_digest": "sha256:" + "f" * 64,
                 }
             ],
@@ -477,7 +473,7 @@ def _report(experiment_id: str) -> dict[str, object]:
                 "supporting_experiment_ids": [experiment_id],
             }
         ],
-        "contributing_kernel_trial_ids": ["gtrial_" + "e" * 32],
+        "contributing_result_artifact_digests": ["sha256:" + "f" * 64],
         "blocker": None,
     }
 
@@ -1087,37 +1083,37 @@ def test_attempt_report_rejects_invalid_lists_before_publication(tmp_path: Path)
 
 @pytest.mark.parametrize(
     "trials",
-    [["not-a-trial"], ["not-a-trial"] * 2, [123], ["gtrial_" + "a" * 32] * 65],
+    [["not-a-trial"], ["not-a-trial"] * 2, [123], ["sha256:" + "a" * 64] * 65],
 )
-def test_attempt_report_rejects_invalid_contributing_kernel_trial_ids(
+def test_attempt_report_rejects_invalid_contributing_result_artifact_digests(
     tmp_path: Path, trials: list[object],
 ) -> None:
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
     report = _report(receipt["experiment_id"])
 
-    report["contributing_kernel_trial_ids"] = trials
-    with pytest.raises(ValueError, match="contributing_kernel_trial_ids"):
+    report["contributing_result_artifact_digests"] = trials
+    with pytest.raises(ValueError, match="contributing_result_artifact_digests"):
         attempt_report(context, report)
     assert not context.report_path.exists()
     assert _REGISTERED_REPORTS == []
 
 
 @pytest.mark.parametrize("suffixes", ["", "ab", "ba", "baba", "a" * 64])
-def test_attempt_report_normalizes_contributing_kernel_trial_ids(
+def test_attempt_report_normalizes_contributing_result_artifact_digests(
     tmp_path: Path, suffixes: str,
 ) -> None:
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
     report = _report(receipt["experiment_id"])
-    trials = ["gtrial_" + suffix * 32 for suffix in suffixes]
-    report["contributing_kernel_trial_ids"] = trials
+    trials = ["sha256:" + suffix * 64 for suffix in suffixes]
+    report["contributing_result_artifact_digests"] = trials
     original = deepcopy(report)
 
     published = attempt_report(context, report)
     assert published["report_status"] == "candidate_ready"
     stored = json.loads(context.report_path.read_text(encoding="utf-8"))
-    assert stored["contributing_kernel_trial_ids"] == sorted(set(trials))
+    assert stored["contributing_result_artifact_digests"] == sorted(set(trials))
     assert _REGISTERED_REPORTS[-1] == stored
     assert report == original
 
@@ -1137,7 +1133,7 @@ def test_attempt_report_rejects_incomplete_profile_evidence(tmp_path: Path) -> N
 
 @pytest.mark.parametrize(("field", "value"), [
     ("kernel_artifact_digest", "sha256:" + "1" * 64),
-    ("kernel_trial_id", "gtrial_" + "1" * 32),
+    ("result_artifact_digest", "sha256:" + "1" * 64),
     ("result_artifact_digest", "sha256:" + "1" * 64),
 ])
 def test_attempt_report_rejects_profile_not_observed_by_runtime(
@@ -1164,7 +1160,6 @@ def test_attempt_report_can_cite_a_profile_without_any_experiment_reference(tmp_
     # A visible historical or newly measured Profile need not be in this Journal.
     _FAKE_PROFILES[str(context.workspace)] = [{
         "kernel_artifact_digest": "sha256:" + "2" * 64,
-        "kernel_trial_id": "gtrial_" + "3" * 32,
         "result_artifact_digest": "sha256:" + "4" * 64,
     }]
     report = _report(str(receipt["experiment_id"]))
@@ -1174,7 +1169,6 @@ def test_attempt_report_can_cite_a_profile_without_any_experiment_reference(tmp_
         {
             "operation": "profile",
             "kernel_artifact_digest": "sha256:" + "2" * 64,
-            "kernel_trial_id": "gtrial_" + "3" * 32,
             "result_artifact_digest": "sha256:" + "4" * 64,
         }
     ]
@@ -1188,7 +1182,7 @@ def test_blocked_report_can_cite_profile_without_creating_a_journal(tmp_path: Pa
     context = _context(tmp_path)
     report = _report("unused")
     report.update(status="blocked", final_candidate=None, blocker="cannot repair the candidate",
-                  findings=[], contributing_kernel_trial_ids=[])
+                  findings=[], contributing_result_artifact_digests=[])
 
     assert attempt_report(context, report)["report_status"] == "blocked"
     assert _REGISTERED_REPORTS[-1]["experiments"] == []
@@ -1284,16 +1278,17 @@ def test_runtime_queries_have_dedicated_commands_and_endpoint(
 
     monkeypatch.setattr(runtime_tools, "_post", fake_post)
 
-    trial_id = "gtrial_" + "d" * 32
-    assert runtime_query(context, "kernel-trial-show", {"kernel_trial_id": trial_id}) == {
-        "kernel_artifact_digest": "sha256:" + "c" * 64,
-        "result_artifacts": [],
+    trial_id = "sha256:" + "d" * 64
+    assert runtime_query(context, "result-artifact-read", {"result_artifact_digest": trial_id}) == {
+        "operation": "evaluate",
+        "status": "completed",
+        "result": {"correct": True},
     }
     path, value = calls[0]
     assert path == "/v1/runtime/queries"
     assert isinstance(value, dict)
-    assert value["operation"] == "kernel_trial_show"
-    assert value["kernel_trial_id"] == trial_id
+    assert value["operation"] == "result_artifact_read"
+    assert value["result_artifact_digest"] == trial_id
     assert runtime_query(
         context,
         "result-artifact-read",
@@ -1325,8 +1320,8 @@ def test_runtime_queries_have_dedicated_commands_and_endpoint(
     with pytest.raises(ValueError, match="Runtime-owned fields"):
         runtime_query(
             context,
-            "kernel-trial-show",
-            {"kernel_trial_id": trial_id, "idempotency_key": "agent-controlled"},
+            "result-artifact-read",
+            {"result_artifact_digest": trial_id, "idempotency_key": "agent-controlled"},
         )
     with pytest.raises(ValueError, match="under scratch"):
         runtime_query(
@@ -1353,7 +1348,6 @@ def test_gateway_execute_hides_wire_schema_version(
             "operation": "env",
             "status": "completed",
             "kernel_artifact_digest": None,
-            "kernel_trial_id": None,
             "result_artifact_digest": "sha256:" + "e" * 64,
             "job_id": None,
             "evaluation": None,
@@ -1394,7 +1388,6 @@ def test_gateway_execute_returns_read_only_service_result_directly(
             "operation": "env",
             "status": "completed",
             "kernel_artifact_digest": None,
-            "kernel_trial_id": None,
             "result_artifact_digest": "sha256:" + "e" * 64,
             "job_id": None,
             "evaluation": None,
@@ -1422,7 +1415,6 @@ def test_gateway_execute_preserves_canonical_evaluation_result(
             "operation": "evaluate",
             "status": "completed",
             "kernel_artifact_digest": "sha256:" + "a" * 64,
-            "kernel_trial_id": "gtrial_" + "b" * 32,
             "result_artifact_digest": "sha256:" + "c" * 64,
             "job_id": None,
             "evaluation": {"correct": True, "latency_us": 12.288},
@@ -1477,7 +1469,6 @@ def test_gateway_execute_keeps_check_kernel_identities(
             "operation": "check",
             "status": "completed",
             "kernel_artifact_digest": "sha256:" + "a" * 64,
-            "kernel_trial_id": "gtrial_" + "b" * 32,
             "result_artifact_digest": "sha256:" + "c" * 64,
             "job_id": "cp_example",
             "evaluation": None,
@@ -1490,7 +1481,6 @@ def test_gateway_execute_keeps_check_kernel_identities(
         "operation": "check",
         "status": "completed",
         "kernel_artifact_digest": "sha256:" + "a" * 64,
-        "kernel_trial_id": "gtrial_" + "b" * 32,
         "result_artifact_digest": "sha256:" + "c" * 64,
         "job_id": "cp_example",
         "result": {"job_id": "cp_example", "status": "succeeded"},
@@ -1527,7 +1517,6 @@ def test_gateway_execute_returns_normalized_kernel_profile(
             "operation": "profile",
             "status": "completed",
             "kernel_artifact_digest": "sha256:" + "a" * 64,
-            "kernel_trial_id": "gtrial_" + "b" * 32,
             "result_artifact_digest": "sha256:" + "c" * 64,
             "job_id": "pr_example",
             "evaluation": None,
@@ -1566,7 +1555,6 @@ def test_gateway_execute_returns_normalized_kernel_profile(
         {"operation": "profile", "level": "sol", "shape_id": "3"},
     ) == {
         "kernel_artifact_digest": "sha256:" + "a" * 64,
-        "kernel_trial_id": "gtrial_" + "b" * 32,
         "result_artifact_digest": "sha256:" + "c" * 64,
         "job_id": "pr_example",
         "status": "succeeded",
@@ -1621,7 +1609,6 @@ def test_gateway_execute_returns_dev_result_directly(
             "operation": "dev",
             "status": "completed",
             "kernel_artifact_digest": "sha256:" + "7" * 64,
-            "kernel_trial_id": "gtrial_" + "8" * 32,
             "result_artifact_digest": "sha256:" + "9" * 64,
             "job_id": "dv_example",
             "evaluation": None,
@@ -1638,6 +1625,8 @@ def test_gateway_execute_returns_dev_result_directly(
         context,
         {"operation": "dev", "command": "python3 kernel.py"},
     ) == {
+        "kernel_artifact_digest": "sha256:" + "7" * 64,
+        "result_artifact_digest": "sha256:" + "9" * 64,
         "job_id": "dv_example",
         "status": "succeeded",
         "result": {"exit_code": 0, "stdout": "ok\n", "stderr": ""},
@@ -1660,7 +1649,6 @@ def test_gateway_execute_keeps_disassemble_provenance_identities(
             "operation": "disassemble",
             "status": "completed",
             "kernel_artifact_digest": "sha256:" + "4" * 64,
-            "kernel_trial_id": "gtrial_" + "5" * 32,
             "result_artifact_digest": "sha256:" + "6" * 64,
             "job_id": "da_example",
             "evaluation": None,
@@ -1681,7 +1669,6 @@ def test_gateway_execute_keeps_disassemble_provenance_identities(
         "operation": "disassemble",
         "status": "completed",
         "kernel_artifact_digest": "sha256:" + "4" * 64,
-        "kernel_trial_id": "gtrial_" + "5" * 32,
         "result_artifact_digest": "sha256:" + "6" * 64,
         "job_id": "da_example",
         "result": {

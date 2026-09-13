@@ -36,12 +36,12 @@ def test_complex_local_schemas_track_validator_top_level_fields() -> None:
     ]
     subject = experiment["properties"]["before"]["oneOf"][0]
     assert subject["properties"] == {
-        "kernel_trial_id": {
+        "result_artifact_digest": {
             "type": "string",
-            "pattern": r"^gtrial_[0-9a-f]{32}$",
+            "pattern": r"^sha256:[0-9a-f]{64}$",
         }
     }
-    assert subject["required"] == ["kernel_trial_id"]
+    assert subject["required"] == ["result_artifact_digest"]
     assert subject["additionalProperties"] is False
     assert bootstrap_experiment["properties"]["action"]["enum"][-1] == "baseline"
     assert report["properties"]["status"]["enum"] == [
@@ -80,10 +80,10 @@ def test_contributing_trials_schema_accepts_duplicates_and_keeps_input_limit() -
     schema = tool_request_schema("attempt-report")
 
     assert schema is not None
-    field = schema["properties"]["contributing_kernel_trial_ids"]
+    field = schema["properties"]["contributing_result_artifact_digests"]
     assert field["maxItems"] == 64
     assert "uniqueItems" not in field
-    assert field["items"]["pattern"] == r"^gtrial_[0-9a-f]{32}$"
+    assert field["items"]["pattern"] == r"^sha256:[0-9a-f]{64}$"
 
 
 def test_validator_message_becomes_compact_repair_issue() -> None:

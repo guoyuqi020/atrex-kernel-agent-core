@@ -37,7 +37,7 @@ def _terminal_report(status: str) -> dict[str, Any]:
             "final_candidate": None,
             "profile_evidence": None,
             "findings": [],
-            "contributing_kernel_trial_ids": [],
+            "contributing_result_artifact_digests": [],
             "blocker": "No usable evaluation could be obtained" if status == "blocked" else None,
         }
     )
@@ -55,10 +55,10 @@ def test_adopt_schema_exposes_action_and_requires_trial_reference_fields(
     assert {"before", "after"} <= set(schema["required"])
     for side in ("before", "after"):
         subject = schema["properties"][side]["oneOf"][0]
-        assert subject["required"] == ["kernel_trial_id"]
-        assert subject["properties"]["kernel_trial_id"] == {
+        assert subject["required"] == ["result_artifact_digest"]
+        assert subject["properties"]["result_artifact_digest"] == {
             "type": "string",
-            "pattern": r"^gtrial_[0-9a-f]{32}$",
+            "pattern": r"^sha256:[0-9a-f]{64}$",
         }
         assert subject["additionalProperties"] is False
         assert schema["allOf"][0]["if"]["properties"]["action"] == {"const": "adopt"}
@@ -143,7 +143,7 @@ def test_historical_adopt_survives_http_and_journal_snapshot_into_candidate_repo
     experiment_calls = [call for call in calls if call["operation"] == "experiment_record"]
     assert len(experiment_calls) == 1
     assert experiment_calls[0]["request"] == experiment
-    assert experiment_calls[0]["request"]["after"] == {"kernel_trial_id": "gtrial_" + "e" * 32}
+    assert experiment_calls[0]["request"]["after"] == {"result_artifact_digest": "sha256:" + "f" * 64}
     snapshot_operation = runtime_tools._RUNTIME_JOURNAL_COMMANDS["_journal-snapshot"]
     assert any(call["operation"] == snapshot_operation for call in calls)
     assert published["report_status"] == "candidate_ready"
@@ -158,7 +158,7 @@ def test_historical_adopt_survives_http_and_journal_snapshot_into_candidate_repo
 @pytest.mark.parametrize("side", ["before", "after"])
 @pytest.mark.parametrize(
     "value",
-    [_MISSING, None, {}, {"kernel_trial_id": ""}],
+    [_MISSING, None, {}, {"result_artifact_digest": ""}],
     ids=["missing", "null", "empty-object", "empty-trial"],
 )
 def test_adopt_rejects_missing_or_invalid_trial_references(

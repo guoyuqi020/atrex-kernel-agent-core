@@ -34,7 +34,6 @@ _GATEWAY_EXECUTE_OPERATIONS = _CANDIDATE_OPERATIONS | {
     "env",
 }
 _PUBLIC_RUNTIME_QUERY_COMMANDS = {
-    "kernel-trial-show": "kernel_trial_show",
     "kernel-artifact-read": "kernel_artifact_read",
     "result-artifact-read": "result_artifact_read",
 }
@@ -94,7 +93,6 @@ _DIRECTION_UPDATE_FIELDS = {
 }
 _EXPERIMENT_SUBJECT_FIELDS = {
     "kernel_artifact_digest",
-    "kernel_trial_id",
     "result_artifact_digests",
 }
 _REPORT_FIELDS = {
@@ -108,7 +106,7 @@ _REPORT_FIELDS = {
     "analysis",
     "knowledge_used",
     "findings",
-    "contributing_kernel_trial_ids",
+    "contributing_result_artifact_digests",
     "blocker",
 }
 RuntimeToolContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
@@ -483,7 +481,6 @@ def _profile_agent_response(
         raise ValueError("Gateway profile response has no object result")
     visible = {
         "kernel_artifact_digest": response.get("kernel_artifact_digest"),
-        "kernel_trial_id": response.get("kernel_trial_id"),
         "result_artifact_digest": response.get("result_artifact_digest"),
         **worker,
     }
@@ -507,7 +504,13 @@ def _agent_gateway_response(
         result = response.get("result")
         if not isinstance(result, dict):
             raise ValueError(f"Gateway {operation} response has no object result")
-        return result
+        if operation == "env":
+            return result
+        return {
+            **result,
+            "kernel_artifact_digest": response.get("kernel_artifact_digest"),
+            "result_artifact_digest": response.get("result_artifact_digest"),
+        }
     visible = {
         key: item for key, item in response.items() if key not in {"schema_version", "evaluation"}
     }
@@ -992,11 +995,11 @@ def load_direction(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     return runtime_journal(context, "load-direction", request)
 
 
-def _is_kernel_trial_id(value: object) -> bool:
+def _is_result_digest(value: object) -> bool:
     return (
         isinstance(value, str)
-        and value.startswith("gtrial_")
-        and len(value) == len("gtrial_") + 32
+        and value.startswith("sha256:")
+        and len(value) == len("sha256:") + 64
         and all(character in "0123456789abcdef" for character in value[7:])
     )
 
@@ -1016,9 +1019,6 @@ def _experiment_subject(value: object, label: str) -> dict[str, Any] | None:
         or any(character not in "0123456789abcdef" for character in digest[7:])
     ):
         raise ValueError(f"Experiment {label} kernel_artifact_digest is invalid")
-    trial_id = value.get("kernel_trial_id")
-    if not _is_kernel_trial_id(trial_id):
-        raise ValueError(f"Experiment {label} kernel_trial_id is invalid")
     results = value.get("result_artifact_digests")
     if (
         not isinstance(results, list)
@@ -1068,10 +1068,12 @@ def record_experiment(context: RuntimeToolContext, request: dict[str, Any]) -> d
             subject = request.get(side)
             if (
                 not isinstance(subject, dict)
-                or set(subject) != {"kernel_trial_id"}
-                or not _is_kernel_trial_id(subject.get("kernel_trial_id"))
+                or set(subject) != {"result_artifact_digest"}
+                or not _is_result_digest(subject.get("result_artifact_digest"))
             ):
-                raise ValueError(f"Experiment adopt requires a real {side} Kernel Trial reference")
+                raise ValueError(
+                    f"Experiment adopt requires a real {side} Result Artifact reference"
+                )
     return runtime_journal(context, "record-experiment", request)
 
 
@@ -1329,21 +1331,19 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
             raise ValueError("Attempt report profile_evidence.supporting_results must be non-empty")
         if len(supporting_results) > 32:
             raise ValueError("Attempt report profile_evidence supports at most 32 results")
-        profile_bindings: set[tuple[str, str, str]] = set()
+        profile_bindings: set[tuple[str, str]] = set()
         for citable in citable_profile_results:
             identity = _exact_object(
                 citable,
                 "Runtime citable Profile result",
                 {
                     "kernel_artifact_digest",
-                    "kernel_trial_id",
                     "result_artifact_digest",
                 },
             )
             profile_bindings.add(
                 (
                     str(identity["kernel_artifact_digest"]),
-                    str(identity["kernel_trial_id"]),
                     str(identity["result_artifact_digest"]),
                 )
             )
@@ -1356,7 +1356,6 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                 {
                     "operation",
                     "kernel_artifact_digest",
-                    "kernel_trial_id",
                     "result_artifact_digest",
                 },
             )
@@ -1367,7 +1366,6 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
             subject = _experiment_subject(
                 {
                     "kernel_artifact_digest": reference["kernel_artifact_digest"],
-                    "kernel_trial_id": reference["kernel_trial_id"],
                     "result_artifact_digests": [reference["result_artifact_digest"]],
                 },
                 f"Attempt report profile_evidence.supporting_results[{index}]",
@@ -1375,19 +1373,18 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
             assert subject is not None
             binding = (
                 subject["kernel_artifact_digest"],
-                subject["kernel_trial_id"],
                 subject["result_artifact_digests"][0],
             )
             if binding not in profile_bindings:
                 raise ValueError(
                     "Profile supporting result does not match a visible Runtime-recorded "
-                    f"Profile observation: {binding[2]}. Use the exact kernel_artifact_digest, "
-                    "kernel_trial_id, and result_artifact_digest returned by Runtime; "
+                    f"Profile observation: {binding[1]}. Use the exact kernel_artifact_digest "
+                    "and result_artifact_digest returned by Runtime; "
                     "an Experiment reference is not required."
                 )
-            if binding[2] in seen_results:
+            if binding[1] in seen_results:
                 raise ValueError("Profile supporting Gateway results must be unique")
-            seen_results.add(binding[2])
+            seen_results.add(binding[1])
         if not has_profile:
             raise ValueError("Profile evidence requires at least one profile result")
     candidate = request.get("final_candidate")
@@ -1452,21 +1449,24 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                 f"{unknown_experiment_ids}"
             )
     contributing = _text_array(
-        request.get("contributing_kernel_trial_ids"),
-        "Attempt report contributing_kernel_trial_ids",
+        request.get("contributing_result_artifact_digests"),
+        "Attempt report contributing_result_artifact_digests",
     )
     if len(contributing) > 64:
-        raise ValueError("Attempt report contributing_kernel_trial_ids allows at most 64 entries")
-    for index, trial_id in enumerate(contributing):
-        if not _is_kernel_trial_id(trial_id):
+        raise ValueError(
+            "Attempt report contributing_result_artifact_digests allows at most 64 entries"
+        )
+    for index, result_digest in enumerate(contributing):
+        if not _is_result_digest(result_digest):
             raise ValueError(
-                f"Attempt report contributing_kernel_trial_ids[{index}] must be a Kernel Trial ID"
+                f"Attempt report contributing_result_artifact_digests[{index}] "
+                "must be a Result Artifact digest"
             )
     report = {
         "schema_version": 12,
         "attempt_id": context.attempt_id,
         **request,
-        "contributing_kernel_trial_ids": sorted(set(contributing)),
+        "contributing_result_artifact_digests": sorted(set(contributing)),
         "experiments": experiments,
         "direction_events": direction_events,
     }

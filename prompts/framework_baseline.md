@@ -117,10 +117,10 @@ authoritative baseline outcome.
 The first measured construction has no measured predecessor. Save the request below as
 `scratch/baseline-experiment.json`, then invoke `record-experiment` with that request using the
 exact CLI listed in the shared Runtime tool contract below. Record it exactly once with
-`action="baseline"`, `before=null`, and its measured Kernel Trial ID as `after`.
+`action="baseline"`, `before=null`, and its measured Result Artifact digest as `after`.
 The receipt returns an `experiment_id`; use that ID when completing the Direction and in every
 Finding supported by this construction. This creates the Experiment anchor only; it does not register `v0`.
-For later repairs use `keep_after` or `restore_before` with measured `before` and `after` Trial IDs.
+For later repairs use `keep_after` or `restore_before` with measured `before` and `after` Result Artifact digests.
 
 ```json
 {
@@ -129,7 +129,7 @@ For later repairs use `keep_after` or `restore_before` with measured `before` an
   "hypothesis": "the direct DSL implementation satisfies the public contract",
   "change": "established the first measured DSL candidate; state whether the seed was unchanged",
   "before": null,
-  "after": {"kernel_trial_id": "gtrial_<id>"},
+  "after": {"result_artifact_digest": "sha256:<id>"},
   "evidence": "factual correctness and latency returned by the evaluation",
   "analysis": "whether the first construction held and what must be repaired",
   "action": "baseline"
@@ -166,13 +166,13 @@ Direction was started, an empty Runtime Direction event list is valid for `block
 Use the shared report fields with Bootstrap semantics: `diagnosis` names the bring-up or correctness
 issue, `approach` explains the construction or repair, and `expected_impact` states the expected
 correctness or compatibility effect. Set `profile_evidence` to `null` unless profiling was actually
-needed. Bootstrap precedes all Lineage history, so `contributing_kernel_trial_ids` is always `[]`.
+needed. Bootstrap precedes all Lineage history, so `contributing_result_artifact_digests` is always `[]`.
 If the nominated Kernel is unchanged from the seed, say that explicitly in
 `final_candidate.change_summary`; do not invent a change or a performance bottleneck.
 
 `candidate_ready` nominates the exact final `work/kernel/` tree as the Baseline Candidate. The
 trusted controller seals that tree, resolves the correct Evaluate result referenced by its Journal,
 and applies the Bootstrap finalization policy before creating `v0` and the Lineage. Direction and
-Experiment Journals, their Kernel/Trial/Result identities, and the backend-neutral conversation
+Experiment Journals, their Kernel/Result identities, and the backend-neutral conversation
 become immutable Lineage history. Chat text, local files, or the Agent's conclusion cannot create
 the baseline by themselves.

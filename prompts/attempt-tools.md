@@ -5,7 +5,6 @@ write one JSON request under `scratch/`, then run exactly one of:
 
 ```text
 python3 {{RUNTIME_TOOL}} gateway-execute --request scratch/<request>.json
-python3 {{RUNTIME_TOOL}} kernel-trial-show --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} kernel-artifact-read --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} result-artifact-read --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} update-direction --request scratch/<request>.json
@@ -25,8 +24,7 @@ This general limit does not replace the smaller per-field input/Shape limits bel
 comparing. Trusted Runtime fields are injected automatically. Never embed `baseline` or `candidate`
 source payloads, a schema version, capability, or attempt ID in the request.
 Runtime-local history queries use their dedicated commands above;
-do not pass `kernel_trial_show`, `kernel_artifact_read`, or
-`result_artifact_read` to `gateway-execute`.
+do not pass `kernel_artifact_read` or `result_artifact_read` to `gateway-execute`.
 
 Every `gateway-execute` request names one `operation`. These are the only Agent-authored fields;
 each is optional with the default shown in parentheses unless marked required, and an omitted field
@@ -68,7 +66,7 @@ Custom inputs or Shapes and correctness-only calls provide exploratory evidence;
 the trusted contract. Request it with `{"operation":"evaluate"}` when no matching evidence exists.
 For exact historical source with matching trusted full-Evaluate evidence, register `action: "adopt"`
 in this Attempt's Experiment Journal as described below; do not repeat that measurement merely to
-obtain a new Trial ID. Runtime validates whether the historical evidence qualifies for nomination.
+obtain a new Result Artifact digest. Runtime validates whether the historical evidence qualifies for nomination.
 
 `evaluate` accepts optional `candidate_path`; omitting it uploads the current `work/kernel` tree.
 To compare against baseline A, add `comparison` with `method: "abba"` and required
@@ -87,9 +85,10 @@ It is always exploratory, does not retain or promote a Kernel or Agent, and does
 full trusted-contract Evaluate required for `candidate_ready`.
 Agent ABBA and Runtime's authoritative ABBA are separate paths. Runtime performs its retention
 comparison only after a successful terminal Report handoff; it records authoritative measurements,
-not an Agent Kernel Trial. Never wait for that later ABBA to create a `gtrial_` for an Experiment
-or to make the Report submittable. An Agent ABBA observation belongs to Candidate B's Trial;
-the same exact B in the same Attempt and recovery generation keeps the same Trial ID.
+not an Agent Result Artifact. Never wait for that later ABBA to create evidence for an Experiment
+or to make the Report submittable. Each completed tool invocation returns its own
+`result_artifact_digest` and the exact B `kernel_artifact_digest`. Different observations of the
+same Kernel have different Result identities; replay of the same invocation keeps its identity.
 
 A Gateway call blocks until its Job reaches a terminal state, which for `evaluate`, `profile`,
 `check`, and `disassemble` may take a long time. Let the command finish and keep stderr out of the
@@ -134,7 +133,7 @@ candidate the Agent measured as correct and that rejection lands after the Sessi
 Agent-visible Gateway responses follow three contracts:
 
 - `evaluate`, `profile`, `check`, and `disassemble` retain the exact `kernel_artifact_digest`,
-  `kernel_trial_id`, and `result_artifact_digest` needed for experiment provenance;
+  and `result_artifact_digest` needed for experiment provenance;
 - `dev` returns its Agent-safe Job result directly and does not print those identities;
 - `env` returns its Agent-safe `result` directly.
 
@@ -203,7 +202,7 @@ Correctness-only evaluation using these input and Shape files:
 ```
 
 Omit `mode` or set `"mode":"full"` to measure performance for your custom cases. These requests
-retain Kernel Trial and Result Artifact identities. Their nested result records the effective
+retain Kernel and Result Artifact identities. Their nested result records the effective
 `mode` and `input_scope` (`"custom"` when either component was supplied, otherwise `"contract"`).
 Correctness-only results contain no performance measurements; do not interpret missing latency as zero.
 
@@ -221,26 +220,23 @@ An ABBA comparison selecting both source directories and your own input generato
 
 Comparison responses retain `operation: "evaluate"` and identify the method through
 `result.comparison: {"method":"abba","repeats":2}` (using the actual repeat count).
-The returned Kernel Trial and Kernel Artifact identities belong to B. The nested result names
+The returned Result Artifact identifies this comparison; the Kernel Artifact belongs to B. The nested result names
 `baseline_kernel_artifact_digest` for A, provides `baseline` and
 `candidate` correctness and latency summaries, and reports `speedup` as A/B and `improvement_pct`
 as (A-B)/A × 100. It retains `schedule` and all `measurements`, plus `mode` and `input_scope`.
-Read the retained comparison with `result-artifact-read`, or find its digest with
-`kernel-trial-show`; comparison results do not create an ordinary Evaluate record. Record the comparison as
+Read the retained comparison with `result-artifact-read`; comparison results do not create an ordinary Evaluate record. Record the comparison as
 experiment evidence. Nomination still requires a successful ordinary full Evaluate or an explicit,
 Runtime-accepted `adopt` decision binding matching historical full-Evaluate evidence.
 
 Runtime-local query commands infer their operation from the command name. Their request JSON must
-not contain `operation`. Examples are `{"kernel_trial_id":"gtrial_<id>"}` for
-`kernel-trial-show`,
+not contain `operation`. Examples are
 `{"kernel_artifact_digest":"sha256:<digest>","artifact_file":"kernel.py",`
 `"file":"scratch/recovered/kernel.py"}` for
 `kernel-artifact-read`, `{"result_artifact_digest":"sha256:<digest>"}` for
 `result-artifact-read`. These reads are unmetered and never contact Agate.
-`kernel-trial-show` returns the Kernel Artifact Digest and a compact `result_artifacts` index. Each
-entry is `{"result_artifact_digest", "operation", "status"}`; it does not inline result content.
-Use `result-artifact-read` only for the Evaluate, Profile, or other result that you actually need.
-`result-artifact-read` returns `{"operation", "status", "result"}`; the measurement lives under
+Use `result-artifact-read` for the exact Evaluate, Profile, or other observation you need.
+It returns `kernel_artifact_digest`, `result_artifact_digest`, `operation`, `status`, and `result`;
+the measurement lives under
 `result`, not beside those keys. `operation`, `status`, and `result` are the same canonical values
 returned by the original `gateway-execute` call. For an Evaluate, `result` holds `correct`,
 `correctness`, and `failures`; a full evaluation also reports `latency_us_by_shape` keyed by opaque
@@ -316,21 +312,21 @@ Each `record-experiment` request must contain exactly these fields:
   "name": "short experiment name",
   "hypothesis": "falsifiable expected mechanism",
   "change": "exact candidate change, including a reverted change",
-  "before": {"kernel_trial_id": "gtrial_<before-trial>"},
-  "after": {"kernel_trial_id": "gtrial_<after-trial>"},
+  "before": {"result_artifact_digest": "sha256:<before-trial>"},
+  "after": {"result_artifact_digest": "sha256:<after-trial>"},
   "evidence": "concise before/after measurements and observations",
   "analysis": "what the evidence means, including whether the hypothesis held",
   "action": "keep_after"
 }
 ```
 
-`before` and `after` identify both measured sides using only their Kernel Trial IDs. Runtime resolves
-and freezes each Trial's exact Kernel Artifact and all Result Artifacts when it records the
+`before` and `after` identify both measured sides using only their Result Artifact digests. Runtime resolves
+and freezes the selected Result Artifact and its exact Kernel Artifact when it records the
 Experiment; do not submit those derived identities yourself. Record the entry before changing or
 reverting the candidate. For `keep_after`, `restore_before`, and `adopt`, both sides are required.
 Use `adopt` when choosing exact already-measured historical source: restore its complete Kernel
 tree into `work/kernel/`, then record this Attempt's decision with the real `before` and `after`
-Trial IDs. Only `adopt` permits a historical Trial as `after`; ordinary actions require `after`
+Result Artifact digests. Only `adopt` permits a historical Trial as `after`; ordinary actions require `after`
 to belong to the current Attempt. Runtime verifies visibility, the same Lineage, DSL, hardware,
 and evaluation contract, and a successful ordinary full Evaluate for that exact Kernel and Result.
 The adopted Trial keeps its original ownership; adoption creates a decision, not a new measurement
@@ -398,7 +394,6 @@ exactly these fields:
     "supporting_results": [{
       "operation": "profile",
       "kernel_artifact_digest": "sha256:...",
-      "kernel_trial_id": "gtrial_...",
       "result_artifact_digest": "sha256:..."
     }]
   },
@@ -416,7 +411,7 @@ exactly these fields:
     "lesson": "reusable lesson",
     "supporting_experiment_ids": ["experiment_<id>"]
   }],
-  "contributing_kernel_trial_ids": ["gtrial_<id>"],
+  "contributing_result_artifact_digests": ["sha256:<id>"],
   "blocker": null
 }
 ```
@@ -439,15 +434,15 @@ workaround, explicit absence of a fix, or deferred action. Every finding must al
 unique `supporting_experiment_ids`
 returned by `record-experiment`; each ID must belong to this Attempt's Experiment Journal.
 `profile_evidence` must describe evidence returned by Runtime-bound profiling and
-bind every supporting Profile result to the exact Kernel Artifact, Kernel Trial, and Result
+bind every supporting Profile result to the exact Kernel Artifact and Result
 Artifact identifiers returned by Runtime. Any Runtime-recorded Profile result in your visible
 history is citable, including an earlier Profile or one obtained after recording an Experiment.
 No Experiment reference is required: do not create a diagnostic Experiment or reopen a Direction
 solely to make a Profile citable. Runtime verifies the exact identities and the `profile` operation
 against its own observations, not your prose. Include at least one `profile` result, set
 `profile_evidence` to `null` when you have no recorded Profile evidence, and never invent it.
-Use `contributing_kernel_trial_ids` to name the historical Kernel Trials whose code or approach this
-Attempt actually drew on, using the Trial identifiers Runtime returned. Supply at most 64 entries
+Use `contributing_result_artifact_digests` to name the historical results whose code or approach this
+Attempt actually drew on, using Result Artifact digests returned by Runtime. Supply at most 64 entries
 in any order; the tool and Runtime automatically sort and deduplicate them. ID format validation
 still applies to every entry. Use `[]` when you drew on none.
 It records where your work came from for whoever reads this Attempt later; it

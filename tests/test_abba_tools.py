@@ -73,7 +73,6 @@ def captured_requests(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
             "schema_version": 2,
             "operation": "evaluate",
             "status": "completed",
-            "kernel_trial_id": "gtrial_" + "b" * 32,
             "kernel_artifact_digest": "sha256:" + "d" * 64,
             "result_artifact_digest": "sha256:" + "f" * 64,
             "evaluation": None,
@@ -109,7 +108,7 @@ def test_evaluate_comparison_uploads_a_and_b_and_preserves_result(
         "idempotency_key",
     }
     assert response["operation"] == "evaluate"
-    assert response["kernel_trial_id"] == "gtrial_" + "b" * 32
+    assert "kernel_trial_id" not in response
     assert response["result"] == _RESULT
     assert "repeats" not in response["result"]
     assert "evaluation" not in response and "schema_version" not in response

@@ -32,7 +32,7 @@ def _object(
 
 
 def _subject() -> dict[str, Any]:
-    return _object({"kernel_trial_id": _identifier("gtrial_")})
+    return _object({"result_artifact_digest": _digest()})
 
 
 def _evaluate_schema() -> dict[str, Any]:
@@ -190,7 +190,6 @@ def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
         {
             "operation": {"const": "profile"},
             "kernel_artifact_digest": _digest(),
-            "kernel_trial_id": _identifier("gtrial_"),
             "result_artifact_digest": _digest(),
         }
     )
@@ -258,10 +257,10 @@ def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
                     }
                 ),
             },
-            "contributing_kernel_trial_ids": {
+            "contributing_result_artifact_digests": {
                 "type": "array",
                 "maxItems": 64,
-                "items": _identifier("gtrial_"),
+                "items": _digest(),
             },
             "blocker": {"oneOf": [_text(), {"type": "null"}]},
         }
@@ -280,7 +279,6 @@ def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
 
 _SCRATCH_FILE = _object({"file": {"type": "string", "pattern": r"^scratch/.+"}})
 _SCHEMAS: dict[str, dict[str, Any]] = {
-    "kernel-trial-show": _object({"kernel_trial_id": _identifier("gtrial_")}),
     "kernel-artifact-read": _object(
         {
             "kernel_artifact_digest": _digest(),
@@ -315,17 +313,10 @@ def tool_request_schema(
 
 
 _RECOVERY: dict[str, list[dict[str, Any]]] = {
-    "kernel-trial-show": [
-        {
-            "instruction": (
-                "Use a kernel_trial_id returned by a visible Gateway operation or Experiment"
-            )
-        }
-    ],
     "kernel-artifact-read": [
         {
             "instruction": (
-                "Use a kernel_artifact_digest returned by kernel-trial-show or load-experiment"
+                "Use a kernel_artifact_digest returned by a Gateway result or load-experiment"
             )
         }
     ],
@@ -333,7 +324,7 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         {
             "instruction": (
                 "Use a result_artifact_digest returned by a visible Gateway operation, "
-                "kernel-trial-show, or Experiment"
+                "kernel-artifact-read, or Experiment"
             )
         }
     ],
@@ -382,9 +373,9 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         },
         {
             "instruction": (
-                "Set each non-null before/after subject to exactly one visible kernel_trial_id; "
+                "Set each non-null before/after subject to one visible result_artifact_digest; "
                 "Runtime resolves the Kernel and Result Artifacts. For exact historical source "
-                "reuse, use action=adopt with both real Trials; historical after is permitted "
+                "reuse, use action=adopt with both real Results; historical after is permitted "
                 "only when Runtime validates its matching successful full Evaluate"
             )
         },
@@ -519,10 +510,9 @@ _PATH_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"direction[_ ]id", re.I), "direction_id"),
     (re.compile(r"experiment[_ ]id", re.I), "experiment_id"),
     (
-        re.compile(r"contributing[_ ]kernel[_ ]trial[_ ]ids", re.I),
-        "contributing_kernel_trial_ids",
+        re.compile(r"contributing[_ ]result[_ ]artifact[_ ]digests", re.I),
+        "contributing_result_artifact_digests",
     ),
-    (re.compile(r"kernel[_ ]trial[_ ]id", re.I), "kernel_trial_id"),
     (re.compile(r"kernel[_ ]artifact", re.I), "kernel_artifact_digest"),
     (re.compile(r"(?:result[_ ]artifact|gateway[_ ]result)", re.I), "result_artifact_digest"),
     (re.compile(r"\bbefore\b", re.I), "before"),

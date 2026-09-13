@@ -48,7 +48,6 @@ def gateway_server(context: Any) -> Iterator[list[dict[str, Any]]]:
                     "operation": "evaluate",
                     "status": "completed",
                     "kernel_artifact_digest": "sha256:" + "b" * 64,
-                    "kernel_trial_id": "gtrial_" + "c" * 32,
                     "result_artifact_digest": "sha256:" + "d" * 64,
                     "evaluation": None,
                     "result": {
@@ -102,7 +101,7 @@ def test_evaluate_expands_files_and_preserves_exploratory_result(
     assert "input_path" not in sent and "shapes_path" not in sent
     assert request["input_path"] == "scratch/input.py"
     assert response["kernel_artifact_digest"] == "sha256:" + "b" * 64
-    assert response["kernel_trial_id"] == "gtrial_" + "c" * 32
+    assert "kernel_trial_id" not in response
     assert response["result_artifact_digest"] == "sha256:" + "d" * 64
     assert response["result"] == {
         "correct": True,
