@@ -905,7 +905,9 @@ def _validate_experiment_id_array(value: object, label: str) -> list[str]:
     return values
 
 
-def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, Any]]:
+def _validate_direction_events(
+    events: list[Any], label: str, *, allow_suggest: bool = False
+) -> list[dict[str, Any]]:
     validated: list[dict[str, Any]] = []
     relationship_fields = {
         "relationship",
@@ -918,7 +920,7 @@ def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, 
         if not isinstance(event, dict) or set(event) - optional_fields != _direction_event_fields():
             raise ValueError(f"{label} contains a malformed event")
         if any(event.get(key) for key in relationship_fields):
-            if event.get("action") != "propose":
+            if event.get("action") not in {"propose", "suggest"}:
                 raise ValueError("Direction genealogy belongs only to the immutable proposal")
             if event.get("relationship") not in {
                 "retry",
@@ -927,6 +929,7 @@ def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, 
                 "correction",
                 "port",
                 "combination",
+                "adoption",
             }:
                 raise ValueError("Direction relationship is invalid")
             parents = _text_array(event.get("derived_from_direction_ids", []), "parent Directions")
@@ -942,6 +945,10 @@ def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, 
             )
             if not parents and not experiments:
                 raise ValueError("Direction relationship requires parent references")
+            if event.get("relationship") == "adoption" and (
+                len(parents) != 1 or experiments or event.get("supersedes_direction_id")
+            ):
+                raise ValueError("adoption requires one suggested parent Direction")
             if event.get("supersedes_direction_id") is not None:
                 _validate_direction_id(event["supersedes_direction_id"])
         _validate_direction_id(event.get("direction_id"))
@@ -959,21 +966,26 @@ def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, 
         except ValueError as error:
             raise ValueError("Direction recorded_at must be ISO-8601") from error
         action = event.get("action")
-        if action not in {"propose", "start", "complete", "abandon", "block", "defer"}:
+        if action not in {"propose", "suggest", "start", "complete", "abandon", "block", "defer"}:
             raise ValueError("Direction action is invalid")
+        if action == "suggest" and not allow_suggest:
+            raise ValueError(
+                "action=suggest is available only during Bootstrap; Optimizer cannot "
+                "include suggested Direction events"
+            )
         hypothesis_status = event.get("hypothesis_status")
         if hypothesis_status is not None and (
             not isinstance(hypothesis_status, str)
             or hypothesis_status not in {"unresolved", "supported", "refuted"}
         ):
             raise ValueError("Direction hypothesis_status is invalid")
-        if action in {"propose", "start"} and hypothesis_status is not None:
+        if action in {"propose", "suggest", "start"} and hypothesis_status is not None:
             raise ValueError("Only a Direction closure may declare hypothesis_status")
         supporting = _validate_experiment_id_array(
             event.get("supporting_experiment_ids"),
             "Direction supporting_experiment_ids",
         )
-        if action == "propose":
+        if action in {"propose", "suggest"}:
             for field in (
                 "name",
                 "hypothesis",
@@ -1001,9 +1013,12 @@ def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, 
             ):
                 raise ValueError("Direction update cannot redefine its proposal")
             _text(event.get("analysis"), "Direction analysis")
-            if action in {"complete", "abandon", "block", "defer"} and not supporting:
-                if hypothesis_status is not None or action in {"complete", "abandon"}:
-                    raise ValueError(f"Direction {action} requires supporting Experiments")
+            if (
+                action in {"complete", "abandon", "block", "defer"}
+                and not supporting
+                and (hypothesis_status is not None or action in {"complete", "abandon"})
+            ):
+                raise ValueError(f"Direction {action} requires supporting Experiments")
         validated.append(event)
     return validated
 
@@ -1286,6 +1301,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     direction_events = _validate_direction_events(
         direction_event_values,
         "Runtime Direction Journal",
+        allow_suggest=isinstance(context, RuntimeLineageBootstrapContext),
     )
     directions: dict[str, dict[str, Any]] = {}
     for direction in direction_values:

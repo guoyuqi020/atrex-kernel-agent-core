@@ -289,6 +289,17 @@ Propose a Direction with:
 }
 ```
 
+`list-directions` may include Bootstrap and Evolver suggestions. Inspect one
+with `load-direction`. Only Bootstrap may call `update-direction` with `action="suggest"`;
+an Optimizer must never create a suggestion or include a `suggest` event in its terminal report.
+A suggestion cannot be started, measured, or closed. To use it,
+propose a new Direction with `relationship="adoption"` and
+`derived_from_direction_ids` containing the suggested ID; use `refinement` if changing
+the hypothesis. Then start the new Direction. The suggested parent stays unchanged.
+After its configured eligibility window, an unused suggestion reads as `expired`; a previously
+adopted one reads as `adopted`. Both remain readable but cannot be newly adopted. You may
+propose a `refinement` from either with a fresh rationale.
+
 Start with exactly `action="start"`, `direction_id`, and non-empty `analysis`.
 Close with `complete`, `abandon`, `block`, or `defer`, additionally supplying
 `hypothesis_status` and a non-empty, unique `supporting_experiment_ids` array (maximum 32):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from runtime_tools import _EXPERIMENT_FIELDS, _REPORT_FIELDS, _validate_direction_events
 from tool_contracts import local_validation_issue, tool_recovery, tool_request_schema
 
@@ -31,6 +33,33 @@ def test_direction_genealogy_schema_and_canonical_journal_round_trip() -> None:
         "supersedes_direction_id": None,
     }
     assert _validate_direction_events([event], "journal") == [event]
+
+
+def test_bootstrap_direction_schema_accepts_suggest_only_in_baseline_context() -> None:
+    optimizer = tool_request_schema("update-direction")
+    bootstrap = tool_request_schema("update-direction", allow_baseline=True)
+    assert optimizer is not None and bootstrap is not None
+    assert optimizer["oneOf"][0]["properties"]["action"] == {"const": "propose"}
+    assert bootstrap["oneOf"][0]["properties"]["action"] == {
+        "enum": ["propose", "suggest"]
+    }
+    event = {
+        "direction_id": "direction_" + "a" * 32,
+        "direction_event_id": "directionevent_" + "b" * 32,
+        "recorded_at": "2026-09-14T00:00:00+00:00",
+        "action": "suggest",
+        "name": "untested optimization",
+        "hypothesis": "fewer loads may help",
+        "rationale": "Bootstrap found duplicate loads",
+        "plan": ["fuse loads", "evaluate"],
+        "success_criteria": "correct and faster",
+        "stop_conditions": "no measurable gain",
+        "analysis": None,
+        "supporting_experiment_ids": [],
+    }
+    assert _validate_direction_events([event], "journal", allow_suggest=True) == [event]
+    with pytest.raises(ValueError, match="only during Bootstrap"):
+        _validate_direction_events([event], "journal")
 
 
 def test_complex_local_schemas_track_validator_top_level_fields() -> None:
@@ -172,7 +201,10 @@ def test_attempt_report_recovery_explains_how_to_close_open_directions() -> None
     }
     assert "close every in_progress Direction" in recovery[2]["instruction"]
     assert "complete, abandon, block, and defer all require" in recovery[2]["instruction"]
-    assert "Every Experiment needs at least one real Kernel-bound Gateway Result" in recovery[2]["instruction"]
+    assert (
+        "Every Experiment needs at least one real Kernel-bound Gateway Result"
+        in recovery[2]["instruction"]
+    )
     assert "failed attempt-report publishes nothing" in recovery[3]["instruction"]
     assert "then retry" in recovery[3]["instruction"]
     assert "never retry after a successful response" in recovery[3]["instruction"]

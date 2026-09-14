@@ -136,10 +136,10 @@ def _evaluate_schema() -> dict[str, Any]:
     return schema
 
 
-def _direction_schema() -> dict[str, Any]:
+def _direction_schema(*, allow_suggest: bool = False) -> dict[str, Any]:
     proposal = _object(
         {
-            "action": {"const": "propose"},
+            "action": {"enum": ["propose", "suggest"]} if allow_suggest else {"const": "propose"},
             "name": _text(),
             "hypothesis": _text(),
             "rationale": _text(),
@@ -179,7 +179,8 @@ def _direction_schema() -> dict[str, Any]:
         }
     ]
     update["description"] = (
-        "complete, abandon, block, and defer each require explicitly selected supporting_experiment_ids "
+        "complete, abandon, block, and defer each require explicitly selected "
+        "supporting_experiment_ids "
         "belonging to this Direction and a hypothesis_status. Unmeasured or inconclusive reasoning "
         "must remain unresolved. supported/refuted requires completed Gateway evidence for each "
         "selected Experiment, but remains an Agent judgment, not Runtime semantic certification. "
@@ -195,6 +196,7 @@ def _direction_schema() -> dict[str, Any]:
                     "correction",
                     "port",
                     "combination",
+                    "adoption",
                 ]
             },
             "derived_from_direction_ids": {
@@ -381,6 +383,8 @@ def tool_request_schema(
     """Return the exact local Agent request contract when Core owns validation."""
     if command == "gateway-execute" and operation == "evaluate":
         return _evaluate_schema()
+    if command == "update-direction" and allow_baseline:
+        return _direction_schema(allow_suggest=True)
     if command == "record-experiment":
         return _experiment_schema(allow_baseline=allow_baseline)
     if command == "attempt-report":
@@ -454,7 +458,8 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         {
             "instruction": (
                 "before and after cannot both be null, even for abandon_direction. "
-                "Set each non-null before/after subject to one real Kernel-bound result_artifact_digest; "
+                "Set each non-null before/after subject to one real Kernel-bound "
+                "result_artifact_digest; "
                 "Runtime resolves the Kernel and Result Artifacts. For exact historical source "
                 "reuse, use action=adopt with both real Results; historical after is permitted "
                 "only when Runtime validates its matching successful full Evaluate"

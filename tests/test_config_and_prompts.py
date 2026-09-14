@@ -230,7 +230,7 @@ def test_evaluate_prompt_explains_overrides_and_full_contract_requirement() -> N
     assert "requires a successful ordinary full Evaluate using" in text
     assert 'register `action: "adopt"`' in text
     assert "Only `adopt` permits a historical Trial as `after`" in text
-    assert "not an Agent Kernel Trial" in text
+    assert "not an Agent Result Artifact" in text
     assert "Only `candidate_ready` requires non-empty Experiments" in text
     assert "input_scope" in text
     assert "input_py" in text and "shapes" in text

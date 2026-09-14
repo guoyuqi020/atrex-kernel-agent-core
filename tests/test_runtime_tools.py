@@ -128,8 +128,12 @@ def _fake_direction_views(context: Any) -> dict[str, dict[str, Any]]:
         else:
             directions[direction_id]["status"] = statuses[event["action"]]
             directions[direction_id]["analysis"] = event["analysis"]
-            directions[direction_id]["supporting_experiment_ids"] = list(event["supporting_experiment_ids"])
-            directions[direction_id]["hypothesis_status"] = event.get("hypothesis_status") or "unresolved"
+            directions[direction_id]["supporting_experiment_ids"] = list(
+                event["supporting_experiment_ids"]
+            )
+            directions[direction_id]["hypothesis_status"] = (
+                event.get("hypothesis_status") or "unresolved"
+            )
     for experiment in _fake_visible(context, "experiments"):
         direction = directions.get(str(experiment["direction_id"]))
         if direction is not None:
@@ -666,6 +670,61 @@ def test_runtime_query_error_is_rewritten_to_agent_wrapper_contract() -> None:
         "file",
     ]
     assert "artifact_file" in response["request_schema"]["properties"]
+
+
+def test_optimizer_suggestion_error_keeps_precise_issue_and_recovery() -> None:
+    recovery = [{"instruction": "Call update-direction with action=propose"}]
+    response = runtime_tools._augment_agent_error(
+        "update-direction",
+        {
+            "error": "invalid_request",
+            "detail": "Optimizer cannot use action=suggest",
+            "issues": [
+                {
+                    "path": "request.action",
+                    "code": "forbidden_action",
+                    "message": "Optimizer cannot use action=suggest",
+                }
+            ],
+            "recovery": recovery,
+        },
+        detail="Optimizer cannot use action=suggest",
+    )
+
+    assert response["issues"][0]["path"] == "request.action"
+    assert response["issues"][0]["code"] == "forbidden_action"
+    assert response["recovery"] == recovery
+    assert response["request_schema"]["oneOf"][0]["properties"]["action"] == {
+        "const": "propose"
+    }
+
+
+def test_suggested_direction_start_error_keeps_precise_recovery() -> None:
+    direction_id = "direction_" + "a" * 32
+    recovery = [
+        {"tool": "load-direction", "request": {"direction_id": direction_id}},
+        {"instruction": "Propose a new derived Direction, then start its new ID"},
+    ]
+    response = runtime_tools._augment_agent_error(
+        "update-direction",
+        {
+            "error": "invalid_request",
+            "detail": "A suggested Direction cannot be started",
+            "issues": [
+                {
+                    "path": "request.direction_id",
+                    "code": "suggested_direction_not_startable",
+                    "message": "A suggested Direction cannot be started",
+                }
+            ],
+            "recovery": recovery,
+        },
+        detail="A suggested Direction cannot be started",
+    )
+
+    assert response["issues"][0]["path"] == "request.direction_id"
+    assert response["issues"][0]["code"] == "suggested_direction_not_startable"
+    assert response["recovery"] == recovery
 
 
 def test_attempt_report_error_returns_actionable_direction_recovery() -> None:
