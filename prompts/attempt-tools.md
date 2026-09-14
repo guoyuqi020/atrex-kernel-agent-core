@@ -261,12 +261,13 @@ history. Bootstrap starts with no earlier journal history; its current live Jour
 `update-direction` likewise persists each proposal or lifecycle event in Runtime before returning.
 Direction Journal reads are Runtime-local and unmetered. Invoke `list-directions` with
 `{"file":"scratch/directions-index.json"}`; it atomically writes Direction ID, name, and current
-status to that file and returns only status, file, and count. Read the file, then invoke
+status and hypothesis_status to that file and returns only status, file, and count. Read the file, then invoke
 `load-direction` with `{"direction_id":"direction_<id>"}` only for selected entries to retrieve
 their complete normalized Directions.
-Its `supporting_experiment_ids` automatically includes every visible Experiment whose
-`direction_id` names that Direction, together with associations snapshotted internally by prior
-Direction status events.
+Its `associated_experiment_ids` includes all visible Experiments belonging to that Direction.
+Its `supporting_experiment_ids` contains only evidence explicitly selected at the latest closure,
+not every associated Experiment. `hypothesis_status` is the Agent's judgment, separate from
+lifecycle status; missing historical judgments mean `unresolved`, never implicitly refuted.
 
 A Direction is the durable unit of research and exploration for one causal hypothesis, not an
 Experiment container. Before choosing one, inspect only the contract, incumbent, Journal indexes,
@@ -288,19 +289,46 @@ Propose a Direction with:
 }
 ```
 
-Then call `update-direction` with the returned `direction_id`, an action of `start`, `complete`,
-`abandon`, `block`, or `defer`, and non-empty `analysis`. Runtime derives Experiment links; do not
-provide them. Events append to history. An Attempt may advance at most three inherited or new
+Start with exactly `action="start"`, `direction_id`, and non-empty `analysis`.
+Close with `complete`, `abandon`, `block`, or `defer`, additionally supplying
+`hypothesis_status` and a non-empty, unique `supporting_experiment_ids` array (maximum 32):
+
+```json
+{
+  "action": "defer",
+  "direction_id": "direction_<id>",
+  "analysis": "The investigation stopped before this hypothesis was measured; it remains open.",
+  "hypothesis_status": "unresolved",
+  "supporting_experiment_ids": ["experiment_<id>"]
+}
+```
+
+Use `unresolved` for untested interpretations, blockers, or insufficient evidence.
+Use `supported` or `refuted` only when the selected Experiments actually tested this Direction's
+hypothesis, with a completed Gateway Result bound to each Experiment's `after`. Matching historical
+results may be reused. Runtime validates ownership and Result bindings, not causal relevance or
+scientific truth. An unrelated measured optimization cannot support a claim buried in its analysis.
+For example, a register tweak does not refute tile splitting; a claim about splitting needs an
+experiment that actually tests splitting. Keep untested mechanisms unresolved instead of inheriting them as facts.
+Abandoning a search is not falsifying its hypothesis. Events append to history; restarting resets
+the current judgment to unresolved without erasing prior events.
+An Attempt may advance at most three inherited or new
 Directions; proposals are unlimited and do not consume this limit. Only one Direction may be
 `in_progress` at a time: do not interleave their research, tools, edits, or measurements. Before
 starting another, close the current one with `complete`, `abandon`, `defer`, or `block`. None may
-remain `in_progress` at handoff. Without an Experiment use `defer` or `block`; `complete` and
-`abandon` require supporting Experiments.
+remain `in_progress` at handoff. All four closing actions require at least one Experiment associated
+with that Direction; `propose` and `start` do not. If no measurement was possible, first record the
+actual investigation or blocker using `abandon_direction`, citing at least one real Kernel-bound
+Gateway Result in `before` or `after`, then close with `hypothesis_status="unresolved"` and that
+Experiment's ID. Both sides may not be null. Diagnostic calls can establish a blocker without
+establishing a performance claim. If no Result exists, the closure cannot proceed; report the
+infrastructure failure through normal session failure/recovery, never fabricate evidence.
 
 If evidence was omitted before closure, `record-experiment` can append it to a visible
 `completed`, `abandoned`, `blocked`, or `deferred` Direction without reopening it. The receipt
 does not change its status or prior events; `load-direction` automatically includes the new
-Experiment in its supporting IDs. A merely `proposed` Direction must still be started first.
+Experiment in its associated IDs, but does not rewrite the selected support or judgment of the
+previous closure. A merely `proposed` Direction must still be started first.
 Late recording uses the same Trial visibility, ownership, and evidence checks as ordinary recording.
 Use it to complete the Journal before terminal handoff, not to resume research without `start`.
 
@@ -332,10 +360,11 @@ and evaluation contract, and a successful ordinary full Evaluate for that exact 
 The adopted Trial keeps its original ownership; adoption creates a decision, not a new measurement
 or a replacement Trial. It can qualify the exact restored Kernel for `candidate_ready` without
 rerunning Evaluate. A custom-input, correctness-only, or Agent ABBA result does not qualify.
-For `abandon_direction` before any identity-bearing operation, set both `before` and `after` to
-`null`; never set only one side to `null`. The phase Prompt may additionally permit Bootstrap-only
-`baseline`, which requires `before=null` and a measured `after` Trial. A `dev` result alone supplies no
-identity.
+Every Experiment must bind at least one Kernel-bound Gateway Result. For `abandon_direction`,
+`before` or `after` may be null, but not both. A Check/Profile or failed diagnostic Result can
+record an investigation without claiming a performance improvement. Health/Env calls and raw Dev
+results without a Kernel binding do not qualify. The phase Prompt may permit Bootstrap-only
+`baseline`, which requires `before=null` and a measured `after` Result.
 `record-experiment` persists the complete entry and prints only a compact receipt such as
 `{"status":"recorded","experiment_id":"experiment_<id>"}`; use that ID when referring to the
 experiment later. It does not echo the Agent-authored text, assigned sequence, or timestamp.
@@ -422,9 +451,10 @@ infrastructure blocker. `candidate_ready` does not mean the Kernel is retained o
 Runtime policy can make that decision. `candidate_ready` requires `final_candidate` and a null `blocker`; `pivot`
 requires both to be null; `blocked` requires a non-empty `blocker` and null `final_candidate`.
 Only `candidate_ready` requires non-empty Experiments, Direction events, and `findings`.
-If no experiment was completed, `blocked` or `pivot` may carry zero Experiments and `findings: []`;
+`blocked` or `pivot` may carry zero Experiments and `findings: []` when no Direction needs closing;
 the Runtime-supplied Direction event list may also be empty when no Direction was started.
-Still close any `in_progress` Direction with `block` or `defer` before handoff. Explain the actual
+Closing any `in_progress` Direction with `block` or `defer` first requires an associated Experiment,
+even when it records only an actual investigation or blocker with no measurement. Explain the actual
 blocker or stopping decision in the structured report; never fabricate an Experiment, Finding,
 Trial, or measurement merely to satisfy a non-empty list.
 Keep `knowledge_used` and `findings` structured as shown. Directions left `proposed` or `deferred`

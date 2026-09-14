@@ -118,8 +118,16 @@ Negative results are first-class evidence.
 
 Follow the Session-tool contracts for Direction state, Experiment linkage, incremental Report
 construction, retry behavior, and terminal validation; do not reconstruct the Journal from memory
-at the end. If no experiment was completed, `blocked` or `pivot` may have zero Experiments and empty
-Findings. Close any `in_progress` Direction with `block` or `defer`; do not fabricate evidence to finish.
+at the end. `blocked` or `pivot` may have zero Experiments and empty Findings if no Direction needs
+closing. Before `block` or `defer`, record an associated Experiment; if no measurement was possible,
+record the actual investigation or blocker with `abandon_direction`, citing a real Kernel-bound
+Gateway Result in at least one of `before` and `after`. Both cannot be null; no Result means the
+closure remains blocked, not permission to manufacture evidence.
+Do not fabricate evidence to finish.
+At closure, explicitly select relevant `supporting_experiment_ids` and declare
+`hypothesis_status` as `unresolved`, `supported`, or `refuted`. Lifecycle is not a verdict:
+untested reasoning stays unresolved. Preserve this distinction in Findings, memory, and Skills;
+never promote incidental interpretations in unrelated Experiments into established constraints.
 
 ### 8. Preserve reusable execution helpers
 

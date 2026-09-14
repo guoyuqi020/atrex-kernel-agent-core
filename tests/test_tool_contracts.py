@@ -171,7 +171,8 @@ def test_attempt_report_recovery_explains_how_to_close_open_directions() -> None
         "request": {"file": "scratch/experiments-index.json"},
     }
     assert "close every in_progress Direction" in recovery[2]["instruction"]
-    assert "Use defer or block when no Experiment exists" in recovery[2]["instruction"]
+    assert "complete, abandon, block, and defer all require" in recovery[2]["instruction"]
+    assert "Every Experiment needs at least one real Kernel-bound Gateway Result" in recovery[2]["instruction"]
     assert "failed attempt-report publishes nothing" in recovery[3]["instruction"]
     assert "then retry" in recovery[3]["instruction"]
     assert "never retry after a successful response" in recovery[3]["instruction"]
@@ -185,6 +186,16 @@ def test_direction_limit_recovery_says_not_to_retry_start() -> None:
     assert "direction_advancement_limit_exceeded" in instruction
     assert "requested Direction was not started" in instruction
     assert "do not retry start in the current Attempt" in instruction
+
+
+def test_direction_schema_and_recovery_describe_all_closure_requirements() -> None:
+    schema = tool_request_schema("update-direction")
+    recovery = tool_recovery("update-direction")
+    assert schema is not None and recovery is not None
+    assert "complete, abandon, block, and defer each require" in schema["oneOf"][1]["description"]
+    assert "hypothesis_status" in schema["oneOf"][1]["description"]
+    assert "Before complete, abandon, block, or defer" in recovery[1]["instruction"]
+    assert "at least one real Kernel-bound Gateway Result" in recovery[1]["instruction"]
 
 
 def test_direction_concurrency_recovery_says_to_close_the_active_direction() -> None:

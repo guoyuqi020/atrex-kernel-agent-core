@@ -913,11 +913,9 @@ def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, 
         "derived_from_experiment_ids",
         "supersedes_direction_id",
     }
+    optional_fields = relationship_fields | {"hypothesis_status"}
     for event in events:
-        if (
-            not isinstance(event, dict)
-            or set(event) - relationship_fields != _direction_event_fields()
-        ):
+        if not isinstance(event, dict) or set(event) - optional_fields != _direction_event_fields():
             raise ValueError(f"{label} contains a malformed event")
         if any(event.get(key) for key in relationship_fields):
             if event.get("action") != "propose":
@@ -963,6 +961,14 @@ def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, 
         action = event.get("action")
         if action not in {"propose", "start", "complete", "abandon", "block", "defer"}:
             raise ValueError("Direction action is invalid")
+        hypothesis_status = event.get("hypothesis_status")
+        if hypothesis_status is not None and (
+            not isinstance(hypothesis_status, str)
+            or hypothesis_status not in {"unresolved", "supported", "refuted"}
+        ):
+            raise ValueError("Direction hypothesis_status is invalid")
+        if action in {"propose", "start"} and hypothesis_status is not None:
+            raise ValueError("Only a Direction closure may declare hypothesis_status")
         supporting = _validate_experiment_id_array(
             event.get("supporting_experiment_ids"),
             "Direction supporting_experiment_ids",
@@ -995,8 +1001,9 @@ def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, 
             ):
                 raise ValueError("Direction update cannot redefine its proposal")
             _text(event.get("analysis"), "Direction analysis")
-            if action in {"complete", "abandon"} and not supporting:
-                raise ValueError(f"Direction {action} requires supporting Experiments")
+            if action in {"complete", "abandon", "block", "defer"} and not supporting:
+                if hypothesis_status is not None or action in {"complete", "abandon"}:
+                    raise ValueError(f"Direction {action} requires supporting Experiments")
         validated.append(event)
     return validated
 
@@ -1090,15 +1097,23 @@ def _validate_experiment_comparison(
         if before is not None or after is None:
             raise ValueError("Experiment baseline requires before=null and complete after evidence")
         return
-    if (before is None) != (after is None):
-        raise ValueError("Experiment before and after must both be present or both be null")
-    if request.get("action") in {"keep_after", "restore_before", "adopt"} and before is None:
+    if before is None and after is None:
+        raise ValueError(
+            "Experiment requires at least one Gateway Result: before and after cannot both be null"
+        )
+    if request.get("action") in {"keep_after", "restore_before", "adopt"} and (
+        before is None or after is None
+    ):
         raise ValueError(
             "Experiment keep_after/restore_before/adopt requires before and after evidence"
         )
 
 
 def record_experiment(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("before") is None and request.get("after") is None:
+        raise ValueError(
+            "Experiment requires at least one Gateway Result: before and after cannot both be null"
+        )
     if request.get("action") == "adopt":
         for side in ("before", "after"):
             subject = request.get(side)
@@ -1306,12 +1321,13 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         has_identity_bearing_experiment = any(
             experiment[side] is not None
             for experiment in experiments
+            if experiment["action"] != "abandon_direction"
             for side in ("before", "after")
         )
         if status == "blocked" and baseline_count == 0 and has_identity_bearing_experiment:
             raise ValueError(
                 "Bootstrap blocked report may omit baseline only when no Experiment has "
-                "identity-bearing Gateway evidence"
+                "non-diagnostic candidate evidence; abandon_direction diagnostics are allowed"
             )
     _text(request.get("hypothesis"), "Attempt report hypothesis")
     _text(request.get("analysis"), "Attempt report analysis")
@@ -1595,6 +1611,15 @@ def _augment_agent_error(
         response["issues"] = normalized_issues
     if "issues" not in response and detail:
         response["issues"] = [local_validation_issue(detail)]
+    if command in {"update-direction", "record-experiment"}:
+        issues = response.get("issues")
+        if isinstance(issues, list):
+            response["issues"] = [
+                local_validation_issue(str(item.get("message") or detail))
+                if isinstance(item, dict) and item.get("path") in {"$", "request"}
+                else item
+                for item in issues
+            ]
     schema = tool_request_schema(
         command,
         allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),

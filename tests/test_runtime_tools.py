@@ -31,6 +31,19 @@ from runtime_tools import (
 )
 
 
+def _change_direction(context: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Build explicit closure inputs for scenario fixtures."""
+    if request.get("action") in {"complete", "abandon", "block", "defer"}:
+        request = {
+            "hypothesis_status": "unresolved",
+            "supporting_experiment_ids": [
+                item["experiment_id"] for item in _fake_visible(context, "experiments")
+                if item["direction_id"] == request["direction_id"]
+            ], **request,
+        }
+    return update_direction(context, request)
+
+
 def _context(root: Path) -> Any:
     (root / "scratch").mkdir(parents=True)
     return SimpleNamespace(
@@ -109,14 +122,18 @@ def _fake_direction_views(context: Any) -> dict[str, dict[str, Any]]:
                 "status": "proposed",
                 "analysis": None,
                 "supporting_experiment_ids": [],
+                "associated_experiment_ids": [],
+                "hypothesis_status": "unresolved",
             }
         else:
             directions[direction_id]["status"] = statuses[event["action"]]
             directions[direction_id]["analysis"] = event["analysis"]
+            directions[direction_id]["supporting_experiment_ids"] = list(event["supporting_experiment_ids"])
+            directions[direction_id]["hypothesis_status"] = event.get("hypothesis_status") or "unresolved"
     for experiment in _fake_visible(context, "experiments"):
         direction = directions.get(str(experiment["direction_id"]))
         if direction is not None:
-            direction["supporting_experiment_ids"].append(experiment["experiment_id"])
+            direction["associated_experiment_ids"].append(experiment["experiment_id"])
     return directions
 
 
@@ -163,6 +180,8 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                 }
             else:
                 expected = {"action", "direction_id", "analysis"}
+                if action != "start":
+                    expected |= {"hypothesis_status", "supporting_experiment_ids"}
                 if set(request) != expected:
                     raise ValueError(f"Direction update fields must be exactly {sorted(expected)}")
                 direction_id = str(request["direction_id"])
@@ -194,7 +213,10 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                             f"in_progress_direction_ids={in_progress}. "
                             "The requested Direction was not started"
                         )
-                if action in {"complete", "abandon"} and not direction["supporting_experiment_ids"]:
+                if (
+                    action in {"complete", "abandon", "block", "defer"}
+                    and not request["supporting_experiment_ids"]
+                ):
                     raise ValueError(
                         f"Direction {action} requires at least one associated Experiment"
                     )
@@ -210,7 +232,8 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                     "success_criteria": None,
                     "stop_conditions": None,
                     "analysis": request["analysis"],
-                    "supporting_experiment_ids": list(direction["supporting_experiment_ids"]),
+                    "supporting_experiment_ids": request.get("supporting_experiment_ids", []),
+                    "hypothesis_status": request.get("hypothesis_status"),
                 }
             state["direction_events"].append(event)
             return {"status": "recorded", "direction_id": direction_id}
@@ -221,6 +244,7 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                         "direction_id": value["direction_id"],
                         "name": value["name"],
                         "status": value["status"],
+                        "hypothesis_status": value["hypothesis_status"],
                     }
                     for value in _fake_direction_views(context).values()
                 ]
@@ -309,7 +333,7 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _propose_and_start_direction(context: Any) -> str:
-    proposed = update_direction(
+    proposed = _change_direction(
         context,
         {
             "action": "propose",
@@ -322,7 +346,7 @@ def _propose_and_start_direction(context: Any) -> str:
         },
     )
     direction_id = str(proposed["direction_id"])
-    update_direction(
+    _change_direction(
         context,
         {
             "action": "start",
@@ -404,13 +428,27 @@ def test_blocked_bootstrap_cannot_omit_measured_baseline(tmp_path: Path) -> None
 
     with pytest.raises(
         ValueError,
-        match="may omit baseline only when no Experiment has identity-bearing Gateway evidence",
+        match="may omit baseline only when no Experiment has non-diagnostic candidate evidence",
     ):
         attempt_report(bootstrap, report)
 
 
+def _record_diagnostic_experiment(context: Any, direction_id: str) -> dict[str, Any]:
+    return record_experiment(
+        context,
+        {
+            **_experiment(direction_id),
+            "action": "abandon_direction",
+            "after": None,
+            "change": "No new candidate; inspected the recorded diagnostic Result.",
+            "evidence": "Inspected the recorded Gateway diagnostic Result.",
+            "analysis": "Preserve the actual blocker before closing the Direction.",
+        },
+    )
+
+
 def _complete_direction(context: Any, direction_id: str) -> None:
-    update_direction(
+    _change_direction(
         context,
         {
             "action": "complete",
@@ -756,14 +794,15 @@ def test_direction_journal_can_be_recorded_listed_and_loaded(tmp_path: Path) -> 
                 "direction_id": direction_id,
                 "name": "vectorize loads",
                 "status": "in_progress",
+                "hypothesis_status": "unresolved",
             }
         ]
     }
     experiment = record_experiment(context, _experiment(direction_id))
-    assert load_direction(context, {"direction_id": direction_id})["supporting_experiment_ids"] == [
+    assert load_direction(context, {"direction_id": direction_id})["associated_experiment_ids"] == [
         experiment["experiment_id"]
     ]
-    update_direction(
+    _change_direction(
         context,
         {
             "action": "abandon",
@@ -784,6 +823,8 @@ def test_direction_journal_can_be_recorded_listed_and_loaded(tmp_path: Path) -> 
         "status": "abandoned",
         "analysis": "the measured candidate regressed",
         "supporting_experiment_ids": [experiment["experiment_id"]],
+        "associated_experiment_ids": [experiment["experiment_id"]],
+        "hypothesis_status": "unresolved",
     }
 
 
@@ -814,6 +855,7 @@ def test_direction_reads_include_frozen_history_without_provenance(
                 "direction_id": direction_id,
                 "name": "vectorize loads",
                 "status": "in_progress",
+                "hypothesis_status": "unresolved",
             }
         ]
     }
@@ -829,6 +871,8 @@ def test_direction_reads_include_frozen_history_without_provenance(
         "status",
         "analysis",
         "supporting_experiment_ids",
+        "associated_experiment_ids",
+        "hypothesis_status",
     }
 
 
@@ -836,7 +880,7 @@ def test_attempt_report_allows_any_number_of_continuable_directions(tmp_path: Pa
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
     for ordinal in range(4):
-        update_direction(
+        _change_direction(
             context,
             {
                 "action": "propose",
@@ -859,7 +903,8 @@ def test_attempt_may_advance_at_most_three_distinct_directions(tmp_path: Path) -
     context = _context(tmp_path)
     for _ordinal in range(3):
         direction_id = _propose_and_start_direction(context)
-        update_direction(
+        _record_diagnostic_experiment(context, direction_id)
+        _change_direction(
             context,
             {
                 "action": "defer",
@@ -868,7 +913,7 @@ def test_attempt_may_advance_at_most_three_distinct_directions(tmp_path: Path) -
             },
         )
 
-    fourth = update_direction(
+    fourth = _change_direction(
         context,
         {
             "action": "propose",
@@ -884,7 +929,7 @@ def test_attempt_may_advance_at_most_three_distinct_directions(tmp_path: Path) -
         ValueError,
         match="Direction advancement limit exceeded: maximum=3",
     ):
-        update_direction(
+        _change_direction(
             context,
             {
                 "action": "start",
@@ -897,7 +942,7 @@ def test_attempt_may_advance_at_most_three_distinct_directions(tmp_path: Path) -
 def test_attempt_may_explore_only_one_direction_at_a_time(tmp_path: Path) -> None:
     context = _context(tmp_path)
     first = _propose_and_start_direction(context)
-    second = update_direction(
+    second = _change_direction(
         context,
         {
             "action": "propose",
@@ -911,7 +956,7 @@ def test_attempt_may_explore_only_one_direction_at_a_time(tmp_path: Path) -> Non
     )["direction_id"]
 
     with pytest.raises(ValueError, match="Only one Direction may be in progress at a time"):
-        update_direction(
+        _change_direction(
             context,
             {
                 "action": "start",
@@ -922,7 +967,8 @@ def test_attempt_may_explore_only_one_direction_at_a_time(tmp_path: Path) -> Non
     assert load_direction(context, {"direction_id": first})["status"] == "in_progress"
     assert load_direction(context, {"direction_id": second})["status"] == "proposed"
 
-    update_direction(
+    _record_diagnostic_experiment(context, first)
+    _change_direction(
         context,
         {
             "action": "defer",
@@ -930,7 +976,7 @@ def test_attempt_may_explore_only_one_direction_at_a_time(tmp_path: Path) -> Non
             "analysis": "pause this exploration before switching",
         },
     )
-    update_direction(
+    _change_direction(
         context,
         {
             "action": "start",
@@ -951,16 +997,42 @@ def test_attempt_report_rejects_unexperimented_direction_left_in_progress(
     with pytest.raises(ValueError, match="cannot leave any Direction in progress"):
         attempt_report(context, _report(str(receipt["experiment_id"])))
 
-    update_direction(
+    with pytest.raises(ValueError, match="requires at least one associated Experiment"):
+        _change_direction(
+            context,
+            {"action": "defer", "direction_id": open_direction_id, "analysis": "Pause"},
+        )
+    _record_diagnostic_experiment(context, open_direction_id)
+    _change_direction(
         context,
         {
             "action": "defer",
             "direction_id": open_direction_id,
-            "analysis": "no Experiment was run, so defer this direction",
+            "analysis": "the unmeasured investigation is recorded; defer this direction",
         },
     )
     report = attempt_report(context, _report(str(receipt["experiment_id"])))
     assert report["report_status"] == "candidate_ready"
+
+
+@pytest.mark.parametrize("action", ["complete", "abandon", "block", "defer"])
+@pytest.mark.parametrize("has_experiment", [False, True])
+def test_direction_event_validation_requires_experiment_for_every_closure(
+    tmp_path: Path, action: str, has_experiment: bool
+) -> None:
+    context = _context(tmp_path)
+    direction_id = _propose_and_start_direction(context)
+    event = deepcopy(_fake_state(context)["direction_events"][-1])
+    event["action"] = action
+    event["hypothesis_status"] = "unresolved"
+    event["analysis"] = "Close the recorded investigation"
+    if has_experiment:
+        receipt = _record_diagnostic_experiment(context, direction_id)
+        event["supporting_experiment_ids"] = [receipt["experiment_id"]]
+        assert runtime_tools._validate_direction_events([event], "journal") == [event]
+    else:
+        with pytest.raises(ValueError, match=f"Direction {action} requires supporting Experiments"):
+            runtime_tools._validate_direction_events([event], "journal")
 
 
 def test_experiment_journal_can_be_listed_and_loaded_by_id(

@@ -153,7 +153,37 @@ def _direction_schema() -> dict[str, Any]:
             "action": {"enum": ["start", "complete", "abandon", "block", "defer"]},
             "direction_id": _identifier("direction_"),
             "analysis": _text(),
+            "hypothesis_status": {"enum": ["unresolved", "supported", "refuted"]},
+            "supporting_experiment_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "uniqueItems": True,
+                "items": _identifier("experiment_"),
+            },
+        },
+        required=("action", "direction_id", "analysis"),
+    )
+    update["allOf"] = [
+        {
+            "if": {"properties": {"action": {"const": "start"}}},
+            "then": {
+                "not": {
+                    "anyOf": [
+                        {"required": ["hypothesis_status"]},
+                        {"required": ["supporting_experiment_ids"]},
+                    ]
+                }
+            },
+            "else": {"required": ["hypothesis_status", "supporting_experiment_ids"]},
         }
+    ]
+    update["description"] = (
+        "complete, abandon, block, and defer each require explicitly selected supporting_experiment_ids "
+        "belonging to this Direction and a hypothesis_status. Unmeasured or inconclusive reasoning "
+        "must remain unresolved. supported/refuted requires completed Gateway evidence for each "
+        "selected Experiment, but remains an Agent judgment, not Runtime semantic certification. "
+        "propose and start do not require an Experiment; start accepts neither closure field."
     )
     proposal["properties"].update(
         {
@@ -211,9 +241,22 @@ def _experiment_schema(*, allow_baseline: bool) -> dict[str, Any]:
     )
     schema["allOf"] = [
         {
-            "if": {"properties": {"action": {"const": "adopt"}}, "required": ["action"]},
+            "anyOf": [
+                {"properties": {"before": _subject()}},
+                {"properties": {"after": _subject()}},
+            ]
+        },
+        {
+            "if": {
+                "properties": {"action": {"enum": ["adopt", "keep_after", "restore_before"]}},
+                "required": ["action"],
+            },
             "then": {"properties": {"before": _subject(), "after": _subject()}},
-        }
+        },
+        {
+            "if": {"properties": {"action": {"const": "baseline"}}, "required": ["action"]},
+            "then": {"properties": {"before": {"type": "null"}, "after": _subject()}},
+        },
     ]
     return schema
 
@@ -368,7 +411,11 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         },
         {
             "instruction": (
-                "Record at least one Experiment before completing or abandoning a Direction"
+                "Before complete, abandon, block, or defer, select supporting_experiment_ids "
+                "from load-direction associated_experiment_ids and declare hypothesis_status. "
+                "Cite only experiments that address this Direction's hypothesis. "
+                "Every Experiment needs at least one real Kernel-bound Gateway Result. "
+                "Use unresolved for diagnostics; lifecycle closure is not hypothesis refutation"
             )
         },
         {
@@ -381,7 +428,7 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         {
             "instruction": (
                 "When direction_advancement_limit_exceeded is returned, the requested Direction "
-                "was not started. Keep it proposed or deferred for a future Attempt; do not retry "
+                "was not started. Leave its status unchanged for a future Attempt; do not retry "
                 "start in the current Attempt"
             )
         },
@@ -406,7 +453,8 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         },
         {
             "instruction": (
-                "Set each non-null before/after subject to one visible result_artifact_digest; "
+                "before and after cannot both be null, even for abandon_direction. "
+                "Set each non-null before/after subject to one real Kernel-bound result_artifact_digest; "
                 "Runtime resolves the Kernel and Result Artifacts. For exact historical source "
                 "reuse, use action=adopt with both real Results; historical after is permitted "
                 "only when Runtime validates its matching successful full Evaluate"
@@ -431,9 +479,12 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         {
             "instruction": (
                 "Read both indexes and close every in_progress Direction with update-direction "
-                "before retrying attempt-report. Use defer or block when no Experiment exists; "
-                "complete or abandon requires a supporting Experiment. blocked/pivot may have "
-                "zero Experiments and empty findings; never fabricate evidence to end a session"
+                "before retrying attempt-report. complete, abandon, block, and defer all require "
+                "explicit supporting_experiment_ids and hypothesis_status. "
+                "Every Experiment needs at least one real Kernel-bound Gateway Result; "
+                "then select its Experiment ID and use hypothesis_status=unresolved. "
+                "blocked/pivot may have zero Experiments if no Direction needs closing; "
+                "never fabricate evidence to end a session"
             )
         },
         {
@@ -533,6 +584,12 @@ def _evaluate_recovery(detail: str) -> list[dict[str, Any]]:
 
 
 _PATH_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"before and after cannot both", re.I), "before"),
+    (
+        re.compile(r"Supporting Experiment|Direction supporting_experiment_ids", re.I),
+        "supporting_experiment_ids",
+    ),
+    (re.compile(r"hypothesis_status", re.I), "hypothesis_status"),
     (re.compile(r"profile_evidence\.supporting_results"), "profile_evidence.supporting_results"),
     (re.compile(r"supporting_experiment_ids", re.I), "findings.supporting_experiment_ids"),
     (re.compile(r"final_candidate", re.I), "final_candidate"),

@@ -154,14 +154,22 @@ Use the shared `attempt-report` schema described below. Bootstrap permits only:
 
 Do not use `pivot` during Bootstrap. Before terminal handoff, close every started Direction and
 record each decisive construction or repair as an Experiment. Leave any useful unstarted
-optimization ideas as `proposed` or `deferred` Directions so later optimization Attempts can load
+optimization ideas as `proposed` Directions so later optimization Attempts can load
 and advance them without reconstructing the Bootstrap session.
 
 A `candidate_ready` Bootstrap report requires exactly one `baseline` Experiment. A blocked report
-may contain zero Experiments and empty `findings`; do not manufacture evidence just to terminate.
-It may omit the baseline Experiment when no recorded Experiment has identity-bearing Gateway
-evidence. If a Direction is still `in_progress`, close it with `block` or `defer` first; if no
-Direction was started, an empty Runtime Direction event list is valid for `blocked`.
+may contain zero Experiments and empty `findings` if no Direction needs closing; do not manufacture
+evidence just to terminate.
+It may omit baseline when all recorded Experiments are `abandon_direction` diagnostics, or none
+exist. Diagnostic Results do not imply that a usable baseline exists.
+Closing an `in_progress` Direction with `block` or `defer` requires an associated Experiment
+first. Record the actual investigation or blocker using `abandon_direction` with at least one
+real Kernel-bound Gateway Result in `before` or `after`, then close with `hypothesis_status=unresolved`.
+Both sides may not be null; a diagnostic result is not evidence of a performance improvement. If no Direction was started,
+an empty Runtime Direction event list is valid for `blocked`.
+Every closure explicitly selects `supporting_experiment_ids` and declares `hypothesis_status`.
+Unmeasured investigations remain `unresolved`; do not present a toolchain blocker or an
+untested structural interpretation as an experimentally refuted hypothesis.
 
 Use the shared report fields with Bootstrap semantics: `diagnosis` names the bring-up or correctness
 issue, `approach` explains the construction or repair, and `expected_impact` states the expected

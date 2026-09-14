@@ -61,8 +61,8 @@ def test_adopt_schema_exposes_action_and_requires_trial_reference_fields(
             "pattern": r"^sha256:[0-9a-f]{64}$",
         }
         assert subject["additionalProperties"] is False
-        assert schema["allOf"][0]["if"]["properties"]["action"] == {"const": "adopt"}
-        assert schema["allOf"][0]["then"]["properties"][side] == subject
+        assert schema["allOf"][1]["if"]["properties"]["action"] == {"enum": ["adopt", "keep_after", "restore_before"]}
+        assert schema["allOf"][1]["then"]["properties"][side] == subject
 
 
 @pytest.mark.parametrize("allow_baseline", [False, True])
@@ -188,7 +188,7 @@ def test_adopt_rejects_both_trial_references_null(tmp_path: Path) -> None:
     experiment = helpers._experiment(direction_id)
     experiment.update({"action": "adopt", "before": None, "after": None})
 
-    with pytest.raises(ValueError, match=r"adopt requires.*before"):
+    with pytest.raises(ValueError, match="before and after cannot both be null"):
         runtime_tools.record_experiment(context, experiment)
 
     assert not helpers._fake_state(context)["experiments"]
@@ -281,15 +281,21 @@ def test_zero_experiments_cannot_bypass_an_active_direction(
 
     assert not context.report_path.exists()
     assert not helpers._REGISTERED_REPORTS
-    runtime_tools.update_direction(
+    with pytest.raises(ValueError, match="requires at least one associated Experiment"):
+        helpers._change_direction(
+            context,
+            {"action": close_action, "direction_id": direction_id, "analysis": "Blocked"},
+        )
+    helpers._record_diagnostic_experiment(context, direction_id)
+    helpers._change_direction(
         context,
         {
             "action": close_action,
             "direction_id": direction_id,
-            "analysis": "No Experiment was run, so close this Direction explicitly",
+            "analysis": "No measurement was made; the investigation is recorded before closure",
         },
     )
     published = runtime_tools.attempt_report(context, report)
     assert published["report_status"] == status
-    assert published["experiment_count"] == 0
+    assert published["experiment_count"] == 1
     assert helpers._fake_state(context)["direction_events"][-1]["action"] == close_action
