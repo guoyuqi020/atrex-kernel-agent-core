@@ -153,13 +153,10 @@ Use the shared `attempt-report` schema described below. Bootstrap permits only:
   safe in-scope repairs.
 
 Do not use `pivot` during Bootstrap. Before terminal handoff, close every started Direction and
-record each decisive construction or repair as an Experiment. Leave any useful unstarted
-optimization ideas as `suggested` Directions. For each distinct untested idea, call
-`update-direction` with `action="suggest"` and the same complete definition fields as
-`propose` (`name`, `hypothesis`, `rationale`, `plan`, `success_criteria`, `stop_conditions`).
-Runtime records it immediately and returns its Direction ID. Do not start or attach an Experiment
-to that suggestion. Later optimization Attempts can inspect it with `list-directions` and
-`load-direction`, then propose their own derived Direction using `adoption` or `refinement`.
+record each decisive construction or repair as an Experiment. Focus on establishing a correct
+baseline and preserving actual investigation evidence, not forecasting later optimization
+Directions. Do not create `suggested` Directions. Later optimization sessions choose their
+own Directions from the public contract, profiling, and durable Journal evidence.
 
 A `candidate_ready` Bootstrap report requires exactly one `baseline` Experiment. A blocked report
 may contain zero Experiments and empty `findings` if no Direction needs closing; do not manufacture

@@ -136,10 +136,10 @@ def _evaluate_schema() -> dict[str, Any]:
     return schema
 
 
-def _direction_schema(*, allow_suggest: bool = False) -> dict[str, Any]:
+def _direction_schema() -> dict[str, Any]:
     proposal = _object(
         {
-            "action": {"enum": ["propose", "suggest"]} if allow_suggest else {"const": "propose"},
+            "action": {"const": "propose"},
             "name": _text(),
             "hypothesis": _text(),
             "rationale": _text(),
@@ -383,8 +383,6 @@ def tool_request_schema(
     """Return the exact local Agent request contract when Core owns validation."""
     if command == "gateway-execute" and operation == "evaluate":
         return _evaluate_schema()
-    if command == "update-direction" and allow_baseline:
-        return _direction_schema(allow_suggest=True)
     if command == "record-experiment":
         return _experiment_schema(allow_baseline=allow_baseline)
     if command == "attempt-report":

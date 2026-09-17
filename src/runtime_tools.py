@@ -905,9 +905,7 @@ def _validate_experiment_id_array(value: object, label: str) -> list[str]:
     return values
 
 
-def _validate_direction_events(
-    events: list[Any], label: str, *, allow_suggest: bool = False
-) -> list[dict[str, Any]]:
+def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, Any]]:
     validated: list[dict[str, Any]] = []
     relationship_fields = {
         "relationship",
@@ -968,10 +966,11 @@ def _validate_direction_events(
         action = event.get("action")
         if action not in {"propose", "suggest", "start", "complete", "abandon", "block", "defer"}:
             raise ValueError("Direction action is invalid")
-        if action == "suggest" and not allow_suggest:
+        if action == "suggest":
             raise ValueError(
-                "action=suggest is available only during Bootstrap; Optimizer cannot "
-                "include suggested Direction events"
+                "action=suggest is no longer supported, including during Bootstrap. "
+                "Use update-direction action=propose for your own exploration; "
+                "do not include suggested Direction events in the current report"
             )
         hypothesis_status = event.get("hypothesis_status")
         if hypothesis_status is not None and (
@@ -1301,7 +1300,6 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     direction_events = _validate_direction_events(
         direction_event_values,
         "Runtime Direction Journal",
-        allow_suggest=isinstance(context, RuntimeLineageBootstrapContext),
     )
     directions: dict[str, dict[str, Any]] = {}
     for direction in direction_values:
