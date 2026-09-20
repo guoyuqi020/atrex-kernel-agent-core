@@ -3,5 +3,8 @@
   "bundle_format": "atrex-kernel-agent-bundle-v1",
   "entrypoint": {
     "command": "src/main.py"
+  },
+  "workflow": {
+    "command": "workflow/main.py"
   }
 }

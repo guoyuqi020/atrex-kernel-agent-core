@@ -21,9 +21,12 @@ Evolver 位于 Parent/Candidate 仓库之外，可以在私有 Candidate Copy �
 
 ## 2. 可执行仓库
 
-`atrex-bundle.json` 是导入边界。Runtime 只接受严格的版本 1 Manifest、固定 Bundle Format 和
-安全 Regular-file Entry；在封存前拒绝 Link、Special File、Git Metadata、未批准 Submodule、
-不安全路径和超限内容。
+`atrex-bundle.json` 是导入边界。Runtime 只接受严格的版本 1 Manifest、固定 Bundle Format、
+安全 Regular-file Entry，以及安全 Workflow Command。Runtime 在隔离子进程中每个 Epoch 运行一次
+Active Revision 的版本化 Workflow；程序通过受限服务挂接副本或进化 Challenger、把固定 Attempt
+预算分配到 Branch 与 Trajectory、执行它们并请求可信 Kernel/Agent 选择。Runtime 校验并冻结所有
+持久决策；评测、恢复、比较、晋升、回滚和资源限制仍在 Bundle 之外。Runtime 在封存前拒绝
+Link、Special File、Git Metadata、未批准 Submodule、不安全路径和超限内容。
 
 `atrex-agent.json` 是可进化行为配置，版本 2 包含 Backend、Reasoning Effort、Backend-specific
 Session Settings、三个阶段的精确 Prompt Path，以及协议型可复用段落的精确 Prompt Fragment

@@ -27,8 +27,9 @@ specific phase materializes them.
 Two root manifests are intentionally separate:
 
 - [`atrex-bundle.json`](atrex-bundle.json) is the Runtime-facing import contract. It identifies this
-  as an `atrex-kernel-agent-bundle-v1` Bundle and declares `src/main.py` as the only
-  executable entrypoint.
+  as an `atrex-kernel-agent-bundle-v1` Bundle, declares `src/main.py` as the only executable
+  entrypoint, and names one versioned program under [`workflow/`](workflow/); each Lineage freezes
+  its selected Workflow in its initial Agent Revision.
 - [`atrex-agent.json`](atrex-agent.json) provides standalone Agent defaults for `claude`, `codex`,
   `pi`, or `qodercli`, reasoning/session options, and phase Prompt mappings. Managed Runtime
   Sessions apply an authoritative Backend/model/effort/settings binding while leaving Prompt and
@@ -208,6 +209,7 @@ an invalid/incomplete accounting outcome rather than guessed.
 ```text
 .
 ├── atrex-bundle.json                 # Runtime-facing Bundle and entrypoint contract
+├── workflow/                         # versioned Epoch orchestration and Runtime-service client
 ├── atrex-agent.json                  # evolvable backend and Prompt configuration
 ├── src/
 │   ├── main.py                       # single Runtime-launched dispatcher

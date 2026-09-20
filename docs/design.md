@@ -26,9 +26,14 @@ changed paths, evaluates the Challenger independently, and controls promotion.
 ## 2. Executable repository
 
 `atrex-bundle.json` is the import boundary. Runtime accepts only a strict version-1 manifest with
-bundle format `atrex-kernel-agent-bundle-v1` and one safe regular-file entrypoint. It rejects
-links, special files, Git metadata, unresolved submodules, unsafe paths, oversized files, and bundle
-limit violations before sealing the tree.
+bundle format `atrex-kernel-agent-bundle-v1`, one safe regular-file entrypoint, and a safe Workflow
+command. Runtime runs the Active Revision's versioned Workflow once per Epoch in an isolated
+subprocess. Through bounded services it may attach replicas or evolved Challengers, divide the fixed
+Attempt budget among Branches and Trajectories, execute them, and request trusted Kernel/Agent
+selection. Runtime validates and freezes every durable decision; evaluation, recovery, comparison,
+promotion, rollback, and resource limits remain outside the Bundle. Runtime rejects links, special
+files, Git metadata, unresolved submodules,
+unsafe paths, oversized files, and bundle limit violations before sealing the tree.
 
 `atrex-agent.json` is evolvable behavior configuration. Version 2 contains:
 

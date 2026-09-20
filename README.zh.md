@@ -24,8 +24,9 @@ Core 不能读取 Runtime 状态或评测私有输入。
 
 根目录两个 Manifest 刻意分离：
 
-- [`atrex-bundle.json`](atrex-bundle.json) 是 Runtime 导入契约，声明 Bundle 格式及唯一入口
-  `src/main.py`；
+- [`atrex-bundle.json`](atrex-bundle.json) 是 Runtime 导入契约，声明 Bundle 格式、唯一入口
+  `src/main.py`，以及 [`workflow/`](workflow/) 下的一个版本化程序；每条 Lineage 会把选中的
+  Workflow 冻结进自己的初始 Agent Revision；
 - [`atrex-agent.json`](atrex-agent.json) 提供 `claude`、`codex`、`pi` 或 `qodercli`、
   Reasoning/Session 选项与阶段 Prompt Mapping 的独立运行默认值。托管 Runtime Session 使用
   权威 Backend/Model/Effort/Settings Binding，同时保留 Prompt 与 Workflow 的进化能力；空
@@ -183,6 +184,7 @@ Backend Credential 和二进制可用性属于部署责任，只能通过 Runtim
 ```text
 .
 ├── atrex-bundle.json                 # Runtime Bundle/入口契约
+├── workflow/                         # 版本化 Epoch 编排与 Runtime 服务客户端
 ├── atrex-agent.json                  # 可进化 Backend 与 Prompt 配置
 ├── src/
 │   ├── main.py                       # 单次阶段 Dispatcher
