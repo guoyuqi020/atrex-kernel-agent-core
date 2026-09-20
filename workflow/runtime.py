@@ -337,10 +337,10 @@ class EpochRuntime:
         if set(selected) != set(self._pools):
             raise WorkflowRuntimeError("run_pools must include every Pool created for this Epoch")
         planned = sum(pool.trajectory_count * pool.rounds for pool in selected)
-        if planned != int(self.limits["optimizer_attempts"]):
+        capacity = int(self.limits["optimizer_attempts"])
+        if planned <= 0 or planned > capacity:
             raise WorkflowRuntimeError(
-                f"Epoch Pools plan {planned} Attempts but the fixed budget is "
-                f"{self.limits['optimizer_attempts']}"
+                f"Epoch Pools plan {planned} Attempts but Runtime capacity is {capacity}"
             )
         self._ran_pools = True
 
