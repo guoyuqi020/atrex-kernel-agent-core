@@ -43,6 +43,12 @@ def _context(tmp_path: Path, *, bootstrap: bool = False) -> ReportContext:
         "gateway_url": "https://runtime.invalid",
         "gateway_capability": "secret-capability",
         "agent_problem": {"private_tests": "DO-NOT-DISCLOSE"},
+        "correctness_policy": {
+            "comparison": "elementwise",
+            "formula": "abs(candidate - reference) <= atol + rtol * abs(reference)",
+            "default_tolerance": {"atol": 0.01, "rtol": 0.05},
+            "output_tolerances": {},
+        },
         "wiki_url": None,
         "wiki_capability": None,
         "usage_unit": "provider_tokens",

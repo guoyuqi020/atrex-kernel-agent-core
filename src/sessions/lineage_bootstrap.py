@@ -22,6 +22,7 @@ def _trusted_context(context: RuntimeLineageBootstrapContext) -> str:
             "hardware_target",
         )
     }
+    value["correctness_policy"] = context.correctness_policy
     return (
         "## Trusted task context\n\n```json\n"
         + json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)

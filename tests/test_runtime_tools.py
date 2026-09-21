@@ -68,6 +68,12 @@ def _bootstrap_context(root: Path) -> RuntimeLineageBootstrapContext:
         gateway_url="http://runtime.invalid",
         gateway_capability="capability",
         agent_problem={},
+        correctness_policy={
+            "comparison": "elementwise",
+            "formula": "abs(candidate - reference) <= atol + rtol * abs(reference)",
+            "default_tolerance": {"atol": 0.01, "rtol": 0.05},
+            "output_tolerances": {},
+        },
         wiki_url=None,
         wiki_capability=None,
         usage_unit="provider_tokens",

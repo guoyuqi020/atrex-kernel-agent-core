@@ -54,6 +54,7 @@ def _trusted_context(context: RuntimeAttemptContext) -> str:
         "attempt_ordinal": task["attempt_ordinal"],
         "operator": task["operator"],
         "hardware_target": task["hardware_target"],
+        "correctness_policy": context.correctness_policy,
     }
     return (
         "## Trusted task context\n\n```json\n"

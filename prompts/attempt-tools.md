@@ -122,9 +122,12 @@ and never reveal their inputs. After a contract evaluation, a profile request ma
 case and the Profile result reports the selected number. Do not infer or reconstruct case inputs
 from ids or measurements.
 
-A case passes when every output is within `atol=0.01` and `rtol=0.05` of the reference, so compare
-the reported `max_abs_err` and `max_rel_err` against those thresholds to see how much margin a
-candidate actually has. Every selected Shape is checked on each evaluation, but each one draws fresh random
+A case passes only when every output satisfies the task-specific `correctness_policy` in Trusted
+task context. Its elementwise rule is
+`abs(candidate - reference) <= atol + rtol * abs(reference)`; named output tolerances override the
+default for that output. Do not compare aggregate `max_abs_err` and `max_rel_err` independently to
+`atol` and `rtol`, because those aggregates do not reproduce the combined per-element predicate.
+Every selected Shape is checked on each evaluation, but each one draws fresh random
 inputs, and the authoritative gate that seals a Kernel draws more of them per Shape than an
 exploratory evaluate. A single passing evaluation near either threshold is therefore weak evidence:
 treat a thin margin as a defect to fix rather than a pass, because the sealing gate rejects a

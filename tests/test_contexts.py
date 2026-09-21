@@ -11,6 +11,12 @@ from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
 
 EVIDENCE_PROMPT = "# Evidence input\n\nInjected by the trusted controller.\n"
 EVIDENCE_PROMPT_SHA256 = hashlib.sha256(EVIDENCE_PROMPT.encode()).hexdigest()
+CORRECTNESS_POLICY = {
+    "comparison": "elementwise",
+    "formula": "abs(candidate - reference) <= atol + rtol * abs(reference)",
+    "default_tolerance": {"atol": 0.01, "rtol": 0.05},
+    "output_tolerances": {},
+}
 
 
 def _workspace(root: Path) -> tuple[Path, dict[str, object]]:
@@ -95,6 +101,7 @@ def _environment(monkeypatch: pytest.MonkeyPatch, root: Path, manifest: Path) ->
         "ATREX_CORE_PHASE": "optimization_attempt",
         "ATREX_ATTEMPT_MANIFEST": str(manifest),
         "ATREX_ATTEMPT_REPORT_PATH": str(root / "scratch/attempt-report.json"),
+        "ATREX_CORRECTNESS_POLICY_JSON": json.dumps(CORRECTNESS_POLICY),
         "ATREX_EVIDENCE_PROMPT_PATH": str(root / ".runtime/evidence-instructions.md"),
         "ATREX_GATEWAY_CAPABILITY": "scoped-capability",
         "ATREX_GATEWAY_PROXY_URL": "http://runtime.invalid",
@@ -123,6 +130,7 @@ def test_attempt_context_accepts_only_the_exact_manifest(
     assert context.agent_problem["objective"] == (
         "implement vector addition while exact cases remain private"
     )
+    assert context.correctness_policy == CORRECTNESS_POLICY
 
 
 def test_attempt_context_rejects_unknown_manifest_fields(
@@ -227,6 +235,7 @@ def test_lineage_bootstrap_context_loads_internal_problem_for_prompt_projection(
         "ATREX_ATTEMPT_REPORT_PATH": str(
             tmp_path / "scratch/attempt-report.json"
         ),
+        "ATREX_CORRECTNESS_POLICY_JSON": json.dumps(CORRECTNESS_POLICY),
         "ATREX_GATEWAY_CAPABILITY": "scoped-capability",
         "ATREX_GATEWAY_PROXY_URL": "http://runtime.invalid",
         "ATREX_OPTIMIZER_REPOSITORY": str(tmp_path / "agent/optimizer"),
@@ -243,3 +252,4 @@ def test_lineage_bootstrap_context_loads_internal_problem_for_prompt_projection(
 
     assert context.workspace == tmp_path
     assert context.agent_problem == problem
+    assert context.correctness_policy == CORRECTNESS_POLICY

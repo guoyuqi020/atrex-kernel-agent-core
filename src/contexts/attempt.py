@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .common import json_object_file, object_value, text_value, within
+from .common import correctness_policy_value, json_object_file, object_value, text_value, within
 
 _REQUIRED_ENVIRONMENT = (
     "ATREX_ATTEMPT_MANIFEST",
     "ATREX_ATTEMPT_REPORT_PATH",
+    "ATREX_CORRECTNESS_POLICY_JSON",
     "ATREX_EVIDENCE_PROMPT_PATH",
     "ATREX_GATEWAY_CAPABILITY",
     "ATREX_GATEWAY_PROXY_URL",
@@ -78,6 +79,7 @@ class RuntimeAttemptContext:
     gateway_url: str
     gateway_capability: str
     evidence_prompt: str
+    correctness_policy: Mapping[str, Any]
     agent_problem: Mapping[str, Any]
     wiki_url: str | None
     wiki_capability: str | None
@@ -155,6 +157,12 @@ class RuntimeAttemptContext:
             workspace / _EXPECTED_PATHS["agent_problem"],
             "public operator contract",
         )
+        try:
+            correctness_policy = correctness_policy_value(
+                json.loads(os.environ["ATREX_CORRECTNESS_POLICY_JSON"])
+            )
+        except json.JSONDecodeError as error:
+            raise ValueError("Correctness policy must contain valid JSON") from error
 
         evidence_manifest_path = workspace / ".runtime/evidence-manifest.json"
         if evidence_manifest_path.is_symlink() or not evidence_manifest_path.is_file():
@@ -262,6 +270,7 @@ class RuntimeAttemptContext:
                 os.environ["ATREX_GATEWAY_CAPABILITY"], "Gateway capability"
             ),
             evidence_prompt=evidence_prompt,
+            correctness_policy=correctness_policy,
             agent_problem=agent_problem,
             wiki_url=wiki_url,
             wiki_capability=wiki_capability,

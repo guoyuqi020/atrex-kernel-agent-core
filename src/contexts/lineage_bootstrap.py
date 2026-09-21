@@ -9,11 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .common import json_object_file, object_value, text_value
+from .common import correctness_policy_value, json_object_file, object_value, text_value
 
 _REQUIRED_ENVIRONMENT = (
     "ATREX_LINEAGE_BOOTSTRAP_MANIFEST",
     "ATREX_ATTEMPT_REPORT_PATH",
+    "ATREX_CORRECTNESS_POLICY_JSON",
     "ATREX_GATEWAY_CAPABILITY",
     "ATREX_GATEWAY_PROXY_URL",
     "ATREX_OPTIMIZER_REPOSITORY",
@@ -59,6 +60,7 @@ class RuntimeLineageBootstrapContext:
     gateway_url: str
     gateway_capability: str
     agent_problem: Mapping[str, Any]
+    correctness_policy: Mapping[str, Any]
     wiki_url: str | None
     wiki_capability: str | None
     usage_unit: str
@@ -119,6 +121,12 @@ class RuntimeLineageBootstrapContext:
             workspace / _EXPECTED_PATHS["agent_problem"],
             "public operator contract",
         )
+        try:
+            correctness_policy = correctness_policy_value(
+                json.loads(os.environ["ATREX_CORRECTNESS_POLICY_JSON"])
+            )
+        except json.JSONDecodeError as error:
+            raise ValueError("Correctness policy must contain valid JSON") from error
 
         report_path = Path(os.environ["ATREX_ATTEMPT_REPORT_PATH"]).resolve()
         token_path = Path(os.environ["ATREX_TOKEN_USAGE_REPORT"]).resolve()
@@ -156,6 +164,7 @@ class RuntimeLineageBootstrapContext:
                 os.environ["ATREX_GATEWAY_CAPABILITY"], "Gateway capability"
             ),
             agent_problem=agent_problem,
+            correctness_policy=correctness_policy,
             wiki_url=wiki_url,
             wiki_capability=wiki_capability,
             usage_unit=usage_unit,

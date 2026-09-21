@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -27,6 +28,50 @@ def text_value(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be a non-empty string")
     return value
+
+
+def correctness_policy_value(value: object) -> dict[str, Any]:
+    """Validate the exact Agent-safe correctness projection supplied by the controller."""
+    policy = object_value(value, "Correctness policy")
+    expected = {"comparison", "formula", "default_tolerance", "output_tolerances"}
+    if set(policy) != expected:
+        raise ValueError("Correctness policy fields do not match the Agent protocol")
+    if policy["comparison"] != "elementwise" or policy["formula"] != (
+        "abs(candidate - reference) <= atol + rtol * abs(reference)"
+    ):
+        raise ValueError("Correctness policy comparison is unsupported")
+
+    def tolerance(raw: object, label: str) -> dict[str, float]:
+        item = object_value(raw, label)
+        if set(item) != {"atol", "rtol"}:
+            raise ValueError(f"{label} fields do not match the Agent protocol")
+        result: dict[str, float] = {}
+        for key in ("atol", "rtol"):
+            number = item[key]
+            if (
+                not isinstance(number, int | float)
+                or isinstance(number, bool)
+                or not math.isfinite(number)
+                or number < 0
+            ):
+                raise ValueError(f"{label} {key} must be a finite non-negative number")
+            result[key] = float(number)
+        return result
+
+    defaults = tolerance(policy["default_tolerance"], "Default correctness tolerance")
+    raw_outputs = object_value(policy["output_tolerances"], "Output correctness tolerances")
+    outputs = {
+        text_value(name, "Correctness output name"): tolerance(
+            raw, f"Correctness tolerance for {name}"
+        )
+        for name, raw in raw_outputs.items()
+    }
+    return {
+        "comparison": policy["comparison"],
+        "formula": policy["formula"],
+        "default_tolerance": defaults,
+        "output_tolerances": outputs,
+    }
 
 
 def safe_relative(value: str, label: str) -> PurePosixPath:
