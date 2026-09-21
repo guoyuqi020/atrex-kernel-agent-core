@@ -15,7 +15,6 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 | immutable reference or seed Kernel | `input/kernel/` |
 | writable baseline candidate copied from the seed | `work/kernel/` |
 | immutable Agent implementation and included Skills | `agent/optimizer/` |
-| read-only pinned upstream GPU kernel projects | `reference/` |
 | read-only scoped, evidence-derived search conclusions | `insights/` |
 | read-only inherited phase prompts and instructions | `prompts/` |
 | read-only reusable procedures installed for Claude | `skills/` |
@@ -24,12 +23,6 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 
 Private evaluator inputs and exact cases are absent. The trusted task context below is authoritative
 for the operator, hardware, and DSL.
-
-`reference/` holds complete upstream implementations pinned at a known commit — CUTLASS, Triton,
-FlashAttention, FlashInfer, TileLang, DeepGEMM, Composable Kernel and others, with `reference/README.md`
-listing every project. Read it to see how a production library expresses a layout, a pipeline stage,
-or an instruction selection, then write your own baseline. Copying a file wholesale into
-`work/kernel/` is not a baseline.
 
 ## Execution boundary
 
@@ -49,7 +42,7 @@ or an instruction selection, then write your own baseline. Copying a file wholes
   that are placed beside the candidate in the pod under their base names. Write a
   multi-line probe to `scratch/` and name it there instead of encoding it into `command`;
   a payload embedded in `command` can be truncated and cannot be reused.
-- Never edit `input/`, `agent/`, `reference/`, the session manifest, session traces,
+- Never edit `input/`, `agent/`, the session manifest, session traces,
   evaluator/reference state, credentials, controller state, or service state.
 - Never run a compiler, GPU import, JIT, candidate, profiler, or evaluator directly in the shell.
   Use the shared tool contract below for external work and Runtime-local reads.

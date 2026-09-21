@@ -142,7 +142,6 @@ The selected Agent receives fixed paths:
 | unified promoted-lineage/current-Attempt Evidence view | `input/evidence` |
 | public operator contract | injected directly into the final Prompt |
 | read-only Core implementation/config (State seeds omitted) | `agent/optimizer` |
-| read-only pinned upstream GPU kernel projects | `reference` |
 | read-only phase Prompts, Insights, and Skills | `prompts`, `insights`, `skills` (each with `README.md`) |
 | writable reusable scripts | `tools` with `README.md` |
 | requests, plan, journal, reports | `scratch` |
