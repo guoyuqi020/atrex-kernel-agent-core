@@ -21,6 +21,7 @@ from uuid import uuid4
 
 from contexts.attempt import RuntimeAttemptContext
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
+from runtime_contract import project_contract
 from tool_contracts import local_validation_issue, tool_recovery, tool_request_schema
 
 _CANDIDATE_OPERATIONS = {
@@ -1606,6 +1607,33 @@ def _request_object(
     )
 
 
+def runtime_contract(
+    output: Path,
+    *,
+    command: str | None,
+    operation: str | None,
+) -> dict[str, Any]:
+    """Write an on-demand effective contract without adding it to the Agent Prompt."""
+    workspace, contract = project_contract(
+        command=command,
+        operation=operation,
+        allow_baseline=os.environ.get("ATREX_CORE_PHASE") == "framework_baseline",
+    )
+    destination = output if output.is_absolute() else workspace / output
+    if destination.is_symlink():
+        raise ValueError("runtime-contract output must not be a symbolic link")
+    resolved = destination.resolve()
+    scratch = (workspace / "scratch").resolve()
+    if not resolved.is_relative_to(scratch):
+        raise ValueError("runtime-contract output must be under scratch")
+    _atomic_json(resolved, contract)
+    return {
+        "status": "written",
+        "file": resolved.relative_to(workspace).as_posix(),
+        "tool_count": len(contract["tools"]),
+    }
+
+
 def _augment_agent_error(
     command: str,
     response: dict[str, Any],
@@ -1654,10 +1682,22 @@ def main(argv: list[str] | None = None) -> int:
     for name in _ATTEMPT_COMMANDS:
         command = commands.add_parser(name)
         command.add_argument("--request", required=True, type=Path)
+    contract = commands.add_parser("runtime-contract")
+    contract.add_argument("--output", required=True, type=Path)
+    contract.add_argument("--tool", choices=_ATTEMPT_COMMANDS)
+    contract.add_argument("--operation")
     args = parser.parse_args(argv)
     context: RuntimeToolContext | None = None
     operation: str | None = None
     try:
+        if args.command == "runtime-contract":
+            result = runtime_contract(
+                args.output,
+                command=args.tool,
+                operation=args.operation,
+            )
+            print(json.dumps(result, ensure_ascii=False, allow_nan=False, sort_keys=True))
+            return 0
         context = _context(args.command)
         request = _request_object(context, args.request, args.command)
         requested_operation = request.get("operation")

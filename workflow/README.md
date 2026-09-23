@@ -12,6 +12,11 @@ Workflow may organize the granted Attempt budget and route trusted same-Epoch Ke
 State outcomes, but it cannot change evaluation, gates, promotion, capabilities, hidden inputs, or
 resource limits owned by Runtime.
 
+State flow is executable Workflow behavior. Each Trajectory starts with an immutable initial State;
+every later round also uses that State unless `main.py` explicitly routes a completed Attempt's
+`output_state` into the Trajectory. Runtime validates and materializes the selected State but does
+not choose a reset-versus-retain policy.
+
 `limits.optimizer_attempts` is a hard capacity. Normal multi-Branch organizations spend it exactly.
 Controlled Challenger-only evolution topologies may omit Active and run only the sole Challenger,
 which must spend the exact configured single-Branch budget; Runtime performs no same-Epoch Agent

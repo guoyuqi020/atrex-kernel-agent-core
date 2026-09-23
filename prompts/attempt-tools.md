@@ -16,8 +16,18 @@ python3 {{RUNTIME_TOOL}} load-experiment --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} attempt-report --request scratch/<request>.json
 ```
 
-Each local `--request` JSON file is limited to 1 MiB (1,048,576 bytes), including whitespace.
-This general limit does not replace the smaller per-field input/Shape limits below.
+The live Session contract, rather than this Prompt, is the source of truth for request schemas,
+defaults, supported operations, environment facts, and enforced limits. Inspect only what you need:
+
+```text
+python3 {{RUNTIME_TOOL}} runtime-contract --output scratch/runtime-contract.json
+python3 {{RUNTIME_TOOL}} runtime-contract --tool gateway-execute --operation evaluate --output scratch/evaluate-contract.json
+python3 {{RUNTIME_TOOL}} runtime-contract --tool record-experiment --output scratch/experiment-contract.json
+```
+
+Do this before constructing an unfamiliar request and again after a schema error. Never copy a
+contract snapshot into versioned Agent content. Repair named `issues` using the returned
+`request_schema` and `recovery`; do not guess fields, defaults, limits, paths, or environment facts.
 
 `gateway-execute` uploads the current `work/kernel` tree by default. For `evaluate`,
 `candidate_path` may select Candidate B and `comparison.baseline_path` selects baseline A when
@@ -26,23 +36,8 @@ source payloads, a schema version, capability, or attempt ID in the request.
 Runtime-local history queries use their dedicated commands above;
 do not pass `kernel_artifact_read` or `result_artifact_read` to `gateway-execute`.
 
-Every `gateway-execute` request names one `operation`. These are the only Agent-authored fields;
-each is optional with the default shown in parentheses unless marked required, and an omitted field
-is normally the right choice:
-
-```text
-evaluate     candidate_path (work/kernel), mode=full|correctness_only (full),
-             input_py or input_path, shapes or shapes_path; omitted input/Shapes reuse that component;
-             comparison={method:abba, baseline_path:required, repeats:2..20 (2)} (omitted)
-profile      level=survey|sol|deep (sol), profiler=ncu|rocprofv3, counters=[], source (false),
-             kernel_name or kernel_regex, launch_skip, launch_count, top_kernels, shape_id
-dev          command (required), file_paths=[], env_vars={}, job_timeout_s (<=600), recycle (true),
-             note, intent=workspace|scratch_exec|inspect|compile|profile_adhoc|sanitize|
-             custom_harness|other
-check        arch, sanitize=memcheck|racecheck|initcheck|synccheck
-disassemble  fmt=sass|ptx|isa|auto (auto)
-env          gpu, capabilities (false, requires gpu), force (false)
-```
+Every `gateway-execute` request names one operation. Query that operation's live contract before
+using optional controls. Prefer omission over inventing a default.
 
 `profile`, `check`, and `disassemble` additionally accept `env_vars`, `requirements`, and
 `deps_mode=freeze_installed|no_deps` to install dependencies for that Job. `kernel_name` and
@@ -51,8 +46,8 @@ extra sources through `file_paths`, a list of workspace-relative paths; each nam
 under its basename alone and may not shadow a `work/kernel` path, which is why a multi-line probe
 does not need to be smuggled through `command`. Prefer `file_paths` over a heredoc inside `command`.
 
-For `evaluate`, `input_path` names your UTF-8 Python input generator (at most 128 KiB), and
-`shapes_path` names your UTF-8 JSON object of Agate Shape records (at most 256 KiB). Use safe
+For `evaluate`, `input_path` names your UTF-8 Python input generator, and `shapes_path` names your
+UTF-8 JSON object of Agate Shape records. Use safe
 workspace-relative paths to regular files, such as `scratch/custom-input.py` and
 `scratch/custom-shapes.json`; links and Runtime control paths are rejected. The tool uploads their
 contents as `input_py` and `shapes` before computing the retry identity. Inline `input_py` and
@@ -76,9 +71,7 @@ Python file is uploaded as `kernel.py`; a directory preserves its relative file 
 absolute/traversal paths, Runtime control paths, and empty source directories are rejected. The tool uploads
 both sources and computes the request identity from their contents, not the local paths.
 Do not embed `baseline` or `candidate` source payloads in the request.
-Both sides use the same evaluation inputs. `comparison.repeats` counts observations per side:
-the default 2 produces A, B, B, A.
-Values from 2 to 20 are accepted only when the schedule fits Runtime's allocation budget.
+Both sides use the same evaluation inputs. The live schema defines the permitted paired schedule.
 Each Shape batch runs both sides within one allocation; different Shape batches may use different
 allocations. ABBA requires full correctness and timing; omit `mode` or set it to `"full"`.
 It is always exploratory, does not retain or promote a Kernel or Agent, and does not satisfy the
@@ -93,8 +86,7 @@ same Kernel have different Result identities; replay of the same invocation keep
 A Gateway call blocks until its Job reaches a terminal state, which for `evaluate`, `profile`,
 `check`, and `disassemble` may take a long time. Let the command finish and keep stderr out of the
 JSON on stdout, because appending `2>&1` corrupts the result you then have to parse. Runtime owns Job
-tracking and recovery; do not build polling or retry loops. One accepted full `evaluate` or ABBA
-request runs three complete measurements and returns their per-Shape median. The same exact Kernel
+tracking and recovery; do not build polling or retry loops. The same exact Kernel
 task cannot be submitted again in this Lineage. A duplicate error reports
 `previous_result_artifact_digest`; load that Result Artifact instead of changing or resubmitting
 unchanged source. Network retries inside one CLI invocation remain idempotent.
@@ -103,11 +95,8 @@ An expected tool failure prints one JSON Object and exits nonzero. For request m
 compact `issues` first, then use the operation-specific `request_schema`; an unknown operation
 returns `supported_operations`. Local input-file errors identify the failing `input_path` or
 `shapes_path` in `issues[].path`; source errors identify `comparison.baseline_path` or `candidate_path`.
-Evaluate's `request_schema` describes `full`/`correctness_only`, inline
-and file forms, and their mutual-exclusion constraints. Supplying `comparison` permits only
-`mode: "full"`; its nested schema requires `method` and `baseline_path`, and bounds `repeats`.
-Comparison errors identify `comparison.method`, `comparison.baseline_path`, or `comparison.repeats`.
-Follow the bounded, field-specific
+The live `request_schema` describes modes, file forms, comparisons, and mutual-exclusion
+constraints. Follow the bounded, field-specific
 `recovery` steps to repair the file, path, encoding, JSON object, or conflicting field, then retry.
 For Evaluate errors returned by Runtime, its supplied `issues`, `request_schema`, and `recovery`
 are preserved; use that guidance. Runtime Journal and local Report errors may also return bounded `recovery`
@@ -133,21 +122,9 @@ exploratory evaluate. A single passing evaluation near either threshold is there
 treat a thin margin as a defect to fix rather than a pass, because the sealing gate rejects a
 candidate the Agent measured as correct and that rejection lands after the Session has exited.
 
-Agent-visible Gateway responses follow three contracts:
-
-- `evaluate`, `profile`, `check`, and `disassemble` retain the exact `kernel_artifact_digest`,
-  and `result_artifact_digest` needed for experiment provenance;
-- `dev` returns its Agent-safe Job result directly and does not print those identities;
-- `env` returns its Agent-safe `result` directly.
-
-`check` and `disassemble` report only `status`, `job_id`, `error`, and the nested `result` holding
-the compile verdict; a compile-only Job never launches the Kernel, so it carries no register, spill,
-or assembly evidence. Use `evaluate` or `profile` for those.
-
-Profile additionally reports the numeric `shape_id`, normalized per-Kernel durations, resource and
-SOL evidence, safe profiler counters, and duration-weighted summary fields. No Gateway result echoes
-a protocol version or a trusted request identity; the `request_schema` returned with a request error
-is the one exception, because it is a schema document and carries its own versions.
+Kernel-bound operations retain the `kernel_artifact_digest` and `result_artifact_digest` needed for
+provenance. Read the live response contract before parsing optional Profile, Check, Disassembly,
+Dev, or environment fields.
 
 Example exploratory evaluation request:
 

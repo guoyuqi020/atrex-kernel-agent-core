@@ -86,6 +86,76 @@ def _bootstrap_context(root: Path) -> RuntimeLineageBootstrapContext:
     )
 
 
+def _runtime_contract(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    contract = root / "input/runtime-contract"
+    contract.mkdir(parents=True)
+    bindings = {
+        name: {}
+        for name in (
+            "runtime-contract",
+            "gateway-execute",
+            "kernel-artifact-read",
+            "result-artifact-read",
+            "update-direction",
+            "list-directions",
+            "load-direction",
+            "record-experiment",
+            "list-experiments",
+            "load-experiment",
+            "attempt-report",
+        )
+    }
+    (contract / "tools.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "bindings": bindings,
+                "gateway": {
+                    "operations": {
+                        "evaluate": {
+                            "type": "object",
+                            "properties": {"operation": {"const": "evaluate"}},
+                        }
+                    }
+                },
+            }
+        )
+    )
+    (contract / "environment.json").write_text(
+        json.dumps({"schema_version": 1, "dsl": "triton"})
+    )
+    (contract / "limits.json").write_text(
+        json.dumps({"schema_version": 1, "session_timeout_seconds": 60})
+    )
+    monkeypatch.setenv("ATREX_RUNTIME_CONTRACT_PATH", str(contract))
+
+
+def test_runtime_contract_projects_live_schema_on_demand(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "scratch").mkdir()
+    _runtime_contract(tmp_path, monkeypatch)
+
+    receipt = runtime_tools.runtime_contract(
+        Path("scratch/evaluate-contract.json"),
+        command="gateway-execute",
+        operation="evaluate",
+    )
+
+    assert receipt == {
+        "status": "written",
+        "file": "scratch/evaluate-contract.json",
+        "tool_count": 1,
+    }
+    value = json.loads((tmp_path / receipt["file"]).read_text())
+    assert set(value["tools"]) == {"gateway-execute"}
+    assert value["tools"]["gateway-execute"]["operations"]["evaluate"]["properties"] == {
+        "operation": {"const": "evaluate"}
+    }
+    assert value["environment"]["dsl"] == "triton"
+
+
 _FAKE_JOURNALS: dict[str, dict[str, list[dict[str, Any]]]] = {}
 _FAKE_HISTORY: dict[str, dict[str, list[dict[str, Any]]]] = {}
 _FAKE_PROFILES: dict[str, list[dict[str, Any]]] = {}

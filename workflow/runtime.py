@@ -14,14 +14,21 @@ class WorkflowRuntimeError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class AgentStateRef:
+    """Opaque immutable Agent State selected by Workflow code."""
+
+    _source_attempt_id: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class _Trajectory:
     """Stable handle for one Runtime-isolated optimization sequence."""
 
     branch: str
     ordinal: int
     attempt_capacity: int
-    runtime_state_policy: str
     kernel_agent_revision_id: str
+    initial_state: AgentStateRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,8 +37,8 @@ class _AttemptLaunch:
 
     trajectory: _Trajectory
     ordinal: int
+    input_state: AgentStateRef
     input_kernel_revision_id: str | None = None
-    input_state_from_attempt_id: str | None = None
 
 
 class _WorkflowClient:
@@ -76,7 +83,6 @@ class _WorkflowClient:
         ordinal: int,
         trajectory_count: int,
         attempt_capacity: int,
-        runtime_state_policy: str,
     ) -> _Trajectory:
         """Register one handle within an immutable Branch capacity plan."""
         result = self._call(
@@ -86,15 +92,14 @@ class _WorkflowClient:
                 "trajectory_ordinal": ordinal,
                 "trajectory_count": trajectory_count,
                 "attempt_capacity": attempt_capacity,
-                "runtime_state_policy": runtime_state_policy,
             },
         )
         return _Trajectory(
             branch=self._required_string(result, "branch"),
             ordinal=self._required_int(result, "trajectory_ordinal"),
             attempt_capacity=self._required_int(result, "attempt_capacity"),
-            runtime_state_policy=self._required_string(result, "runtime_state_policy"),
             kernel_agent_revision_id=self._required_string(result, "kernel_agent_revision_id"),
+            initial_state=AgentStateRef(),
         )
 
     def run_attempts_parallel(
@@ -113,7 +118,7 @@ class _WorkflowClient:
                         "trajectory_ordinal": launch.trajectory.ordinal,
                         "attempt_ordinal": launch.ordinal,
                         "input_kernel_revision_id": launch.input_kernel_revision_id,
-                        "input_state_from_attempt_id": launch.input_state_from_attempt_id,
+                        "input_state_from_attempt_id": launch.input_state._source_attempt_id,
                     }
                     for launch in launches
                 ]
@@ -204,7 +209,6 @@ class EpochPool:
     branch: str
     trajectory_count: int
     rounds: int
-    runtime_state_policy: str
     _trajectories: tuple[_Trajectory, ...] = field(repr=False)
 
 
@@ -214,8 +218,11 @@ class EpochRound:
 
     number: int
     _results: dict[EpochPool, tuple[dict[str, Any], ...]]
-    _kernel_routes: dict[EpochPool, str] = field(default_factory=dict, repr=False)
-    _state_routes: dict[EpochPool, str] = field(default_factory=dict, repr=False)
+    _kernel_routes: dict[tuple[EpochPool, int], str] = field(default_factory=dict, repr=False)
+    _state_routes: dict[tuple[EpochPool, int], AgentStateRef] = field(
+        default_factory=dict,
+        repr=False,
+    )
 
     def outcomes(self, pool: EpochPool) -> tuple[Mapping[str, Any], ...]:
         """Return trusted outcomes for this Pool in Trajectory order."""
@@ -245,19 +252,35 @@ class EpochRound:
         best = min(accepted, key=lambda item: float(item["latency_us"]))
         return str(best["trajectory_kernel_revision_id"])
 
-    def route_kernel(self, pool: EpochPool, kernel_revision_id: str) -> None:
-        """Use one accepted same-Epoch Kernel as every next-round input in this Pool."""
+    def route_kernel(
+        self,
+        pool: EpochPool,
+        *,
+        trajectory_ordinal: int,
+        kernel_revision_id: str,
+    ) -> None:
+        """Use one accepted same-Epoch Kernel as one Trajectory's next-round input."""
         self._require_future_round(pool)
+        if trajectory_ordinal <= 0 or trajectory_ordinal > pool.trajectory_count:
+            raise WorkflowRuntimeError("Kernel route names an unknown Trajectory")
         if not kernel_revision_id:
             raise WorkflowRuntimeError("Kernel route requires a revision identity")
-        self._kernel_routes[pool] = kernel_revision_id
+        self._kernel_routes[(pool, trajectory_ordinal)] = kernel_revision_id
 
-    def route_state(self, pool: EpochPool, attempt_id: str) -> None:
-        """Use one compatible completed Attempt State for the Pool's next round."""
+    def route_state(
+        self,
+        pool: EpochPool,
+        *,
+        trajectory_ordinal: int,
+        state: AgentStateRef,
+    ) -> None:
+        """Use one explicit immutable State as one Trajectory's next-round input."""
         self._require_future_round(pool)
-        if not attempt_id:
-            raise WorkflowRuntimeError("State route requires an Attempt identity")
-        self._state_routes[pool] = attempt_id
+        if trajectory_ordinal <= 0 or trajectory_ordinal > pool.trajectory_count:
+            raise WorkflowRuntimeError("State route names an unknown Trajectory")
+        if not isinstance(state, AgentStateRef) or state._source_attempt_id is None:
+            raise WorkflowRuntimeError("State route requires a completed Attempt output State")
+        self._state_routes[(pool, trajectory_ordinal)] = state
 
     def _require_future_round(self, pool: EpochPool) -> None:
         if pool not in self._results:
@@ -289,7 +312,6 @@ class EpochRuntime:
         branch: str,
         trajectories: int,
         rounds: int,
-        runtime_state_policy: str,
     ) -> EpochPool:
         """Create one Branch Pool without exposing Attempt identities or ordinals."""
         if self._completed or self._ran_pools:
@@ -304,7 +326,6 @@ class EpochRuntime:
                 ordinal=ordinal,
                 trajectory_count=trajectories,
                 attempt_capacity=rounds,
-                runtime_state_policy=runtime_state_policy,
             )
             for ordinal in range(1, trajectories + 1)
         )
@@ -312,7 +333,6 @@ class EpochRuntime:
             branch=branch,
             trajectory_count=trajectories,
             rounds=rounds,
-            runtime_state_policy=runtime_state_policy,
             _trajectories=handles,
         )
         self._pools.append(pool)
@@ -338,14 +358,15 @@ class EpochRuntime:
             raise WorkflowRuntimeError("run_pools must include every Pool created for this Epoch")
         planned = sum(pool.trajectory_count * pool.rounds for pool in selected)
         capacity = int(self.limits["optimizer_attempts"])
-        if planned <= 0 or planned > capacity:
+        if planned != capacity:
             raise WorkflowRuntimeError(
-                f"Epoch Pools plan {planned} Attempts but Runtime capacity is {capacity}"
+                f"Epoch Pools plan {planned} Attempts but must allocate the exact "
+                f"Runtime budget of {capacity}"
             )
         self._ran_pools = True
 
-        kernel_routes: dict[EpochPool, str] = {}
-        state_routes: dict[EpochPool, str] = {}
+        kernel_routes: dict[tuple[EpochPool, int], str] = {}
+        state_routes: dict[tuple[EpochPool, int], AgentStateRef] = {}
         completed_rounds: list[EpochRound] = []
         for round_number in range(1, max(pool.rounds for pool in selected) + 1):
             participants = tuple(pool for pool in selected if round_number <= pool.rounds)
@@ -358,14 +379,29 @@ class EpochRuntime:
                         _AttemptLaunch(
                             trajectory=trajectory,
                             ordinal=round_number,
-                            input_kernel_revision_id=kernel_routes.get(pool),
-                            input_state_from_attempt_id=state_routes.get(pool),
+                            input_state=state_routes.get(
+                                (pool, trajectory.ordinal),
+                                trajectory.initial_state,
+                            ),
+                            input_kernel_revision_id=kernel_routes.get(
+                                (pool, trajectory.ordinal)
+                            ),
                         )
                     )
             raw = self._client.run_attempts_parallel(launches)
             grouped: dict[EpochPool, list[dict[str, Any]]] = {pool: [] for pool in participants}
             for pool, outcome in zip(owners, raw, strict=True):
-                grouped[pool].append(dict(outcome))
+                projected = dict(outcome)
+                source_attempt = projected.pop("output_state_from_attempt_id", None)
+                if source_attempt is None:
+                    projected["output_state"] = None
+                elif isinstance(source_attempt, str) and source_attempt:
+                    projected["output_state"] = AgentStateRef(source_attempt)
+                else:
+                    raise WorkflowRuntimeError(
+                        "Runtime returned an invalid output Agent State reference"
+                    )
+                grouped[pool].append(projected)
             current = EpochRound(
                 number=round_number,
                 _results={pool: tuple(values) for pool, values in grouped.items()},
@@ -403,6 +439,7 @@ def serve(run_epoch: Callable[[EpochRuntime], None]) -> int:
 
 
 __all__ = [
+    "AgentStateRef",
     "EpochPool",
     "EpochRound",
     "EpochRuntime",

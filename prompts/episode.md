@@ -11,8 +11,8 @@ workspace, Evidence view, task identity, and tool protocols.
 
 ## Execution boundary
 
-- Modify the candidate Kernel only under `work/kernel/`. Treat `prompts/`, `insights/`, and
-  `skills/` as read-only Agent Revision content. Put genuinely reusable executable helpers in
+- Modify the candidate Kernel only under `work/kernel/`. Treat `prompts/` and `skills/` as
+  read-only Agent Revision content. Put genuinely reusable executable helpers in
   writable `tools/`, and use `scratch/` for temporary work.
 - Give every `Model` constructor parameter a default: `check` constructs `Model()` bare and reports
   the failure as an `error` diagnostic inside a `succeeded` job.
@@ -136,9 +136,10 @@ reusable executable helpers into `tools/`, improve an existing Tool instead of d
 update its index with invocation, inputs, outputs, side effects, dependencies, an example, and
 limitations. Keep one-off probes and raw results in `scratch/`.
 
-Use existing Prompts, Insights, and Skills when relevant, but do not modify them. Record new
+Use existing Prompts and Skills when relevant, but do not modify them. Record task-specific
 hypotheses, evidence, and conclusions through the Runtime Direction and Experiment Journal. Evolver
-reviews completed Session evidence and owns later changes to Prompts, Insights, and Skills.
+reviews completed Session evidence and may make only task-independent changes to Prompts, Skills,
+Tools, or workflow. It does not select Kernel optimization directions.
 
 ## Terminal behavior
 

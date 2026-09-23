@@ -15,7 +15,6 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 | immutable reference or seed Kernel | `input/kernel/` |
 | writable baseline candidate copied from the seed | `work/kernel/` |
 | immutable Agent implementation and included Skills | `agent/optimizer/` |
-| read-only scoped, evidence-derived search conclusions | `insights/` |
 | read-only inherited phase prompts and instructions | `prompts/` |
 | read-only reusable procedures installed for Claude | `skills/` |
 | writable reusable tool scripts | `tools/` |
@@ -27,11 +26,11 @@ for the operator, hardware, and DSL.
 ## Execution boundary
 
 - Modify Kernel files only under `work/kernel/`; temporary files belong in `scratch/`.
-  `prompts/`, `insights/`, and `skills/` are read-only Agent Revision content: use them, but do not
+  `prompts/` and `skills/` are read-only Agent Revision content: use them, but do not
   edit them. Record new hypotheses, evidence, and conclusions through the Runtime Direction and
   Experiment Journal. Put only genuinely reusable executable helpers in writable `tools/`, and
   update `tools/README.md` whenever its contents change. Evolver reviews completed Session evidence
-  and owns later changes to Prompts, Insights, and Skills. Never store credentials or raw one-off
+  and may make later task-independent changes to Prompts, Skills, and Tools. Never store credentials or raw one-off
   measurements, and never change host/global CLI configuration.
 - Give every `Model` constructor parameter a default: `check` constructs `Model()` bare and reports
   the failure as an `error` diagnostic inside a `succeeded` job.

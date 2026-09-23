@@ -72,10 +72,8 @@ Runtime 校验 Commit/Tree，拒绝不安全内容及未解析或未批准 Submo
   "base_revision": {
     "commit": "0123456789abcdef0123456789abcdef01234567"
   },
-  "challenger_count": 1,
-  "challenger_start_epoch": 1,
-  "trajectories_per_branch": 1,
-  "attempts_per_trajectory": 8,
+  "max_challengers": 1,
+  "optimizer_attempt_budget": 16,
   "lineages": {
     "triton": {
       "models": {"optimizer": null, "evolver": null},
@@ -85,6 +83,10 @@ Runtime 校验 Commit/Tree，拒绝不安全内容及未解析或未批准 Submo
   }
 }
 ```
+
+这两个值是硬资源上限。版本化 Agent Workflow 自行决定何时进化、运行哪些 Branch/Trajectory，
+以及如何在 Attempt 间传递 Kernel 与自适应 State；它必须分配完整 Attempt 预算，且不能超过
+Challenger 上限。
 
 先启动 Runtime Service，再由受监督进程执行 Bootstrap：
 
@@ -123,7 +125,7 @@ Runtime 会对每个终止提名应用配置指定的可信留存策略：普通
 | 统一的晋升 Lineage/当前 Attempt Evidence View | `input/evidence` |
 | 公开算子契约 | 直接注入最终 Prompt |
 | Core Revision | `agent/optimizer` |
-| 只读阶段指令、Insights 与技能 | `prompts`、`insights`、`skills`（各有 `README.md`） |
+| 只读阶段指令与技能 | `prompts`、`skills`（各有 `README.md`） |
 | 可写复用工具脚本 | `tools`（含 `README.md`） |
 | Request、Plan、Journal、Report | `scratch` |
 | 未脱敏 Agent Session Artifact 与规范化用量索引 | `sessions` |

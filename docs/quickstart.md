@@ -79,10 +79,8 @@ Evidence inputs live under `lineages`:
   "base_revision": {
     "commit": "0123456789abcdef0123456789abcdef01234567"
   },
-  "challenger_count": 1,
-  "challenger_start_epoch": 1,
-  "trajectories_per_branch": 1,
-  "attempts_per_trajectory": 8,
+  "max_challengers": 1,
+  "optimizer_attempt_budget": 16,
   "lineages": {
     "triton": {
       "models": {"optimizer": null, "evolver": null},
@@ -92,6 +90,10 @@ Evidence inputs live under `lineages`:
   }
 }
 ```
+
+These two values are hard resource limits. The versioned Agent Workflow decides when to evolve,
+which Branches and Trajectories to run, and how Kernel and adaptive State flow between Attempts; it
+must allocate the exact Attempt budget without exceeding the Challenger limit.
 
 Run the Runtime service first because Core baseline sessions call its Gateway/Wiki routes:
 
@@ -142,7 +144,7 @@ The selected Agent receives fixed paths:
 | unified promoted-lineage/current-Attempt Evidence view | `input/evidence` |
 | public operator contract | injected directly into the final Prompt |
 | read-only Core implementation/config (State seeds omitted) | `agent/optimizer` |
-| read-only phase Prompts, Insights, and Skills | `prompts`, `insights`, `skills` (each with `README.md`) |
+| read-only phase Prompts and Skills | `prompts`, `skills` (each with `README.md`) |
 | writable reusable scripts | `tools` with `README.md` |
 | requests, plan, journal, reports | `scratch` |
 | unredacted Agent Session Artifacts and normalized usage index | `sessions` |

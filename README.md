@@ -57,7 +57,7 @@ Attempts from the currently selected revision. Active/Challenger roles are not e
 
 ## Runtime workspace
 
-The repository's `prompts/`, `insights/`, `skills/`, and `tools/` contain initial Runtime State,
+The repository's `prompts/`, `skills/`, and `tools/` contain initial Runtime State,
 including an Agent-maintained README index in each. Runtime copies these from the pinned Core
 Revision into writable workspace directories when there is no inherited State. Bootstrap deposits
 and later checkpoints take precedence; they are not overwritten by these defaults. Reset-state
@@ -78,7 +78,6 @@ Core validates the Runtime-owned manifest before launching an Agent. A normal At
 ├── agent/optimizer/            # read-only implementation/config; initial State copies omitted
 ├── work/kernel/                # writable candidate
 ├── prompts/                    # read-only, inherited phase prompts
-├── insights/                   # read-only, inherited decision guidance
 ├── skills/                     # read-only, inherited procedures
 ├── tools/                      # writable, inherited scripts
 ├── sessions/                   # unredacted Agent-session artifacts
@@ -219,7 +218,6 @@ an invalid/incomplete accounting outcome rather than guessed.
 │   ├── sessions/                     # phase prompts, execution, trace, and token reports
 │   └── backends/                     # Claude, Codex, Pi, and Qoder adapters
 ├── prompts/                          # phase methodology and protocol templates
-├── insights/                         # initial scoped Insights and README index
 ├── skills/                           # initial reusable procedures and README index
 ├── tools/                            # initial tool scripts and README index
 ├── tests/                            # Core-owned unit and protocol-client tests

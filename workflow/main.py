@@ -3,20 +3,17 @@
 
 from __future__ import annotations
 
-from runtime import EpochPool, EpochRuntime, serve
+from runtime import AgentStateRef, EpochPool, EpochRound, EpochRuntime, serve
 
 
 def run_epoch(epoch: EpochRuntime) -> None:
     epoch_number = int(epoch.context["epoch_number"])
-    first_epoch_same_agent = bool(epoch.context["first_epoch_same_agent"])
     max_challengers = int(epoch.limits["max_challengers"])
     total_attempts = int(epoch.limits["optimizer_attempts"])
-    default_trajectories = int(epoch.limits["default_trajectories"])
-    state_policy = str(epoch.limits["default_runtime_state_policy"])
 
     challengers: list[int] = []
     for ordinal in range(1, max_challengers + 1):
-        if epoch_number == 1 and first_epoch_same_agent:
+        if epoch_number == 1:
             epoch.replicate_active(ordinal)
             challengers.append(ordinal)
             continue
@@ -31,19 +28,36 @@ def run_epoch(epoch: EpochRuntime) -> None:
 
     def branch(name: str, ordinal: int) -> EpochPool:
         branch_attempts = attempts_per_branch + int(ordinal < extra_attempts)
-        trajectories = default_trajectories
-        if branch_attempts % trajectories:
-            trajectories = 1
         return epoch.create_pool(
             branch=name,
-            trajectories=trajectories,
-            rounds=branch_attempts // trajectories,
-            runtime_state_policy=state_policy,
+            trajectories=1,
+            rounds=branch_attempts,
         )
 
     branch_names = ["active", *(f"challenger-{ordinal}" for ordinal in challengers)]
     pools = [branch(name, ordinal) for ordinal, name in enumerate(branch_names)]
-    epoch.run_pools(pools)
+
+    def carry_each_trajectory_state(current: EpochRound) -> None:
+        for pool in pools:
+            if current.number >= pool.rounds:
+                continue
+            for outcome in current.outcomes(pool):
+                ordinal = int(outcome["trajectory_ordinal"])
+                current.route_kernel(
+                    pool,
+                    trajectory_ordinal=ordinal,
+                    kernel_revision_id=str(outcome["trajectory_kernel_revision_id"]),
+                )
+                state = outcome["output_state"]
+                if not isinstance(state, AgentStateRef):
+                    raise TypeError("Attempt outcome omitted its Agent State")
+                current.route_state(
+                    pool,
+                    trajectory_ordinal=ordinal,
+                    state=state,
+                )
+
+    epoch.run_pools(pools, after_round=carry_each_trajectory_state)
     epoch.complete()
 
 
