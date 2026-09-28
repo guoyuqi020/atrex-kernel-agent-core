@@ -39,7 +39,12 @@ def _comparison(**changes: Any) -> dict[str, Any]:
 
 
 def _request(**changes: Any) -> dict[str, Any]:
-    return {"operation": "evaluate", "comparison": _comparison(), **changes}
+    return {
+        "operation": "evaluate",
+        "latency_prediction": "improved",
+        "comparison": _comparison(),
+        **changes,
+    }
 
 
 @pytest.fixture
@@ -102,6 +107,7 @@ def test_evaluate_comparison_uploads_a_and_b_and_preserves_result(
         "schema_version",
         "attempt_id",
         "operation",
+        "latency_prediction",
         "comparison",
         "baseline",
         "candidate",
@@ -117,11 +123,14 @@ def test_evaluate_comparison_uploads_a_and_b_and_preserves_result(
 def test_default_evaluate_uses_a_fresh_invocation_identity(
     context: Any, captured_requests: list[dict[str, Any]]
 ) -> None:
-    runtime_tools.gateway_execute(context, {"operation": "evaluate"})
+    runtime_tools.gateway_execute(
+        context, {"operation": "evaluate", "latency_prediction": "retained"}
+    )
     expected = {
         "schema_version": 2,
         "attempt_id": context.attempt_id,
         "operation": "evaluate",
+        "latency_prediction": "retained",
         "candidate": {
             "files": [
                 {
@@ -136,13 +145,32 @@ def test_default_evaluate_uses_a_fresh_invocation_identity(
     assert sent["idempotency_key"].startswith("core-gateway-")
 
 
+def test_prediction_is_required_only_for_full_evaluate(
+    context: Any, captured_requests: list[dict[str, Any]]
+) -> None:
+    with pytest.raises(ValueError, match="latency_prediction is required"):
+        runtime_tools.gateway_execute(context, {"operation": "evaluate"})
+    with pytest.raises(ValueError, match="latency_prediction must be"):
+        runtime_tools.gateway_execute(
+            context, {"operation": "evaluate", "latency_prediction": "uncertain"}
+        )
+    assert captured_requests == []
+
+    runtime_tools.gateway_execute(context, {"operation": "evaluate", "mode": "correctness_only"})
+    assert "latency_prediction" not in captured_requests[0]
+
+
 @pytest.mark.parametrize("comparison", [None, _comparison()])
 def test_candidate_path_is_supported_with_or_without_comparison(
     context: Any, captured_requests: list[dict[str, Any]], comparison: dict[str, Any] | None
 ) -> None:
     proposed = context.workspace / "scratch/proposed.py"
     proposed.write_text("def proposed(): pass\n")
-    request: dict[str, Any] = {"operation": "evaluate", "candidate_path": "scratch/proposed.py"}
+    request: dict[str, Any] = {
+        "operation": "evaluate",
+        "latency_prediction": "retained",
+        "candidate_path": "scratch/proposed.py",
+    }
     if comparison is not None:
         request["comparison"] = comparison
     runtime_tools.gateway_execute(context, request)
@@ -348,6 +376,10 @@ def test_evaluate_schema_and_prompt_examples_describe_nested_comparisons() -> No
     assert schema["required"] == ["operation"]
     assert schema["additionalProperties"] is False
     properties = schema["properties"]
+    assert properties["latency_prediction"]["enum"] == ["improved", "retained", "degraded"]
+    assert any(
+        rule.get("else", {}).get("required") == ["latency_prediction"] for rule in schema["allOf"]
+    )
     assert {"candidate_path", "comparison"} <= properties.keys()
     assert not {"baseline_path", "repeats", "baseline", "candidate"} & properties.keys()
     comparison = properties["comparison"]["anyOf"][0]
@@ -369,6 +401,7 @@ def test_evaluate_schema_and_prompt_examples_describe_nested_comparisons() -> No
     assert len(comparisons) == 2
     for value in comparisons:
         assert value["operation"] == "evaluate"
+        assert value["latency_prediction"] in {"improved", "retained", "degraded"}
         assert set(value) <= properties.keys()
         assert (
             set(comparison["required"])

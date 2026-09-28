@@ -8,11 +8,95 @@ from pathlib import Path
 import pytest
 
 from agent_config import AgentConfig
+from runtime_contract import _LOCAL_COMMANDS, project_contract
 from runtime_tools import _ATTEMPT_COMMANDS
 from sessions.attempt import _render_prompt_fragment, _tool_instructions
 from sessions.operator_contract import public_operator_contract
+from sessions.tool_module_prompts import (
+    modular_evidence_prompt,
+    modular_tool_instructions,
+    modular_workflow,
+)
 
 CORE_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(
+    "modules",
+    [
+        frozenset(),
+        frozenset({"directions"}),
+        frozenset({"experiments"}),
+        frozenset({"directions", "experiments"}),
+    ],
+)
+def test_modular_prompt_lists_only_enabled_journal_tools(modules: frozenset[str]) -> None:
+    template = (CORE_ROOT / "prompts/attempt-tools.md").read_text()
+    prompt = modular_tool_instructions(template, "triton", modules)
+    assert ("runtime_tools.py update-direction --request" in prompt) == ("directions" in modules)
+    assert ("runtime_tools.py record-experiment --request" in prompt) == ("experiments" in modules)
+    assert "runtime_tools.py attempt-report --request" in prompt
+    assert "input_path" in prompt
+    assert "latency_prediction" in prompt
+    assert "result-artifact-read" in prompt
+    for bootstrap, name, common in (
+        (False, "episode.md", "For multi-shape tasks"),
+        (True, "framework_baseline.md", "Give every `Model` constructor parameter a default"),
+    ):
+        phase = modular_workflow(
+            (CORE_ROOT / "prompts" / name).read_text(), bootstrap=bootstrap, modules=modules
+        )
+        assert common in phase
+        if "directions" not in modules:
+            assert "propose and start" not in phase
+        if "experiments" not in modules:
+            assert "record-experiment" not in phase
+    evidence = modular_evidence_prompt(
+        "Workspace facts\n\n## Direction ancestry\n\nOld coupled instructions", modules
+    )
+    if modules != frozenset({"directions", "experiments"}):
+        assert "Old coupled instructions" not in evidence
+
+
+@pytest.mark.parametrize(
+    "modules",
+    [[], ["directions"], ["experiments"], ["directions", "experiments"]],
+)
+def test_projected_contract_exposes_only_enabled_modules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, modules: list[str]
+) -> None:
+    root = tmp_path / "input/runtime-contract"
+    root.mkdir(parents=True)
+    enabled = {
+        "runtime-contract",
+        "gateway-execute",
+        "kernel-artifact-read",
+        "result-artifact-read",
+        "attempt-report",
+    }
+    if "directions" in modules:
+        enabled.update({"update-direction", "list-directions", "load-direction"})
+    if "experiments" in modules:
+        enabled.update({"record-experiment", "list-experiments", "load-experiment"})
+    assert enabled.issubset(set(_LOCAL_COMMANDS) | {"runtime-contract", "gateway-execute"})
+    values = {
+        "tools": {
+            "schema_version": 1,
+            "gateway": {"operations": {}},
+            "bindings": {name: {} for name in enabled},
+        },
+        "environment": {"schema_version": 1, "tool_modules": modules},
+        "limits": {"schema_version": 1},
+    }
+    for name, value in values.items():
+        (root / f"{name}.json").write_text(json.dumps(value))
+    monkeypatch.setenv("ATREX_RUNTIME_CONTRACT_PATH", str(root))
+    workspace, projected = project_contract(allow_baseline=False)
+    assert workspace == tmp_path
+    assert set(projected["tools"]) == enabled
+    if "directions" not in modules:
+        with pytest.raises(ValueError, match="unknown Runtime tool"):
+            project_contract(command="update-direction", allow_baseline=False)
 
 
 def test_managed_prompt_paths_read_workspace_state(tmp_path: Path) -> None:
@@ -45,9 +129,9 @@ def test_core_contains_indexed_initial_runtime_state() -> None:
         assert "README" in readme
     assert "read-only" in (CORE_ROOT / "prompts/README.md").read_text()
     assert "Evolver owns changes" in (CORE_ROOT / "skills/README.md").read_text()
-    assert "Whenever you add, change, rename, or remove" in (
-        CORE_ROOT / "tools/README.md"
-    ).read_text()
+    assert (
+        "Whenever you add, change, rename, or remove" in (CORE_ROOT / "tools/README.md").read_text()
+    )
     assert (CORE_ROOT / "docs/design.md").is_file()
 
 
@@ -214,7 +298,7 @@ def test_evaluate_prompt_explains_overrides_and_full_contract_requirement() -> N
     requests = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", text, re.DOTALL)]
     evaluations = [request for request in requests if request.get("operation") == "evaluate"]
 
-    assert {"operation": "evaluate"} in evaluations
+    assert {"operation": "evaluate", "latency_prediction": "retained"} in evaluations
     assert {"operation": "evaluate", "mode": "correctness_only"} in evaluations
     assert {
         "operation": "evaluate",

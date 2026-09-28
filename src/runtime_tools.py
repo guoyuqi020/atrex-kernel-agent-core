@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from contexts.attempt import RuntimeAttemptContext
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
-from runtime_contract import project_contract
+from runtime_contract import load_live_contract, project_contract
 from tool_contracts import local_validation_issue, tool_recovery, tool_request_schema
 
 _CANDIDATE_OPERATIONS = {
@@ -111,6 +111,22 @@ _REPORT_FIELDS = {
     "blocker",
 }
 RuntimeToolContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
+
+
+def _tool_modules() -> frozenset[str]:
+    """Read the Runtime-owned module selection, keeping old local fixtures compatible."""
+    if not os.environ.get("ATREX_RUNTIME_CONTRACT_PATH"):
+        return frozenset({"directions", "experiments"})
+    _, contract = load_live_contract()
+    modules = contract["environment"].get("tool_modules", ["directions", "experiments"])
+    if (
+        not isinstance(modules, list)
+        or len(modules) != len(set(modules))
+        or set(modules) - {"directions", "experiments"}
+    ):
+        raise ValueError("Runtime contract tool modules are invalid")
+    return frozenset(modules)
+
 
 _MAX_REQUEST_BYTES = 1024 * 1024
 _MAX_EVALUATE_INPUT_BYTES = 128 * 1024
@@ -538,6 +554,17 @@ def gateway_execute(context: RuntimeToolContext, request: dict[str, Any]) -> dic
         raise ValueError(f"unsupported gateway-execute operation: {operation}")
     value = {"schema_version": 2, "attempt_id": context.attempt_id, **request}
     if operation == "evaluate":
+        prediction = value.get("latency_prediction")
+        if value.get("mode", "full") != "correctness_only" and prediction is None:
+            raise ValueError(
+                "evaluate latency_prediction is required for full mode: "
+                "improved, retained, or degraded"
+            )
+        if prediction is not None and (
+            not isinstance(prediction, str)
+            or prediction not in {"improved", "retained", "degraded"}
+        ):
+            raise ValueError("evaluate latency_prediction must be improved, retained, or degraded")
         _evaluate_candidates(context, value)
         _evaluate_overrides(context, value)
     if operation == "dev":
@@ -906,7 +933,9 @@ def _validate_experiment_id_array(value: object, label: str) -> list[str]:
     return values
 
 
-def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, Any]]:
+def _validate_direction_events(
+    events: list[Any], label: str, *, experiments_enabled: bool = True
+) -> list[dict[str, Any]]:
     validated: list[dict[str, Any]] = []
     relationship_fields = {
         "relationship",
@@ -1016,6 +1045,7 @@ def _validate_direction_events(events: list[Any], label: str) -> list[dict[str, 
             if (
                 action in {"complete", "abandon", "block", "defer"}
                 and not supporting
+                and experiments_enabled
                 and (hypothesis_status is not None or action in {"complete", "abandon"})
             ):
                 raise ValueError(f"Direction {action} requires supporting Experiments")
@@ -1190,6 +1220,7 @@ def _validate_experiment_entries(
     label: str,
     *,
     allow_baseline: bool,
+    directions_enabled: bool = True,
 ) -> list[dict[str, Any]]:
     expected_fields = _EXPERIMENT_FIELDS | {"experiment_id", "sequence", "recorded_at"}
     validated: list[dict[str, Any]] = []
@@ -1211,9 +1242,12 @@ def _validate_experiment_entries(
             datetime.fromisoformat(str(experiment["recorded_at"]).replace("Z", "+00:00"))
         except ValueError as error:
             raise ValueError("Experiment recorded_at must be ISO-8601") from error
-        for field in _EXPERIMENT_FIELDS - {"action", "before", "after"}:
+        for field in _EXPERIMENT_FIELDS - {"action", "before", "after", "direction_id"}:
             _text(experiment.get(field), f"Experiment {field}")
-        _validate_direction_id(experiment.get("direction_id"))
+        if directions_enabled:
+            _validate_direction_id(experiment.get("direction_id"))
+        elif experiment.get("direction_id") is not None:
+            raise ValueError("Experiment cannot reference a disabled Direction")
         allowed_actions = {
             "keep_after",
             "restore_before",
@@ -1264,6 +1298,7 @@ def load_experiment(
 
 
 def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    modules = _tool_modules()
     if set(request) != _REPORT_FIELDS:
         raise ValueError(f"Attempt report fields must be exactly {sorted(_REPORT_FIELDS)}")
     status = request.get("status")
@@ -1283,11 +1318,11 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     citable_profile_results = snapshot.get("citable_profile_results")
     if not isinstance(experiment_values, list):
         raise ValueError("Runtime Experiment Journal must be an array")
-    if status == "candidate_ready" and not experiment_values:
+    if status == "candidate_ready" and "experiments" in modules and not experiment_values:
         raise ValueError("Attempt report requires at least one Runtime Experiment")
     if not isinstance(direction_event_values, list):
         raise ValueError("Runtime Direction Journal must be an array")
-    if status == "candidate_ready" and not direction_event_values:
+    if status == "candidate_ready" and "directions" in modules and not direction_event_values:
         raise ValueError("Attempt report requires at least one Runtime Direction event")
     if not isinstance(direction_values, list):
         raise ValueError("Runtime returned invalid normalized Directions")
@@ -1297,10 +1332,12 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         experiment_values,
         "Runtime Experiment Journal",
         allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
+        directions_enabled="directions" in modules,
     )
     direction_events = _validate_direction_events(
         direction_event_values,
         "Runtime Direction Journal",
+        experiments_enabled="experiments" in modules,
     )
     directions: dict[str, dict[str, Any]] = {}
     for direction in direction_values:
@@ -1308,7 +1345,11 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
             raise ValueError("Runtime returned a malformed normalized Direction")
         direction_id = _validate_direction_id(direction.get("direction_id"))
         directions[direction_id] = direction
-    experiment_direction_ids = {str(experiment["direction_id"]) for experiment in experiments}
+    experiment_direction_ids = {
+        str(experiment["direction_id"])
+        for experiment in experiments
+        if experiment["direction_id"] is not None
+    }
     unknown_direction_ids = sorted(experiment_direction_ids - directions.keys())
     if unknown_direction_ids:
         raise ValueError(
@@ -1329,7 +1370,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         baseline_count = sum(experiment["action"] == "baseline" for experiment in experiments)
         if baseline_count > 1:
             raise ValueError("Bootstrap Attempt report may contain only one baseline Experiment")
-        if status == "candidate_ready" and baseline_count != 1:
+        if status == "candidate_ready" and "experiments" in modules and baseline_count != 1:
             raise ValueError(
                 "Bootstrap candidate_ready report requires exactly one baseline Experiment"
             )
@@ -1495,16 +1536,18 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                 "root_cause",
                 "resolution",
                 "lesson",
-                "supporting_experiment_ids",
-            },
+            }
+            | ({"supporting_experiment_ids"} if "experiments" in modules else set()),
         )
         for field in ("category", "observation", "root_cause", "resolution", "lesson"):
             _text(finding[field], f"Attempt report findings[{index}].{field}")
         supporting_ids = _text_array(
-            finding["supporting_experiment_ids"],
+            finding["supporting_experiment_ids"] if "experiments" in modules else [],
             f"Attempt report findings[{index}].supporting_experiment_ids",
-            required=True,
+            required="experiments" in modules,
         )
+        if "experiments" not in modules:
+            finding["supporting_experiment_ids"] = []
         if len(supporting_ids) > 32:
             raise ValueError("Attempt finding supports at most 32 Experiments")
         if len(set(supporting_ids)) != len(supporting_ids):
@@ -1533,6 +1576,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         "schema_version": 12,
         "attempt_id": context.attempt_id,
         **request,
+        "tool_modules": sorted(modules),
         "contributing_result_artifact_digests": sorted(set(contributing)),
         "experiments": experiments,
         "direction_events": direction_events,
@@ -1666,11 +1710,19 @@ def _augment_agent_error(
         command,
         allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
         operation=operation,
+        directions_enabled="directions" in _tool_modules(),
+        experiments_enabled="experiments" in _tool_modules(),
     )
     if schema is not None and (command != "gateway-execute" or "request_schema" not in response):
         response["request_schema"] = schema
     if "recovery" not in response:
-        recovery = tool_recovery(command, operation=operation, detail=detail)
+        recovery = tool_recovery(
+            command,
+            operation=operation,
+            detail=detail,
+            directions_enabled="directions" in _tool_modules(),
+            experiments_enabled="experiments" in _tool_modules(),
+        )
         if recovery is not None:
             response["recovery"] = recovery
     return response
@@ -1699,6 +1751,17 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False, allow_nan=False, sort_keys=True))
             return 0
         context = _context(args.command)
+        modules = _tool_modules()
+        if (
+            args.command in {"update-direction", "list-directions", "load-direction"}
+            and "directions" not in modules
+        ):
+            raise ValueError("Direction tools are disabled for this Session")
+        if (
+            args.command in {"record-experiment", "list-experiments", "load-experiment"}
+            and "experiments" not in modules
+        ):
+            raise ValueError("Experiment tools are disabled for this Session")
         request = _request_object(context, args.request, args.command)
         requested_operation = request.get("operation")
         operation = requested_operation if isinstance(requested_operation, str) else None

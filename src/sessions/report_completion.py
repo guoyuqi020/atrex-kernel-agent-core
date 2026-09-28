@@ -22,6 +22,8 @@ import runtime_tools
 from contexts.attempt import RuntimeAttemptContext
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
 
+from .tool_module_prompts import active_modules
+
 ReportContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
 _RUNTIME_TOOL = "agent/optimizer/src/runtime_tools.py"
 _MAX_LOCAL_REPORT_BYTES = 4 * 1024 * 1024
@@ -201,6 +203,32 @@ def _trace_hint(context: ReportContext) -> str:
 
 
 def _missing_prompt(context: ReportContext, backup: str | None) -> str:
+    modules = active_modules()
+    if modules != frozenset({"directions", "experiments"}):
+        available = []
+        if "directions" in modules:
+            available.append(
+                "close any in_progress Direction; no Experiment support is required "
+                "when Experiments are disabled"
+            )
+        if "experiments" in modules:
+            available.append("reuse real recorded Experiments and their Result Artifact IDs")
+        journal_note = "; ".join(available) if available else "no Journal tools are enabled"
+        preserved = (
+            f"The unaccepted local report was backed up at `{backup}`. "
+            if backup is not None
+            else ""
+        )
+        return (
+            "## Complete the terminal report submission\n\n"
+            "Runtime has not accepted a report. This continuation is report-only: do not edit "
+            "the candidate or start new measurements. "
+            f"Public task context: {_public_context(context)}. {_trace_hint(context)} "
+            f"{preserved}Use the live runtime-contract and existing evidence; {journal_note}. "
+            "Never invent evidence. If candidate_ready is unsupported, use blocked"
+            + ("" if isinstance(context, RuntimeLineageBootstrapContext) else " or pivot")
+            + ". Submit attempt-report and finish only after its Runtime receipt."
+        )
     empty_status = (
         "blocked" if isinstance(context, RuntimeLineageBootstrapContext) else "blocked or pivot"
     )

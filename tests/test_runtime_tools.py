@@ -850,6 +850,24 @@ def test_attempt_report_validates_and_atomically_publishes_once(tmp_path: Path) 
         attempt_report(context, _report(receipt["experiment_id"]))
 
 
+def test_attempt_report_without_journal_modules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = _context(tmp_path)
+    monkeypatch.setattr(runtime_tools, "_tool_modules", lambda: frozenset())
+    request = _report("experiment_" + "0" * 32)
+    request["findings"][0].pop("supporting_experiment_ids")
+
+    receipt = attempt_report(context, request)
+
+    assert receipt["status"] == "published"
+    report = json.loads(context.report_path.read_text(encoding="utf-8"))
+    assert report["tool_modules"] == []
+    assert report["experiments"] == []
+    assert report["direction_events"] == []
+    assert report["findings"][0]["supporting_experiment_ids"] == []
+
+
 def test_attempt_report_receipt_withholds_the_report_and_its_identities(tmp_path: Path) -> None:
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
@@ -1642,7 +1660,9 @@ def test_gateway_execute_preserves_canonical_evaluation_result(
 
     monkeypatch.setattr(runtime_tools, "_post", fake_post)
 
-    response = gateway_execute(context, {"operation": "evaluate"})
+    response = gateway_execute(
+        context, {"operation": "evaluate", "latency_prediction": "retained"}
+    )
 
     assert "evaluation" not in response
     assert response["result"] == {

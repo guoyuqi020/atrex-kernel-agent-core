@@ -12,6 +12,12 @@ from contexts.attempt import RuntimeAttemptContext
 from .common import execute_agent_session, guarded_main
 from .operator_contract import public_operator_contract
 from .report_completion import report_completion_prompt
+from .tool_module_prompts import (
+    active_modules,
+    modular_evidence_prompt,
+    modular_tool_instructions,
+    modular_workflow,
+)
 
 _RUNTIME_TOOL = "agent/optimizer/src/runtime_tools.py"
 _TEMPLATE_PLACEHOLDER = re.compile(r"\{\{([^{}\n]+)\}\}")
@@ -35,7 +41,10 @@ def _render_prompt_fragment(template: str, replacements: Mapping[str, str]) -> s
 
 
 def _tool_instructions(config: AgentConfig, dsl: str) -> str:
+    modules = active_modules()
     template = config.prompt_fragment_path("attempt_tools").read_text(encoding="utf-8")
+    if modules != frozenset({"directions", "experiments"}):
+        return modular_tool_instructions(template, dsl, modules)
     return _render_prompt_fragment(
         template,
         {
@@ -64,13 +73,19 @@ def _trusted_context(context: RuntimeAttemptContext) -> str:
 
 
 def render_prompt(context: RuntimeAttemptContext, config: AgentConfig) -> str:
-    base = config.prompt_path("optimization_attempt").read_text(encoding="utf-8").rstrip()
+    modules = active_modules()
+    template = config.prompt_path("optimization_attempt").read_text(encoding="utf-8")
+    base = (
+        template.rstrip()
+        if modules == frozenset({"directions", "experiments"})
+        else modular_workflow(template, bootstrap=False, modules=modules)
+    )
     return (
         "\n\n".join(
             (
                 base,
                 public_operator_contract(context.agent_problem),
-                context.evidence_prompt.rstrip(),
+                modular_evidence_prompt(context.evidence_prompt, modules),
                 _trusted_context(context),
             )
         )

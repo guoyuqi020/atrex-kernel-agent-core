@@ -12,10 +12,16 @@ from typing import Any
 import pytest
 
 import runtime_tools
-from runtime_tools import gateway_execute
+from runtime_tools import gateway_execute as _gateway_execute
 
 _INPUT = "# 自定义输入\ndef _make_inputs(n):\n    return {'n': n}\n"
 _SHAPES = {"0": {"init_kwargs": None, "input_kwargs": {"n": 128}}}
+
+
+def gateway_execute(context: Any, request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("mode", "full") == "full":
+        request = {"latency_prediction": "retained", **request}
+    return _gateway_execute(context, request)
 
 
 @pytest.fixture

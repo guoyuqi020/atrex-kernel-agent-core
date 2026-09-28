@@ -95,7 +95,8 @@ Attempts, but do not expand framework bring-up into an unbounded performance sea
 
 Use bounded `gateway-execute` requests with `operation="dev"` or `operation="check"` for focused
 compilation and correctness repair. Then evaluate the exact current candidate with a full
-`gateway-execute` request containing `{"operation":"evaluate"}`.
+`gateway-execute` request containing `{"operation":"evaluate","latency_prediction":"retained"}`
+(choose the prediction from your actual expectation).
 
 Every accepted `evaluate` is an exploratory measurement of the exact `work/kernel/` tree at that
 moment. It runs three complete measurements and returns their per-Shape median. You may measure the

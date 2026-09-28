@@ -11,6 +11,7 @@ from .attempt import _tool_instructions
 from .common import execute_agent_session, guarded_main
 from .operator_contract import public_operator_contract
 from .report_completion import report_completion_prompt
+from .tool_module_prompts import active_modules, modular_workflow
 
 
 def _trusted_context(context: RuntimeLineageBootstrapContext) -> str:
@@ -34,7 +35,13 @@ def render_prompt(
     context: RuntimeLineageBootstrapContext,
     config: AgentConfig,
 ) -> str:
-    base = config.prompt_path("framework_baseline").read_text(encoding="utf-8").rstrip()
+    modules = active_modules()
+    template = config.prompt_path("framework_baseline").read_text(encoding="utf-8")
+    base = (
+        template.rstrip()
+        if modules == frozenset({"directions", "experiments"})
+        else modular_workflow(template, bootstrap=True, modules=modules)
+    )
     return (
         "\n\n".join(
             (

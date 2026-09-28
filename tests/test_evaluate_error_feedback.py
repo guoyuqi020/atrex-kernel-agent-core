@@ -186,7 +186,7 @@ def test_evaluate_repair_schema_describes_only_public_fields_and_canonical_modes
     assert schema["required"] == ["operation"]
     assert schema["additionalProperties"] is False
     assert set(schema["properties"]) == {
-        "operation", "mode", "candidate_path", "comparison",
+        "operation", "mode", "latency_prediction", "candidate_path", "comparison",
         "input_py", "shapes", "input_path", "shapes_path",
     }
     assert schema["properties"]["operation"] == {"const": "evaluate"}

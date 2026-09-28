@@ -41,6 +41,17 @@ def _evaluate_schema() -> dict[str, Any]:
         {
             "operation": {"const": "evaluate"},
             "mode": {"type": "string", "enum": ["full", "correctness_only"], "default": "full"},
+            "latency_prediction": {
+                "type": "string",
+                "enum": ["improved", "retained", "degraded"],
+                "description": (
+                    "Before seeing the result, predict geometric-mean latency: improved means "
+                    ">1% faster, retained means within +/-1% inclusive, and degraded means "
+                    ">1% slower. For ABBA compare B against A; otherwise compare this "
+                    "candidate against the Kernel at the start of this Attempt. Required for "
+                    "full mode; not returned to the Agent."
+                ),
+            },
             "candidate_path": {
                 **_text(),
                 "description": (
@@ -129,6 +140,10 @@ def _evaluate_schema() -> dict[str, Any]:
         {"not": {"required": ["input_py", "input_path"]}},
         {"not": {"required": ["shapes", "shapes_path"]}},
         {
+            "if": {"required": ["mode"], "properties": {"mode": {"const": "correctness_only"}}},
+            "else": {"required": ["latency_prediction"]},
+        },
+        {
             "if": {"required": ["comparison"], "properties": {"comparison": {"type": "object"}}},
             "then": {"properties": {"mode": {"const": "full"}}},
         },
@@ -136,7 +151,7 @@ def _evaluate_schema() -> dict[str, Any]:
     return schema
 
 
-def _direction_schema() -> dict[str, Any]:
+def _direction_schema(*, experiments_enabled: bool = True) -> dict[str, Any]:
     proposal = _object(
         {
             "action": {"const": "propose"},
@@ -164,6 +179,8 @@ def _direction_schema() -> dict[str, Any]:
         },
         required=("action", "direction_id", "analysis"),
     )
+    if not experiments_enabled:
+        update["properties"].pop("supporting_experiment_ids")
     update["allOf"] = [
         {
             "if": {"properties": {"action": {"const": "start"}}},
@@ -175,16 +192,24 @@ def _direction_schema() -> dict[str, Any]:
                     ]
                 }
             },
-            "else": {"required": ["hypothesis_status", "supporting_experiment_ids"]},
+            "else": {
+                "required": ["hypothesis_status", "supporting_experiment_ids"]
+                if experiments_enabled
+                else ["hypothesis_status"]
+            },
         }
     ]
     update["description"] = (
-        "complete, abandon, block, and defer each require explicitly selected "
-        "supporting_experiment_ids "
-        "belonging to this Direction and a hypothesis_status. Unmeasured or inconclusive reasoning "
-        "must remain unresolved. supported/refuted requires completed Gateway evidence for each "
-        "selected Experiment, but remains an Agent judgment, not Runtime semantic certification. "
-        "propose and start do not require an Experiment; start accepts neither closure field."
+        "complete, abandon, block, and defer each require hypothesis_status and analysis. "
+        "Unmeasured or inconclusive reasoning "
+        "should remain unresolved. "
+        + (
+            "Select supporting_experiment_ids belonging to this Direction; supported/refuted "
+            "requires completed Gateway evidence for every selected Experiment. "
+            if experiments_enabled
+            else "The Experiment module is disabled, so no supporting_experiment_ids are required. "
+        )
+        + "Propose and start do not require outcome evidence."
     )
     proposal["properties"].update(
         {
@@ -223,7 +248,7 @@ def _direction_schema() -> dict[str, Any]:
     return {"oneOf": [proposal, update]}
 
 
-def _experiment_schema(*, allow_baseline: bool) -> dict[str, Any]:
+def _experiment_schema(*, allow_baseline: bool, directions_enabled: bool = True) -> dict[str, Any]:
     nullable_subject = {"oneOf": [_subject(), {"type": "null"}]}
     actions = ["keep_after", "restore_before", "abandon_direction", "adopt"]
     if allow_baseline:
@@ -241,6 +266,9 @@ def _experiment_schema(*, allow_baseline: bool) -> dict[str, Any]:
             "action": {"enum": actions},
         }
     )
+    if not directions_enabled:
+        schema["properties"].pop("direction_id")
+        schema["required"].remove("direction_id")
     schema["allOf"] = [
         {
             "anyOf": [
@@ -263,7 +291,9 @@ def _experiment_schema(*, allow_baseline: bool) -> dict[str, Any]:
     return schema
 
 
-def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
+def _attempt_report_schema(
+    *, allow_baseline: bool, experiments_enabled: bool = True
+) -> dict[str, Any]:
     result_binding = _object(
         {
             "operation": {"const": "profile"},
@@ -352,6 +382,10 @@ def _attempt_report_schema(*, allow_baseline: bool) -> dict[str, Any]:
             "then": {"properties": {"findings": {"minItems": 1}}},
         }
     ]
+    if not experiments_enabled:
+        finding = schema["properties"]["findings"]["items"]
+        finding["properties"].pop("supporting_experiment_ids")
+        finding["required"].remove("supporting_experiment_ids")
     return schema
 
 
@@ -379,14 +413,22 @@ def tool_request_schema(
     *,
     allow_baseline: bool = False,
     operation: str | None = None,
+    directions_enabled: bool = True,
+    experiments_enabled: bool = True,
 ) -> dict[str, Any] | None:
     """Return the exact local Agent request contract when Core owns validation."""
     if command == "gateway-execute" and operation == "evaluate":
         return _evaluate_schema()
     if command == "record-experiment":
-        return _experiment_schema(allow_baseline=allow_baseline)
+        return _experiment_schema(
+            allow_baseline=allow_baseline, directions_enabled=directions_enabled
+        )
     if command == "attempt-report":
-        return _attempt_report_schema(allow_baseline=allow_baseline)
+        return _attempt_report_schema(
+            allow_baseline=allow_baseline, experiments_enabled=experiments_enabled
+        )
+    if command == "update-direction":
+        return _direction_schema(experiments_enabled=experiments_enabled)
     return _SCHEMAS.get(command)
 
 
@@ -501,11 +543,42 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
 
 
 def tool_recovery(
-    command: str, *, operation: str | None = None, detail: str = ""
+    command: str,
+    *,
+    operation: str | None = None,
+    detail: str = "",
+    directions_enabled: bool = True,
+    experiments_enabled: bool = True,
 ) -> list[dict[str, Any]] | None:
     """Return bounded, visibility-safe next actions for repairing one local request."""
     if command == "gateway-execute" and operation == "evaluate":
         return _evaluate_recovery(detail)
+    if command == "record-experiment" and not directions_enabled:
+        return [
+            {
+                "instruction": (
+                    "Omit direction_id. Cite real visible Result Artifacts in before/after."
+                )
+            }
+        ]
+    if command == "update-direction" and not experiments_enabled:
+        return [
+            {
+                "instruction": (
+                    "Close the Direction with analysis and hypothesis_status; "
+                    "omit supporting_experiment_ids."
+                )
+            }
+        ]
+    if command == "attempt-report" and (not directions_enabled or not experiments_enabled):
+        return [
+            {
+                "instruction": (
+                    "Use only enabled Journal modules and the live attempt-report schema; "
+                    "never invent missing evidence."
+                )
+            }
+        ]
     return _RECOVERY.get(command)
 
 
@@ -547,6 +620,12 @@ def _evaluate_recovery(detail: str) -> list[dict[str, Any]]:
             "keyword arguments, not Tensor definitions, and optional init_kwargs for Model "
             "constructor arguments (null or {} for no arguments). Adapt the paired custom "
             "input/Shape examples in the tool instructions to your public task ABI."
+        )
+    elif field == "latency_prediction":
+        instruction = (
+            "For full Evaluate, set latency_prediction to improved, retained, or degraded "
+            "before measuring. Compare B against A for ABBA, or the candidate against this "
+            "Attempt's starting Kernel otherwise. correctness_only does not require it."
         )
     elif field in {"comparison.baseline_path", "candidate_path"}:
         instruction = (
@@ -620,7 +699,8 @@ def local_validation_issue(detail: str) -> dict[str, str]:
     evaluate_field = re.match(
         r"^evaluate "
         r"(comparison(?:\.(?:baseline_path|method|repeats))?|"
-        r"input_path|shapes_path|input_py|shapes|mode|baseline_path|candidate_path|repeats)\b",
+        r"input_path|shapes_path|input_py|shapes|mode|latency_prediction|"
+        r"baseline_path|candidate_path|repeats)\b",
         detail,
     )
     if evaluate_field is not None:

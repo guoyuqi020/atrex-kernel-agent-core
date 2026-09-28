@@ -71,6 +71,14 @@ def project_contract(
     operations = gateway.get("operations")
     if not isinstance(operations, dict):
         raise ValueError("Runtime Gateway contract has no operations")
+    environment = live["environment"]
+    modules = environment.get("tool_modules", ["directions", "experiments"])
+    if not isinstance(modules, list) or any(
+        module not in {"directions", "experiments"} for module in modules
+    ):
+        raise ValueError("Runtime contract has invalid tool modules")
+    directions_enabled = "directions" in modules
+    experiments_enabled = "experiments" in modules
 
     projected_tools: dict[str, Any] = {
         "runtime-contract": {
@@ -90,7 +98,14 @@ def project_contract(
         },
     }
     for name in _LOCAL_COMMANDS:
-        schema = tool_request_schema(name, allow_baseline=allow_baseline)
+        if name not in bindings:
+            continue
+        schema = tool_request_schema(
+            name,
+            allow_baseline=allow_baseline,
+            directions_enabled=directions_enabled,
+            experiments_enabled=experiments_enabled,
+        )
         if schema is None:
             raise ValueError(f"Agent Bundle has no local request schema for {name}")
         projected_tools[name] = {

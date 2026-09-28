@@ -227,6 +227,18 @@ def test_direction_schema_and_recovery_describe_all_closure_requirements() -> No
     assert "at least one real Kernel-bound Gateway Result" in recovery[1]["instruction"]
 
 
+def test_tool_schemas_drop_disabled_cross_module_links() -> None:
+    direction = tool_request_schema("update-direction", experiments_enabled=False)
+    experiment = tool_request_schema("record-experiment", directions_enabled=False)
+    report = tool_request_schema("attempt-report", experiments_enabled=False)
+    assert direction is not None and experiment is not None and report is not None
+    assert "supporting_experiment_ids" not in direction["oneOf"][1]["properties"]
+    assert "direction_id" not in experiment["properties"]
+    assert "direction_id" not in experiment["required"]
+    finding = report["properties"]["findings"]["items"]
+    assert "supporting_experiment_ids" not in finding["properties"]
+
+
 def test_direction_concurrency_recovery_says_to_close_the_active_direction() -> None:
     recovery = tool_recovery("update-direction")
 

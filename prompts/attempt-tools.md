@@ -56,9 +56,17 @@ strings and each record must be an object compatible with the input generator. E
 be supplied independently, and an omitted component is reused from the private contract without
 being exposed. Custom source must implement the Agate `_make_inputs` interface for the public ABI.
 For `evaluate`, `mode: "correctness_only"` checks correctness without performance measurement or automatic profiling.
+Every full `evaluate` request (including ABBA) requires `latency_prediction` before the result is
+known: `improved` means the candidate's geometric-mean latency is more than 1% lower,
+`retained` means the change is within ±1% including the boundaries, and `degraded` means it is
+more than 1% higher. For ABBA compare candidate B with baseline A. Otherwise compare the
+candidate with the Kernel at the start of this Attempt. This prediction is recorded for human
+assessment and is not included in the result returned to you. `correctness_only` does not require
+it because that mode has no timing result.
 Custom inputs or Shapes and correctness-only calls provide exploratory evidence; before
 `candidate_ready`, the exact current Kernel requires a successful ordinary full Evaluate using
-the trusted contract. Request it with `{"operation":"evaluate"}` when no matching evidence exists.
+the trusted contract. Request it with `{"operation":"evaluate","latency_prediction":"retained"}`
+when no matching evidence exists; choose the prediction from your actual expectation.
 For exact historical source with matching trusted full-Evaluate evidence, register `action: "adopt"`
 in this Attempt's Experiment Journal as described below; do not repeat that measurement merely to
 obtain a new Result Artifact digest. Runtime validates whether the historical evidence qualifies for nomination.
@@ -129,7 +137,7 @@ Dev, or environment fields.
 Example exploratory evaluation request:
 
 ```json
-{"operation": "evaluate"}
+{"operation": "evaluate", "latency_prediction": "retained"}
 ```
 
 Correctness-only evaluation on the contract inputs and Shapes:
@@ -189,13 +197,13 @@ Correctness-only results contain no performance measurements; do not interpret m
 Example Evaluate comparison using a saved baseline source and the current Kernel:
 
 ```json
-{"operation": "evaluate", "comparison": {"method": "abba", "baseline_path": "scratch/baseline.py"} }
+{"operation": "evaluate", "latency_prediction": "improved", "comparison": {"method": "abba", "baseline_path": "scratch/baseline.py"} }
 ```
 
 An ABBA comparison selecting both source directories and your own input generator and Shapes:
 
 ```json
-{"operation": "evaluate", "candidate_path": "scratch/candidate-kernel", "comparison": {"method": "abba", "baseline_path": "scratch/baseline-kernel", "repeats": 2}, "input_path": "scratch/custom-input.py", "shapes_path": "scratch/custom-shapes.json"}
+{"operation": "evaluate", "latency_prediction": "retained", "candidate_path": "scratch/candidate-kernel", "comparison": {"method": "abba", "baseline_path": "scratch/baseline-kernel", "repeats": 2}, "input_path": "scratch/custom-input.py", "shapes_path": "scratch/custom-shapes.json"}
 ```
 
 Comparison responses retain `operation: "evaluate"` and identify the method through
