@@ -25,6 +25,7 @@ from .adapter import (
     token_usage_from_model_usage,
 )
 from .claude_ledger import ClaudeSessionLedger, observe_claude_usage
+from .claude_runtime_tool import scoped_settings as claude_scoped_settings
 from .codex_ledger import (
     CodexLedgerError,
     CodexSessionLedgerObserver,
@@ -403,6 +404,12 @@ class CliAgentRuntime:
         )
         environment = build_session_environment(self.id)
         environment["IS_SANDBOX"] = "1"
+        if self.id == "claude":
+            # A scoped PreToolUse hook gives Runtime CLI calls the Session allowance.
+            # Other Bash calls keep their usual default, and background subagents remain available.
+            bash_timeout_ms = min(max(request.timeout_s * 1000, 120_000), 2_147_483_647)
+            environment["BASH_MAX_TIMEOUT_MS"] = str(bash_timeout_ms)
+            environment["ATREX_RUNTIME_TOOL_BASH_TIMEOUT_MS"] = str(bash_timeout_ms)
         claude_observer = (
             ClaudeSessionLedger(environment, session_id) if self.id == "claude" else None
         )
@@ -463,21 +470,27 @@ class CliAgentRuntime:
             else _CombinedProcessObserver(*observers)
         )
         try:
-            if process_observer is None:
-                process = self._process_runner(
-                    command,
-                    cwd=request.workspace,
-                    timeout=request.timeout_s,
-                    env=environment,
-                )
-            else:
-                process = self._process_runner(
-                    command,
-                    cwd=request.workspace,
-                    timeout=request.timeout_s,
-                    env=environment,
-                    observer=process_observer,
-                )
+            settings_scope = (
+                claude_scoped_settings(command, request.workspace)
+                if self.id == "claude"
+                else contextlib.nullcontext(command)
+            )
+            with settings_scope as scoped_command:
+                if process_observer is None:
+                    process = self._process_runner(
+                        scoped_command,
+                        cwd=request.workspace,
+                        timeout=request.timeout_s,
+                        env=environment,
+                    )
+                else:
+                    process = self._process_runner(
+                        scoped_command,
+                        cwd=request.workspace,
+                        timeout=request.timeout_s,
+                        env=environment,
+                        observer=process_observer,
+                    )
         except BaseException:
             if live_trace_observer is not None:
                 live_trace_observer.close()

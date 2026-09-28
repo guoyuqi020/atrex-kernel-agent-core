@@ -130,6 +130,37 @@ def _runtime_contract(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ATREX_RUNTIME_CONTRACT_PATH", str(contract))
 
 
+def test_long_gateway_call_keeps_reattaching_after_query_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[object] = []
+
+    def exchange(request: object) -> dict[str, Any]:
+        requests.append(request)
+        if len(requests) <= runtime_tools._MAX_TIMEOUT_RECONNECTS + 1:
+            if len(requests) % 2:
+                raise TimeoutError("HTTP read timed out")
+            raise urllib.error.URLError(TimeoutError("HTTP read timed out"))
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(runtime_tools, "_exchange", exchange)
+    result = runtime_tools._post(
+        "https://runtime.invalid", "capability", "/v1/operations", {"idempotency_key": "same"}
+    )
+    assert result == {"status": "succeeded"}
+    assert len({id(request) for request in requests}) == 1
+
+    requests.clear()
+    with pytest.raises(RuntimeError, match="did not answer"):
+        runtime_tools._post(
+            "https://runtime.invalid",
+            "capability",
+            "/v1/runtime/queries",
+            {"idempotency_key": "same"},
+        )
+    assert len(requests) == runtime_tools._MAX_TIMEOUT_RECONNECTS + 1
+
+
 def test_runtime_contract_projects_live_schema_on_demand(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

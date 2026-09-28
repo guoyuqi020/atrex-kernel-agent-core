@@ -7,10 +7,11 @@ from pathlib import Path
 import pytest
 
 from backends.adapter import ClaudeAdapter, CodexAdapter, PiAdapter, QoderAdapter
+from backends.claude_runtime_tool import hook_output
 from backends.codex_ledger import CodexTemporaryHome
 from backends.model import AgentRunRequest, TokenUsage
 from backends.process import ProcessObserver, ProcessResult, run_bounded
-from backends.runtime import CodexRuntime
+from backends.runtime import ClaudeRuntime, CodexRuntime
 
 
 def test_every_backend_builds_one_fresh_noninteractive_command() -> None:
@@ -68,6 +69,96 @@ def test_an_absent_system_prompt_adds_no_argument() -> None:
         command = adapter.build_command("prompt", "session", "high", "")
         assert "--append-system-prompt" not in command
         assert command[-1] == "prompt"
+
+
+@pytest.mark.parametrize("timeout_s", [30, 72 * 60 * 60])
+def test_claude_waits_for_foreground_tools_until_session_deadline(
+    tmp_path: Path, timeout_s: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", raising=False)
+    monkeypatch.delenv("BASH_DEFAULT_TIMEOUT_MS", raising=False)
+
+    def runner(
+        command: list[str],
+        cwd: Path,
+        timeout: int | None,
+        env: dict[str, str] | None = None,
+        observer: ProcessObserver | None = None,
+    ) -> ProcessResult:
+        assert command[0] == "claude"
+        assert cwd == tmp_path and timeout == timeout_s
+        assert env is not None
+        expected_ms = max(timeout_s * 1000, 120_000)
+        assert "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" not in env
+        assert "BASH_DEFAULT_TIMEOUT_MS" not in env
+        assert env["BASH_MAX_TIMEOUT_MS"] == str(expected_ms)
+        assert env["ATREX_RUNTIME_TOOL_BASH_TIMEOUT_MS"] == str(expected_ms)
+        settings = json.loads(Path(command[command.index("--settings") + 1]).read_text())
+        assert settings["hooks"]["PreToolUse"][-1]["matcher"] == "Bash"
+        runtime_call = {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": (
+                    "python3 agent/optimizer/src/runtime_tools.py evaluate "
+                    "--request scratch/r.json"
+                ),
+                "description": "Evaluate candidate",
+                "run_in_background": True,
+            },
+        }
+        assert hook_output(runtime_call, expected_ms) == {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "updatedInput": {
+                    **runtime_call["tool_input"],
+                    "timeout": expected_ms,
+                    "run_in_background": False,
+                },
+            }
+        }
+        assert hook_output(
+            {"tool_name": "Bash", "tool_input": {"command": "python3 -m pytest"}},
+            expected_ms,
+        ) is None
+        assert hook_output(
+            {"tool_name": "Agent", "tool_input": {"run_in_background": True}},
+            expected_ms,
+        ) is None
+        return ProcessResult("", "", 1, False, False, ())
+
+    ClaudeRuntime(process_runner=runner).run(AgentRunRequest(tmp_path, "test", timeout_s))
+
+
+def test_claude_runtime_hook_preserves_session_settings(tmp_path: Path) -> None:
+    original = {
+        "env": {"CUSTOM_FLAG": "preserved"},
+        "hooks": {"PreToolUse": [{"matcher": "Read", "hooks": []}]},
+    }
+    settings_path = tmp_path / "claude-settings.json"
+    settings_path.write_text(json.dumps(original))
+    temporary_path: Path | None = None
+
+    def runner(
+        command: list[str],
+        cwd: Path,
+        timeout: int | None,
+        env: dict[str, str] | None = None,
+        observer: ProcessObserver | None = None,
+    ) -> ProcessResult:
+        nonlocal temporary_path
+        temporary_path = Path(command[command.index("--settings") + 1])
+        settings = json.loads(temporary_path.read_text())
+        assert settings["env"] == original["env"]
+        assert settings["hooks"]["PreToolUse"][0] == original["hooks"]["PreToolUse"][0]
+        assert len(settings["hooks"]["PreToolUse"]) == 2
+        return ProcessResult("", "", 1, False, False, ())
+
+    ClaudeRuntime(process_runner=runner).run(
+        AgentRunRequest(tmp_path, "test", 30, session_settings=str(settings_path))
+    )
+    assert temporary_path is not None and not temporary_path.exists()
+    assert json.loads(settings_path.read_text()) == original
 
 
 def test_structured_session_settings_cannot_override_runtime_model() -> None:

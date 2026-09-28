@@ -268,16 +268,22 @@ def _post(url: str, capability: str, path: str, value: object) -> dict[str, Any]
             "content-type": "application/json",
         },
     )
-    for _ in range(_MAX_TIMEOUT_RECONNECTS + 1):
+    # Gateway jobs can outlive several HTTP read timeouts. Reattach with the
+    # identical idempotency key until the Job finishes or the owning Session ends.
+    # Short Runtime-local queries retain a bounded reconnect budget.
+    long_running_gateway_call = path == "/v1/operations"
+    reconnects = 0
+    while long_running_gateway_call or reconnects <= _MAX_TIMEOUT_RECONNECTS:
         try:
             return _exchange(request)
         except TimeoutError:
-            continue
+            reconnects += 1
         except urllib.error.HTTPError:
             raise
         except urllib.error.URLError as error:
             if not isinstance(error.reason, TimeoutError):
                 raise RuntimeError(f"Runtime service is unavailable: {error.reason}") from error
+            reconnects += 1
     raise RuntimeError(
         "Runtime service did not answer within "
         f"{(_MAX_TIMEOUT_RECONNECTS + 1) * _HTTP_TIMEOUT_SECONDS}s; "
