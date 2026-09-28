@@ -400,11 +400,14 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
         required=("kernel_artifact_digest", "file"),
     ),
     "result-artifact-read": _object({"result_artifact_digest": _digest()}),
+    "kernel-pareto-frontier": _object({}),
     "update-direction": _direction_schema(),
     "list-directions": _SCRATCH_FILE,
     "load-direction": _object({"direction_id": _identifier("direction_")}),
     "list-experiments": _SCRATCH_FILE,
     "load-experiment": _object({"experiment_id": _identifier("experiment_")}),
+    "find-kernel-experiments": _object({"kernel_artifact_digest": _digest()}),
+    "find-kernel-directions": _object({"kernel_artifact_digest": _digest()}),
 }
 
 
@@ -471,6 +474,13 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         },
         {
             "instruction": (
+                "When direction_trajectory_conflict is returned, another Pool Trajectory "
+                "already advanced that Direction ID in this Epoch. Propose a new Direction "
+                "with relationship=reimplementation and the inherited ID as its parent"
+            )
+        },
+        {
+            "instruction": (
                 "When direction_advancement_limit_exceeded is returned, the requested Direction "
                 "was not started. Leave its status unchanged for a future Attempt; do not retry "
                 "start in the current Attempt"
@@ -510,6 +520,22 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         {
             "tool": "list-experiments",
             "request": {"file": "scratch/experiments-index.json"},
+        }
+    ],
+    "find-kernel-experiments": [
+        {
+            "instruction": (
+                "Use the exact kernel_artifact_digest from a Gateway result or a visible "
+                "Experiment; only visible Journal associations are returned"
+            )
+        }
+    ],
+    "find-kernel-directions": [
+        {
+            "instruction": (
+                "Use the exact kernel_artifact_digest from a Gateway result; Direction IDs "
+                "are derived only from visible recorded Experiments citing that Artifact"
+            )
         }
     ],
     "attempt-report": [

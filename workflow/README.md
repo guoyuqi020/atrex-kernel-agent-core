@@ -17,6 +17,9 @@ every later round also uses that State unless `main.py` explicitly routes a comp
 `output_state` into the Trajectory. Runtime validates and materializes the selected State but does
 not choose a reset-versus-retain policy.
 
+`best_accepted_kernel(pool)` selects the lowest-latency accepted Kernel from every completed
+round of that Pool in the current Epoch; `outcomes(pool)` contains only the current round.
+
 `limits.optimizer_attempts` is a hard capacity. Normal multi-Branch organizations spend it exactly.
 Controlled Challenger-only evolution topologies may omit Active and run only the sole Challenger,
 which must spend the exact configured single-Branch budget; Runtime performs no same-Epoch Agent

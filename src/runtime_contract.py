@@ -14,12 +14,15 @@ _FILES = ("tools.json", "environment.json", "limits.json")
 _LOCAL_COMMANDS = (
     "kernel-artifact-read",
     "result-artifact-read",
+    "kernel-pareto-frontier",
     "update-direction",
     "list-directions",
     "load-direction",
     "record-experiment",
     "list-experiments",
     "load-experiment",
+    "find-kernel-experiments",
+    "find-kernel-directions",
     "attempt-report",
 )
 

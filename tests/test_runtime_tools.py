@@ -29,6 +29,7 @@ from runtime_tools import (
     runtime_query,
     update_direction,
 )
+from runtime_tools import runtime_journal as real_runtime_journal
 
 
 def _change_direction(context: Any, request: dict[str, Any]) -> dict[str, Any]:
@@ -54,6 +55,53 @@ def _context(root: Path) -> Any:
         gateway_capability="capability",
         manifest={"context": {"epoch_number": 2, "attempt_ordinal": 2}},
     )
+
+
+@pytest.mark.parametrize(
+    ("command", "operation", "result_key"),
+    [
+        ("find_kernel_experiments", "kernel_experiments_find", "experiment_ids"),
+        ("find_kernel_directions", "kernel_directions_find", "direction_ids"),
+    ],
+)
+def test_find_kernel_journal_links_route_exact_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    operation: str,
+    result_key: str,
+) -> None:
+    context = _context(tmp_path)
+    kernel = "sha256:" + "a" * 64
+    expected = {"kernel_artifact_digest": kernel, result_key: [], "count": 0}
+
+    def fake_post(_url: str, _capability: str, path: str, value: Any) -> dict[str, Any]:
+        assert path == "/v1/runtime/journals"
+        assert value["operation"] == operation
+        assert value["attempt_id"] == context.attempt_id
+        assert value["kernel_artifact_digest"] == kernel
+        return {"result": expected}
+
+    monkeypatch.setattr(runtime_tools, "_post", fake_post)
+    monkeypatch.setattr(runtime_tools, "runtime_journal", real_runtime_journal)
+    assert getattr(runtime_tools, command)(context, {"kernel_artifact_digest": kernel}) == expected
+
+
+def test_kernel_pareto_frontier_queries_runtime_without_agent_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = _context(tmp_path)
+    expected = {"best_by_shape": {}, "shape_count": 0}
+
+    def fake_post(_url: str, _capability: str, path: str, value: Any) -> dict[str, Any]:
+        assert path == "/v1/runtime/queries"
+        assert value["operation"] == "kernel_pareto_frontier"
+        assert value["attempt_id"] == context.attempt_id
+        assert "request" not in value
+        return {"result": expected}
+
+    monkeypatch.setattr(runtime_tools, "_post", fake_post)
+    assert runtime_query(context, "kernel-pareto-frontier", {}) == expected
 
 
 def _bootstrap_context(root: Path) -> RuntimeLineageBootstrapContext:
@@ -96,12 +144,15 @@ def _runtime_contract(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             "gateway-execute",
             "kernel-artifact-read",
             "result-artifact-read",
+            "kernel-pareto-frontier",
             "update-direction",
             "list-directions",
             "load-direction",
+            "find-kernel-directions",
             "record-experiment",
             "list-experiments",
             "load-experiment",
+            "find-kernel-experiments",
             "attempt-report",
         )
     }

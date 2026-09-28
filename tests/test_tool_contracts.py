@@ -116,6 +116,7 @@ def test_simple_read_contracts_are_exact_and_bounded() -> None:
     listing = tool_request_schema("list-experiments")
     direction_listing = tool_request_schema("list-directions")
     artifact = tool_request_schema("kernel-artifact-read")
+    lookup = tool_request_schema("find-kernel-experiments")
 
     assert listing == {
         "type": "object",
@@ -127,6 +128,21 @@ def test_simple_read_contracts_are_exact_and_bounded() -> None:
     assert artifact is not None
     assert artifact["required"] == ["kernel_artifact_digest", "file"]
     assert artifact["additionalProperties"] is False
+    assert lookup == {
+        "type": "object",
+        "properties": {
+            "kernel_artifact_digest": {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"}
+        },
+        "required": ["kernel_artifact_digest"],
+        "additionalProperties": False,
+    }
+    assert tool_request_schema("find-kernel-directions") == lookup
+    assert tool_request_schema("kernel-pareto-frontier") == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
 
 
 def test_contributing_trials_schema_accepts_duplicates_and_keeps_input_limit() -> None:

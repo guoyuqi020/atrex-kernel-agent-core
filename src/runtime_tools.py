@@ -37,6 +37,7 @@ _GATEWAY_EXECUTE_OPERATIONS = _CANDIDATE_OPERATIONS | {
 _PUBLIC_RUNTIME_QUERY_COMMANDS = {
     "kernel-artifact-read": "kernel_artifact_read",
     "result-artifact-read": "result_artifact_read",
+    "kernel-pareto-frontier": "kernel_pareto_frontier",
 }
 _RUNTIME_QUERY_COMMANDS = dict(_PUBLIC_RUNTIME_QUERY_COMMANDS)
 _RUNTIME_QUERY_OPERATIONS = frozenset(_RUNTIME_QUERY_COMMANDS.values())
@@ -47,6 +48,8 @@ _RUNTIME_JOURNAL_COMMANDS = {
     "record-experiment": "experiment_record",
     "list-experiments": "experiments_list",
     "load-experiment": "experiment_load",
+    "find-kernel-experiments": "kernel_experiments_find",
+    "find-kernel-directions": "kernel_directions_find",
     "_journal-snapshot": "journal_snapshot",
 }
 _ATTEMPT_COMMANDS = (
@@ -58,6 +61,8 @@ _ATTEMPT_COMMANDS = (
     "record-experiment",
     "list-experiments",
     "load-experiment",
+    "find-kernel-experiments",
+    "find-kernel-directions",
     "attempt-report",
 )
 _RESERVED_REQUEST_FIELDS = {
@@ -883,6 +888,9 @@ def runtime_journal(
     elif command == "load-experiment":
         value["experiment_id"] = request.get("experiment_id")
         value["idempotency_key"] = f"core-journal-read-{uuid4().hex}"
+    elif command in {"find-kernel-experiments", "find-kernel-directions"}:
+        value["kernel_artifact_digest"] = request.get("kernel_artifact_digest")
+        value["idempotency_key"] = f"core-journal-read-{uuid4().hex}"
     else:
         value["idempotency_key"] = f"core-journal-read-{uuid4().hex}"
     response = _post(
@@ -1301,6 +1309,24 @@ def load_experiment(
     if set(request) != {"experiment_id"}:
         raise ValueError("load-experiment request requires exactly experiment_id")
     return runtime_journal(context, "load-experiment", request)
+
+
+def find_kernel_experiments(
+    context: RuntimeToolContext, request: dict[str, Any]
+) -> dict[str, Any]:
+    """Find visible Experiment IDs citing one Kernel Artifact."""
+    if set(request) != {"kernel_artifact_digest"}:
+        raise ValueError("find-kernel-experiments requires exactly kernel_artifact_digest")
+    return runtime_journal(context, "find-kernel-experiments", request)
+
+
+def find_kernel_directions(
+    context: RuntimeToolContext, request: dict[str, Any]
+) -> dict[str, Any]:
+    """Find visible Direction IDs linked through Experiments to one Kernel Artifact."""
+    if set(request) != {"kernel_artifact_digest"}:
+        raise ValueError("find-kernel-directions requires exactly kernel_artifact_digest")
+    return runtime_journal(context, "find-kernel-directions", request)
 
 
 def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
@@ -1759,12 +1785,17 @@ def main(argv: list[str] | None = None) -> int:
         context = _context(args.command)
         modules = _tool_modules()
         if (
-            args.command in {"update-direction", "list-directions", "load-direction"}
+            args.command in {
+                "update-direction", "list-directions", "load-direction", "find-kernel-directions"
+            }
             and "directions" not in modules
         ):
             raise ValueError("Direction tools are disabled for this Session")
         if (
-            args.command in {"record-experiment", "list-experiments", "load-experiment"}
+            args.command in {
+                "record-experiment", "list-experiments", "load-experiment",
+                "find-kernel-experiments",
+            }
             and "experiments" not in modules
         ):
             raise ValueError("Experiment tools are disabled for this Session")
@@ -1787,6 +1818,10 @@ def main(argv: list[str] | None = None) -> int:
             result = list_experiments(context, request)
         elif args.command == "load-experiment":
             result = load_experiment(context, request)
+        elif args.command == "find-kernel-experiments":
+            result = find_kernel_experiments(context, request)
+        elif args.command == "find-kernel-directions":
+            result = find_kernel_directions(context, request)
         elif args.command == "attempt-report":
             result = attempt_report(context, request)
     except RuntimeServiceError as error:

@@ -7,12 +7,15 @@ write one JSON request under `scratch/`, then run exactly one of:
 python3 {{RUNTIME_TOOL}} gateway-execute --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} kernel-artifact-read --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} result-artifact-read --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} kernel-pareto-frontier --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} update-direction --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} list-directions --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} load-direction --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} record-experiment --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} list-experiments --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} load-experiment --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} find-kernel-experiments --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} find-kernel-directions --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} attempt-report --request scratch/<request>.json
 ```
 
@@ -223,6 +226,12 @@ not contain `operation`. Examples are
 `"file":"scratch/recovered/kernel.py"}` for
 `kernel-artifact-read`, `{"result_artifact_digest":"sha256:<digest>"}` for
 `result-artifact-read`. These reads are unmetered and never contact Agate.
+Call `kernel-pareto-frontier` with `{}` to read the observed per-Shape latency envelope from
+correct full contract Evaluations in visible history. It returns each visible Shape ID's best
+Kernel Artifact digest and latency. Custom, correctness-only, and ABBA results are excluded;
+`best_by_shape[shape_id]` contains `kernel_artifact_digest` and `latency_us`, while
+`winner_kernel_artifact_digests` deduplicates those winners. An empty map means no qualifying
+per-Shape measurement is recorded yet.
 Use `result-artifact-read` for the exact Evaluate, Profile, or other observation you need.
 It returns `kernel_artifact_digest`, `result_artifact_digest`, `operation`, `status`, and `result`;
 the measurement lives under
@@ -246,6 +255,12 @@ file and returns only status, file, and count. Read the file, then invoke `load-
 `{"experiment_id":"experiment_<id>"}` only for selected entries to retrieve their complete
 Agent-visible records; Runtime-internal ordering metadata is omitted. Both commands are Runtime-local, unmetered, and bounded by Runtime-authorized Lineage
 history. Bootstrap starts with no earlier journal history; its current live Journal remains visible.
+To reverse-lookup one exact Kernel Artifact, invoke `find-kernel-experiments` or
+`find-kernel-directions` with `{"kernel_artifact_digest":"sha256:<digest>"}`. The former returns
+visible Experiment IDs citing the Artifact as `before` or `after`; the latter returns distinct
+Direction IDs linked through those Experiments. Each tool belongs to its namesake module.
+An empty result means no visible recorded association; it does not prove the Kernel was never
+evaluated. Use `load-experiment` or `load-direction` for selected full records.
 
 `update-direction` likewise persists each proposal or lifecycle event in Runtime before returning.
 Direction Journal reads are Runtime-local and unmetered. Invoke `list-directions` with
@@ -307,9 +322,12 @@ For example, a register tweak does not refute tile splitting; a claim about spli
 experiment that actually tests splitting. Keep untested mechanisms unresolved instead of inheriting them as facts.
 Abandoning a search is not falsifying its hypothesis. Events append to history; restarting resets
 the current judgment to unresolved without erasing prior events.
+In a Pool, competing Trajectories must use separate Direction IDs. If another Trajectory already
+advanced an inherited ID in this Epoch, Runtime rejects the second update; propose a derived
+Direction with `relationship="reimplementation"` and that ID as its parent.
 An Attempt may advance at most three inherited or new
-Directions; proposals are unlimited and do not consume this limit. Only one Direction may be
-`in_progress` at a time: do not interleave their research, tools, edits, or measurements. Before
+Directions; proposals are unlimited and do not consume this limit. Only one Direction per
+Attempt may be `in_progress` at a time (other Broadcast Trajectories may have their own): do not interleave their research, tools, edits, or measurements. Before
 starting another, close the current one with `complete`, `abandon`, `defer`, or `block`. None may
 remain `in_progress` at handoff. All four closing actions require at least one Experiment associated
 with that Direction; `propose` and `start` do not. If no measurement was possible, first record the

@@ -34,7 +34,14 @@ def test_modular_prompt_lists_only_enabled_journal_tools(modules: frozenset[str]
     template = (CORE_ROOT / "prompts/attempt-tools.md").read_text()
     prompt = modular_tool_instructions(template, "triton", modules)
     assert ("runtime_tools.py update-direction --request" in prompt) == ("directions" in modules)
+    assert ("runtime_tools.py find-kernel-directions --request" in prompt) == (
+        "directions" in modules
+    )
     assert ("runtime_tools.py record-experiment --request" in prompt) == ("experiments" in modules)
+    assert ("runtime_tools.py find-kernel-experiments --request" in prompt) == (
+        "experiments" in modules
+    )
+    assert "runtime_tools.py kernel-pareto-frontier --request" in prompt
     assert "runtime_tools.py attempt-report --request" in prompt
     assert "input_path" in prompt
     assert "latency_prediction" in prompt
@@ -72,12 +79,18 @@ def test_projected_contract_exposes_only_enabled_modules(
         "gateway-execute",
         "kernel-artifact-read",
         "result-artifact-read",
+        "kernel-pareto-frontier",
         "attempt-report",
     }
     if "directions" in modules:
-        enabled.update({"update-direction", "list-directions", "load-direction"})
+        enabled.update({
+            "update-direction", "list-directions", "load-direction", "find-kernel-directions",
+        })
     if "experiments" in modules:
-        enabled.update({"record-experiment", "list-experiments", "load-experiment"})
+        enabled.update({
+            "record-experiment", "list-experiments", "load-experiment",
+            "find-kernel-experiments",
+        })
     assert enabled.issubset(set(_LOCAL_COMMANDS) | {"runtime-contract", "gateway-execute"})
     values = {
         "tools": {

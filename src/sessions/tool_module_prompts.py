@@ -35,12 +35,23 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
     if "directions" not in modules:
         common = "\n".join(
             line for line in common.splitlines()
-            if not any(f" {tool} " in line for tool in ("update-direction", "list-directions", "load-direction"))
+            if not any(
+                f" {tool} " in line
+                for tool in (
+                    "update-direction", "list-directions", "load-direction", "find-kernel-directions",
+                )
+            )
         )
     if "experiments" not in modules:
         common = "\n".join(
             line for line in common.splitlines()
-            if not any(f" {tool} " in line for tool in ("record-experiment", "list-experiments", "load-experiment"))
+            if not any(
+                f" {tool} " in line
+                for tool in (
+                    "record-experiment", "list-experiments", "load-experiment",
+                    "find-kernel-experiments",
+                )
+            )
         )
     adoption_start = "For exact historical source with matching trusted full-Evaluate evidence,"
     adoption_end = "\n\n`evaluate` accepts optional"
@@ -75,11 +86,19 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         )
     common = common.replace("Runtime Journal and local Report errors", "Enabled Journal and local Report errors")
     common = common.replace("{{DSL}}", dsl).replace("{{RUNTIME_TOOL}}", _RUNTIME_TOOL)
-    commands = ["gateway-execute", "kernel-artifact-read", "result-artifact-read"]
+    commands = [
+        "gateway-execute", "kernel-artifact-read", "result-artifact-read",
+        "kernel-pareto-frontier",
+    ]
     if "directions" in modules:
-        commands += ["update-direction", "list-directions", "load-direction"]
+        commands += [
+            "update-direction", "list-directions", "load-direction", "find-kernel-directions",
+        ]
     if "experiments" in modules:
-        commands += ["record-experiment", "list-experiments", "load-experiment"]
+        commands += [
+            "record-experiment", "list-experiments", "load-experiment",
+            "find-kernel-experiments",
+        ]
     commands.append("attempt-report")
     available = ", ".join(f"`{command}`" for command in commands)
     directions = (
@@ -90,6 +109,7 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
             if "experiments" in modules
             else "No Experiment module is available, so closure needs no supporting_experiment_ids."
         )
+        + " For a Kernel Artifact digest, find-kernel-directions returns distinct Direction IDs linked through visible recorded Experiments."
         if "directions" in modules
         else "Direction tools are unavailable; do not create or cite Direction IDs."
     )
@@ -115,7 +135,9 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         "Enabled Journal reads and writes are Runtime-local, unmetered, and durable. Read compact "
         "indexes before loading selected records. For an `adopt` decision, restore exact historical "
         "source and cite real Result Artifact digests; Runtime verifies a matching successful "
-        "ordinary full Evaluate. Use the live schema for fields and validation limits.\n\n"
+        "ordinary full Evaluate. To find Experiment IDs for an exact Kernel Artifact digest, "
+        "call find-kernel-experiments; it returns only visible Journal links. "
+        "Use the live schema for fields and validation limits.\n\n"
         if "experiments" in modules
         else "Use the live contract for enabled Journal fields and validation limits.\n\n"
     )
