@@ -98,8 +98,8 @@ compilation and correctness repair. Then evaluate the exact current candidate wi
 `gateway-execute` request containing `{"operation":"evaluate","latency_prediction":"retained"}`
 (choose the prediction from your actual expectation).
 
-Every accepted `evaluate` is an exploratory measurement of the exact `work/kernel/` tree at that
-moment. It runs three complete measurements and returns their per-Shape median. You may measure the
+An ordinary full `evaluate` measures the exact candidate using the configured evaluation policy.
+Use the returned correctness and timing; correctness-only calls contain no timing. You may measure the
 unchanged seed once during Bootstrap and submit multiple materially different repaired candidates,
 but the controller rejects a repeated identical Kernel task and points to its prior Result Artifact.
 Core assigns request identities, and the controller durably retains every evaluated Kernel and raw

@@ -118,13 +118,17 @@ def test_simple_read_contracts_are_exact_and_bounded() -> None:
     artifact = tool_request_schema("kernel-artifact-read")
     lookup = tool_request_schema("find-kernel-experiments")
 
-    assert listing == {
+    assert listing is not None and direction_listing is not None
+    assert listing["description"] != direction_listing["description"]
+    assert {key: value for key, value in listing.items() if key != "description"} == {
         "type": "object",
         "properties": {"file": {"type": "string", "pattern": r"^scratch/.+"}},
         "required": ["file"],
         "additionalProperties": False,
     }
-    assert direction_listing == listing
+    assert {key: value for key, value in direction_listing.items() if key != "description"} == {
+        key: value for key, value in listing.items() if key != "description"
+    }
     assert artifact is not None
     assert artifact["required"] == ["kernel_artifact_digest", "file"]
     assert artifact["additionalProperties"] is False

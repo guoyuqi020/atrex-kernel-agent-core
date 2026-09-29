@@ -102,18 +102,31 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
     commands.append("attempt-report")
     available = ", ".join(f"`{command}`" for command in commands)
     directions = (
-        "Use update-direction to propose and start a causal hypothesis before research or edits. "
+        "Read relevant history before choosing a hypothesis; those queries require no new Direction. "
+        "Use update-direction to propose and start the chosen hypothesis before new probes or edits. "
+        "An Attempt may advance at most three Directions, with only one in_progress at a time. "
         "Close every started Direction before handoff with hypothesis_status and analysis. "
         + (
             "When closing, select real supporting_experiment_ids from this Direction's recorded Experiments."
             if "experiments" in modules
             else "No Experiment module is available, so closure needs no supporting_experiment_ids."
         )
-        + " For a Kernel Artifact digest, find-kernel-directions returns distinct Direction IDs linked through visible recorded Experiments."
+        + ' Call `list-directions` with {"file":"scratch/directions-index.json"}, then read that file; '
+        'its response contains only status, file, and count. Call `load-direction` with '
+        '{"direction_id":"direction_<id>"} for the selected hypothesis, plan, criteria, and analysis. '
+        'For a known Kernel digest, `find-kernel-directions` takes {"kernel_artifact_digest":"sha256:<digest>"} '
+        'and returns linked direction_ids through visible Experiments; an empty result does not mean no prior work. '
+        'An unclaimed visible Direction may be started with its existing ID. On direction_trajectory_conflict, '
+        'propose a derived Direction with relationship=reimplementation and the claimed ID as its parent.'
         if "directions" in modules
         else "Direction tools are unavailable; do not create or cite Direction IDs."
     )
     experiments = (
+        'Call `list-experiments` with {"file":"scratch/experiments-index.json"}, then read the written file; '
+        'its response contains only status, file, and count. The index includes hypotheses, changes, and analyses. '
+        'Call `load-experiment` with {"experiment_id":"experiment_<id>"} when you need exact before/after '
+        'Artifact bindings or other full-record details. For a known Kernel digest, `find-kernel-experiments` '
+        'takes {"kernel_artifact_digest":"sha256:<digest>"} and returns visible experiment_ids. '
         "Record each meaningful measured candidate decision with record-experiment. "
         "Cite real Kernel-bound Result Artifacts: keep_after, restore_before, and adopt require "
         "both before and after; abandon_direction permits one null side, but not both; "
@@ -132,14 +145,10 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         else "Findings describe measured facts and decisions without supporting_experiment_ids."
     )
     journal_reads = (
-        "Enabled Journal reads and writes are Runtime-local, unmetered, and durable. Read compact "
-        "indexes before loading selected records. For an `adopt` decision, restore exact historical "
-        "source and cite real Result Artifact digests; Runtime verifies a matching successful "
-        "ordinary full Evaluate. To find Experiment IDs for an exact Kernel Artifact digest, "
-        "call find-kernel-experiments; it returns only visible Journal links. "
-        "Use the live schema for fields and validation limits.\n\n"
-        if "experiments" in modules
-        else "Use the live contract for enabled Journal fields and validation limits.\n\n"
+        "Journal writes are durable across recovery. Read indexes to select records; known IDs can be loaded directly. "
+        "Use returned Artifact digests to retrieve exact observations and source. Do not reload prose "
+        "that already answers the question. Query the live schema for exact write fields and validation limits.\n\n"
+        if modules else "No Journal tools are available. Use relevant reports and Artifact reads for history.\n\n"
     )
     return (
         common.rstrip() + "\n\n## Enabled Journal and terminal Report\n\n"
@@ -149,6 +158,8 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         "Keep `scratch/attempt-report-draft.json` current with diagnosis, approach, exact candidate, "
         "correctness/performance evidence, analysis, profile evidence, knowledge use, findings, "
         "contributing Result Artifact digests, and any blocker. "
+        "candidate_ready requires final_candidate and blocker=null; pivot requires both null; "
+        "blocked requires final_candidate=null and a nonempty blocker. Bootstrap does not allow pivot. "
         "Profile evidence must cite real Runtime Profile Result and Kernel Artifact digests; use null "
         "when none exists. Knowledge and contributing digests must cite actually used material. "
         f"{findings} Candidate_ready requires at least one real Finding; blocked or pivot may have none. "
@@ -200,8 +211,9 @@ def _modular_attempt(template: str, modules: frozenset[str]) -> str:
     )
     template = _replace_section(template, headings[1], headings[2], opening + planning)
     recovery = (
-        "Inspect the incumbent and confirm the writable candidate initially matches it. Read the injected "
-        "Evidence in order; inspect only relevant visible Journal indexes and records, if enabled. "
+        "Inspect the incumbent and confirm the writable candidate initially matches it. Follow the injected "
+        "history retrieval guidance: query relevant enabled Journal records and Artifacts first; "
+        "use selected reports or conversation excerpts only for missing details. "
         "Do not replay the entire lineage by default. Reuse matching trusted measurements and exact source. "
         + (
             "To nominate exact historical source, record this Attempt's `adopt` Experiment using real "
@@ -213,8 +225,9 @@ def _modular_attempt(template: str, modules: frozenset[str]) -> str:
     template = _replace_section(template, headings[0], headings[1], recovery)
     research = (
         "Use visible Journal history from enabled modules for what this lineage already measured, "
-        "and the knowledge query command for external architecture-, DSL-, compiler-, and operator-specific facts. "
-        "This workspace carries no upstream project checkout. Preserve stable knowledge Record IDs only "
+        "and available Skills or documented references for external architecture-, DSL-, compiler-, and operator-specific facts. "
+        "Use a knowledge service only if an actual binding is provided; do not invent a query command. "
+        "Preserve stable knowledge Record IDs only "
         "for records that materially affect the work. Test every adopted recommendation; stop research "
         "when one actionable hypothesis has adequate support."
     )

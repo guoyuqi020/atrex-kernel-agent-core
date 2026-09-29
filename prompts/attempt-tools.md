@@ -20,7 +20,8 @@ python3 {{RUNTIME_TOOL}} attempt-report --request scratch/<request>.json
 ```
 
 The live Session contract, rather than this Prompt, is the source of truth for request schemas,
-defaults, supported operations, environment facts, and enforced limits. Inspect only what you need:
+defaults, supported operations, environment facts, and enforced limits. It exposes request schemas,
+not a response-schema discovery API. Inspect only what you need:
 
 ```text
 python3 {{RUNTIME_TOOL}} runtime-contract --output scratch/runtime-contract.json
@@ -31,6 +32,22 @@ python3 {{RUNTIME_TOOL}} runtime-contract --tool record-experiment --output scra
 Do this before constructing an unfamiliar request and again after a schema error. Never copy a
 contract snapshot into versioned Agent content. Repair named `issues` using the returned
 `request_schema` and `recovery`; do not guess fields, defaults, limits, paths, or environment facts.
+
+Choose the operation from the question you need to answer:
+
+| Need | Minimal `gateway-execute` request | Limitation |
+| --- | --- | --- |
+| Correctness and timing for nomination | `{"operation":"evaluate","latency_prediction":"retained"}` | Replace the prediction with your expectation; ordinary full contract Evaluate is required. |
+| Correctness repair without timing | `{"operation":"evaluate","mode":"correctness_only"}` | No performance result; does not qualify for nomination. |
+| Locate GPU bottlenecks | `{"operation":"profile","level":"survey"}` | Use `sol` for throughput/resource evidence, `deep` for a selected kernel. |
+| Run a custom GPU probe | `{"operation":"dev","command":"python3 probe.py","file_paths":["scratch/probe.py"]}` | Create the script first; diagnostic output does not replace contract Evaluate. |
+| Compilation or sanitizer diagnostics | `{"operation":"check"}` | Optional `sanitize`; inspect diagnostic content as well as outer status. |
+| Inspect generated device code | `{"operation":"disassemble"}` | Optional `fmt`; this is not correctness or timing evidence. |
+| Inspect GPU environment | `{"operation":"env"}` | Describes the remote environment; does not measure a Kernel. |
+
+For history, use the dedicated Artifact and Journal commands below, not a new GPU job. Journal
+and Artifact reads do not consume a GPU allocation, but returned text and delegated analysis still
+consume model context and tokens. Query only what can inform the next decision.
 
 `gateway-execute` uploads the current `work/kernel` tree by default. For `evaluate`,
 `candidate_path` may select Candidate B and `comparison.baseline_path` selects baseline A when
@@ -43,8 +60,8 @@ Every `gateway-execute` request names one operation. Query that operation's live
 using optional controls. Prefer omission over inventing a default.
 
 `profile`, `check`, and `disassemble` additionally accept `env_vars`, `requirements`, and
-`deps_mode=freeze_installed|no_deps` to install dependencies for that Job. `kernel_name` and
-`kernel_regex` are mutually exclusive, and `level: "deep"` requires one of them. `dev` takes its
+`deps_mode=freeze_installed|no_deps` to control dependencies for that Job. For `profile`, `kernel_name`
+and `kernel_regex` are mutually exclusive, and `level: "deep"` requires one of them. `dev` takes its
 extra sources through `file_paths`, a list of workspace-relative paths; each named file is uploaded
 under its basename alone and may not shadow a `work/kernel` path, which is why a multi-line probe
 does not need to be smuggled through `command`. Prefer `file_paths` over a heredoc inside `command`.
@@ -98,10 +115,12 @@ A Gateway call blocks until its Job reaches a terminal state, which for `evaluat
 `check`, and `disassemble` may take a long time. Let the command finish and keep stderr out of the
 JSON on stdout, because appending `2>&1` corrupts the result you then have to parse. Runtime owns Job
 tracking and recovery; do not background the command, start unrelated work while it runs, or build
-polling or retry loops. The same exact Kernel
-task cannot be submitted again in this Lineage. A duplicate error reports
-`previous_result_artifact_digest`; load that Result Artifact instead of changing or resubmitting
-unchanged source. Network retries inside one CLI invocation remain idempotent.
+polling or retry loops. If the backend moves a tool call to the background, use its wait/output
+facility until that same invocation finishes; do not start other work. Full Evaluate tasks are
+deduplicated by source and operation parameters within the Lineage. When a duplicate error includes
+`previous_result_artifact_digest`, load that Result Artifact. If it is absent, do not invent a digest
+or change source to evade deduplication; follow the returned recovery or report the blocker.
+Network retries inside one CLI invocation remain idempotent.
 
 An expected tool failure prints one JSON Object and exits nonzero. For request mistakes, repair the
 compact `issues` first, then use the operation-specific `request_schema`; an unknown operation
@@ -135,8 +154,9 @@ treat a thin margin as a defect to fix rather than a pass, because the sealing g
 candidate the Agent measured as correct and that rejection lands after the Session has exited.
 
 Kernel-bound operations retain the `kernel_artifact_digest` and `result_artifact_digest` needed for
-provenance. Read the live response contract before parsing optional Profile, Check, Disassembly,
-Dev, or environment fields.
+provenance. Inspect the actual response's outer `status` and nested `result` before using optional
+Profile, Check, Disassembly, Dev, or environment fields. A completed job does not by itself prove
+that compilation, a diagnostic, or correctness succeeded; inspect its errors and diagnostic output.
 
 Example exploratory evaluation request:
 
@@ -225,7 +245,7 @@ not contain `operation`. Examples are
 `{"kernel_artifact_digest":"sha256:<digest>","artifact_file":"kernel.py",`
 `"file":"scratch/recovered/kernel.py"}` for
 `kernel-artifact-read`, `{"result_artifact_digest":"sha256:<digest>"}` for
-`result-artifact-read`. These reads are unmetered and never contact Agate.
+`result-artifact-read`. These reads never contact Agate.
 Call `kernel-pareto-frontier` with `{}` to read the observed per-Shape latency envelope from
 correct full contract Evaluations in visible history. It returns each visible Shape ID's best
 Kernel Artifact digest and latency. Custom, correctness-only, and ABBA results are excluded;
@@ -253,7 +273,9 @@ view, then atomically writes compact
 Experiment ID, name, hypothesis, change, evidence, analysis, and action entries to that
 file and returns only status, file, and count. Read the file, then invoke `load-experiment` with
 `{"experiment_id":"experiment_<id>"}` only for selected entries to retrieve their complete
-Agent-visible records; Runtime-internal ordering metadata is omitted. Both commands are Runtime-local, unmetered, and bounded by Runtime-authorized Lineage
+Agent-visible records, including exact before/after Kernel and Result Artifact bindings. The index
+already contains conclusions; load only when more detail or those bindings are needed. Runtime-internal
+ordering metadata is omitted. Both commands are Runtime-local and bounded by Runtime-authorized Lineage
 history. Bootstrap starts with no earlier journal history; its current live Journal remains visible.
 To reverse-lookup one exact Kernel Artifact, invoke `find-kernel-experiments` or
 `find-kernel-directions` with `{"kernel_artifact_digest":"sha256:<digest>"}`. The former returns
@@ -263,19 +285,22 @@ An empty result means no visible recorded association; it does not prove the Ker
 evaluated. Use `load-experiment` or `load-direction` for selected full records.
 
 `update-direction` likewise persists each proposal or lifecycle event in Runtime before returning.
-Direction Journal reads are Runtime-local and unmetered. Invoke `list-directions` with
+Direction Journal reads are Runtime-local. Invoke `list-directions` with
 `{"file":"scratch/directions-index.json"}`; it atomically writes Direction ID, name, and current
 status and hypothesis_status to that file and returns only status, file, and count. Read the file, then invoke
 `load-direction` with `{"direction_id":"direction_<id>"}` only for selected entries to retrieve
-their complete normalized Directions.
+their complete normalized Directions, including hypothesis, rationale, plan, criteria, and latest
+analysis. The index alone is not enough to assess why a hypothesis was supported or refuted.
 Its `associated_experiment_ids` includes all visible Experiments belonging to that Direction.
 Its `supporting_experiment_ids` contains only evidence explicitly selected at the latest closure,
 not every associated Experiment. `hypothesis_status` is the Agent's judgment, separate from
 lifecycle status; missing historical judgments mean `unresolved`, never implicitly refuted.
 
 A Direction is the durable unit of research and exploration for one causal hypothesis, not an
-Experiment container. Before choosing one, inspect only the contract, incumbent, Journal indexes,
-and generic Runtime state. Once chosen, immediately `propose` and `start` it before its research,
+Experiment container. Before choosing one, inspect the contract, incumbent, relevant Journal
+indexes and loaded records, and their existing Artifact evidence. Read selected reports or
+conversation excerpts only to fill a specific gap. These read-only history queries do not require
+starting a new Direction. Once chosen, immediately `propose` and `start` it before its research,
 Dev/Check/Profile/Evaluate, disassembly, tools, or source edits. `TaskCreate`, scratch
 plans, and prose do not register it; do not wait for measurement or `record-experiment`.
 
@@ -322,15 +347,15 @@ For example, a register tweak does not refute tile splitting; a claim about spli
 experiment that actually tests splitting. Keep untested mechanisms unresolved instead of inheriting them as facts.
 Abandoning a search is not falsifying its hypothesis. Events append to history; restarting resets
 the current judgment to unresolved without erasing prior events.
-In a Pool, competing Trajectories must use separate Direction IDs. If another Trajectory already
-advanced an inherited ID in this Epoch, Runtime rejects the second update; propose a derived
+An unclaimed proposed or inherited Direction may be started with its existing ID. If another
+Trajectory already advanced that ID in this Epoch, Runtime rejects the competing update; propose a derived
 Direction with `relationship="reimplementation"` and that ID as its parent.
 An Attempt may advance at most three inherited or new
 Directions; proposals are unlimited and do not consume this limit. Only one Direction per
 Attempt may be `in_progress` at a time (other Broadcast Trajectories may have their own): do not interleave their research, tools, edits, or measurements. Before
 starting another, close the current one with `complete`, `abandon`, `defer`, or `block`. None may
 remain `in_progress` at handoff. All four closing actions require at least one Experiment associated
-with that Direction; `propose` and `start` do not. If no measurement was possible, first record the
+with that Direction; `propose` and `start` do not. If no performance measurement was possible, first record the
 actual investigation or blocker using `abandon_direction`, citing at least one real Kernel-bound
 Gateway Result in `before` or `after`, then close with `hypothesis_status="unresolved"` and that
 Experiment's ID. Both sides may not be null. Diagnostic calls can establish a blocker without
@@ -467,7 +492,8 @@ Only `candidate_ready` requires non-empty Experiments, Direction events, and `fi
 `blocked` or `pivot` may carry zero Experiments and `findings: []` when no Direction needs closing;
 the Runtime-supplied Direction event list may also be empty when no Direction was started.
 Closing any `in_progress` Direction with `block` or `defer` first requires an associated Experiment,
-even when it records only an actual investigation or blocker with no measurement. Explain the actual
+even when it records only an investigation or blocker using a real diagnostic Result rather than
+a performance measurement. With no Kernel-bound Result, closure cannot proceed. Explain the actual
 blocker or stopping decision in the structured report; never fabricate an Experiment, Finding,
 Trial, or measurement merely to satisfy a non-empty list.
 Keep `knowledge_used` and `findings` structured as shown. Directions left `proposed` or `deferred`

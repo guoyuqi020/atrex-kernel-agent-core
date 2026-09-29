@@ -20,5 +20,5 @@ configuration is updated too. Do not store credentials, temporary requests, or r
 - attempt-tools.md: CLI instructions and request/report examples shared by Attempts and Bootstrap,
   including the 1 MiB request limit, paired input/Shape file examples, custom-input and
   correctness-only evaluation, exploratory versus authoritative ABBA, historical `adopt` decisions,
-  zero-experiment blocked/pivot reports, and local file-error repair; depends on
+  zero-experiment blocked/pivot reports, operation selection, targeted history recovery, and local file-error repair; depends on
   `src/runtime_tools.py`, `src/tool_contracts.py`, and the trusted Runtime request/report contracts.

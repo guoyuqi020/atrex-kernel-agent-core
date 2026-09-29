@@ -36,9 +36,9 @@ workspace, Evidence view, task identity, and tool protocols.
 
 ### 1. Recover only relevant state
 
-Inspect the incumbent and confirm the writable candidate initially matches it. Read the injected
-Evidence in order, then use the Journal indexes to locate only the Directions and Experiments
-relevant to the present bottleneck. Do not replay the entire lineage by default.
+Inspect the incumbent and confirm the writable candidate initially matches it. Follow the injected
+history retrieval guidance: query relevant Journal records and Artifacts first; inspect selected
+reports or conversation excerpts only to fill concrete gaps. Do not replay the entire lineage by default.
 
 Honor the injected measurement-reuse policy. Reuse matching trusted measurements and exact source;
 do not repeat work merely because an earlier Agent's interpretation may be wrong. To nominate exact
@@ -81,9 +81,9 @@ target.
 ### 4. Research progressively
 
 Use the visible Direction and Experiment history for what this lineage already measured, and the
-knowledge query command for external architecture-, DSL-, compiler-, and operator-specific facts.
-This workspace carries no upstream project checkout. Preserve stable knowledge
-Record IDs only for records that materially affect the work. Test every adopted recommendation;
+available Skills and documented references for external architecture-, DSL-, compiler-, and
+operator-specific facts. Use a knowledge service only if a binding is provided; do not invent a
+query command. Preserve stable knowledge Record IDs only for records that materially affect the work. Test every adopted recommendation;
 stop research when one actionable direction has adequate support.
 
 ### 5. Implement and repair causally
@@ -119,7 +119,7 @@ Negative results are first-class evidence.
 Follow the Session-tool contracts for Direction state, Experiment linkage, incremental Report
 construction, retry behavior, and terminal validation; do not reconstruct the Journal from memory
 at the end. `blocked` or `pivot` may have zero Experiments and empty Findings if no Direction needs
-closing. Before `block` or `defer`, record an associated Experiment; if no measurement was possible,
+closing. Before `block` or `defer`, record an associated Experiment; if no performance measurement was possible,
 record the actual investigation or blocker with `abandon_direction`, citing a real Kernel-bound
 Gateway Result in at least one of `before` and `after`. Both cannot be null; no Result means the
 closure remains blocked, not permission to manufacture evidence.

@@ -402,10 +402,37 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
     "result-artifact-read": _object({"result_artifact_digest": _digest()}),
     "kernel-pareto-frontier": _object({}),
     "update-direction": _direction_schema(),
-    "list-directions": _SCRATCH_FILE,
-    "load-direction": _object({"direction_id": _identifier("direction_")}),
-    "list-experiments": _SCRATCH_FILE,
-    "load-experiment": _object({"experiment_id": _identifier("experiment_")}),
+    "list-directions": {
+        **_SCRATCH_FILE,
+        "description": (
+            "Find visible hypotheses by ID, name, status, and ancestry. Writes the index to file; "
+            "returns only status/file/count. Read that file, then load selected Directions."
+        ),
+    },
+    "load-direction": {
+        **_object({"direction_id": _identifier("direction_")}),
+        "description": (
+            "Read one visible Direction's hypothesis, rationale, plan, criteria, latest analysis, "
+            "and evidence links. Use an ID from a list/find result or a known visible record. "
+            "Does not start the Direction or return its raw conversation."
+        ),
+    },
+    "list-experiments": {
+        **_SCRATCH_FILE,
+        "description": (
+            "Find visible experiments and their recorded hypothesis, change, evidence, analysis, "
+            "and action. Writes the index to file; returns only status/file/count. Load selected "
+            "records only when more detail or exact Artifact bindings are needed."
+        ),
+    },
+    "load-experiment": {
+        **_object({"experiment_id": _identifier("experiment_")}),
+        "description": (
+            "Read one complete visible Experiment, including before/after Kernel and Result "
+            "Artifact bindings. Use result-artifact-read or kernel-artifact-read for the actual "
+            "observation or source. Does not return the full Session transcript."
+        ),
+    },
     "find-kernel-experiments": _object({"kernel_artifact_digest": _digest()}),
     "find-kernel-directions": _object({"kernel_artifact_digest": _digest()}),
 }

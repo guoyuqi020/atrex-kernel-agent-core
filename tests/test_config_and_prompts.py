@@ -46,6 +46,10 @@ def test_modular_prompt_lists_only_enabled_journal_tools(modules: frozenset[str]
     assert "input_path" in prompt
     assert "latency_prediction" in prompt
     assert "result-artifact-read" in prompt
+    assert ('scratch/directions-index.json' in prompt) == ("directions" in modules)
+    assert ('scratch/experiments-index.json' in prompt) == ("experiments" in modules)
+    assert ('{"direction_id":"direction_<id>"}' in prompt) == ("directions" in modules)
+    assert ('{"experiment_id":"experiment_<id>"}' in prompt) == ("experiments" in modules)
     for bootstrap, name, common in (
         (False, "episode.md", "For multi-shape tasks"),
         (True, "framework_baseline.md", "Give every `Model` constructor parameter a default"),
