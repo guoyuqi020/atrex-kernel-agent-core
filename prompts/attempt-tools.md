@@ -290,7 +290,11 @@ Direction Journal reads are Runtime-local. Invoke `list-directions` with
 status and hypothesis_status to that file and returns only status, file, and count. Read the file, then invoke
 `load-direction` with `{"direction_id":"direction_<id>"}` only for selected entries to retrieve
 their complete normalized Directions, including hypothesis, rationale, plan, criteria, and latest
-analysis. The index alone is not enough to assess why a hypothesis was supported or refuted.
+analysis. Both queries label open status `in_progress(self)` when this Attempt started the
+Direction and `in_progress(other)` when another Attempt owns it, regardless of who proposed it.
+Shared visibility does not transfer ownership; do not close another Attempt's open Direction.
+Other lifecycle statuses are unchanged. The index alone is not enough to assess why a hypothesis
+was supported or refuted.
 Its `associated_experiment_ids` includes all visible Experiments belonging to that Direction.
 Its `supporting_experiment_ids` contains only evidence explicitly selected at the latest closure,
 not every associated Experiment. `hypothesis_status` is the Agent's judgment, separate from
@@ -326,7 +330,7 @@ hypothesis from the public contract, profiling, and durable Journal evidence.
 
 Start with exactly `action="start"`, `direction_id`, and non-empty `analysis`.
 Close with `complete`, `abandon`, `block`, or `defer`, additionally supplying
-`hypothesis_status` and a non-empty, unique `supporting_experiment_ids` array (maximum 32):
+`hypothesis_status` and a unique `supporting_experiment_ids` array (0–32 IDs):
 
 ```json
 {
@@ -334,19 +338,21 @@ Close with `complete`, `abandon`, `block`, or `defer`, additionally supplying
   "direction_id": "direction_<id>",
   "analysis": "The investigation stopped before this hypothesis was measured; it remains open.",
   "hypothesis_status": "unresolved",
-  "supporting_experiment_ids": ["experiment_<id>"]
+  "supporting_experiment_ids": []
 }
 ```
 
-Use `unresolved` for untested interpretations, blockers, or insufficient evidence.
-Use `supported` or `refuted` only when the selected Experiments actually tested this Direction's
-hypothesis, with a completed Gateway Result bound to each Experiment's `after`. Matching historical
-results may be reused. Runtime validates ownership and Result bindings, not causal relevance or
-scientific truth. An unrelated measured optimization cannot support a claim buried in its analysis.
-For example, a register tweak does not refute tile splitting; a claim about splitting needs an
-experiment that actually tests splitting. Keep untested mechanisms unresolved instead of inheriting them as facts.
-Abandoning a search is not falsifying its hypothesis. Events append to history; restarting resets
-the current judgment to unresolved without erasing prior events.
+Use `unresolved` for untested interpretations, blockers, or insufficient evidence. All closing
+actions permit empty support in that state, including before any experiment or Gateway call.
+Abandoning a search does not falsify its hypothesis. For `supported` or `refuted`, specify `scope`
+and completed evidence relevant to the proposal's hypothesis: direct `supporting_results` with
+exact Kernel/Result bindings, or relevant `supporting_experiment_ids`. Optional `claim_kind`
+defaults to `causal_hypothesis`; the same evidence rules as Findings below apply. With the Experiment
+module disabled, omit Experiment IDs and use direct Results. Insufficient scope or suitable evidence
+keeps the judgment unresolved and returns `assessment_notes`; invalid evidence references are errors.
+Runtime validates provenance and operation eligibility, not scientific truth. An unrelated measured
+optimization cannot support a claim buried in its analysis. Events append to history; restarting
+resets the current judgment to unresolved without erasing prior events.
 An unclaimed proposed or inherited Direction may be started with its existing ID. If another
 Trajectory already advanced that ID in this Epoch, Runtime rejects the competing update; propose a derived
 Direction with `relationship="reimplementation"` and that ID as its parent.
@@ -354,13 +360,10 @@ An Attempt may advance at most three inherited or new
 Directions; proposals are unlimited and do not consume this limit. Only one Direction per
 Attempt may be `in_progress` at a time (other Broadcast Trajectories may have their own): do not interleave their research, tools, edits, or measurements. Before
 starting another, close the current one with `complete`, `abandon`, `defer`, or `block`. None may
-remain `in_progress` at handoff. All four closing actions require at least one Experiment associated
-with that Direction; `propose` and `start` do not. If no performance measurement was possible, first record the
-actual investigation or blocker using `abandon_direction`, citing at least one real Kernel-bound
-Gateway Result in `before` or `after`, then close with `hypothesis_status="unresolved"` and that
-Experiment's ID. Both sides may not be null. Diagnostic calls can establish a blocker without
-establishing a performance claim. If no Result exists, the closure cannot proceed; report the
-infrastructure failure through normal session failure/recovery, never fabricate evidence.
+remain `in_progress(self)` at handoff; peers' `in_progress(other)` Directions do not block your
+report. If no evidence exists, close with `hypothesis_status="unresolved"`, empty support, and an
+honest stopping reason. Do not fabricate a diagnostic Experiment or launch a GPU job to satisfy
+bookkeeping. A real diagnostic result can document a blocker without proving a performance claim.
 
 If evidence was omitted before closure, `record-experiment` can append it to a visible
 `completed`, `abandoned`, `blocked`, or `deferred` Direction without reopening it. The receipt
@@ -473,7 +476,15 @@ exactly these fields:
   "findings": [{
     "category": "correctness or performance",
     "observation": "measured fact",
-    "root_cause": "supported cause",
+    "root_cause": null,
+    "claim": "this implementation improved latency on the measured workload",
+    "claim_kind": "implementation_outcome",
+    "assessment": "supported",
+    "scope": "exact before/after Kernel Artifacts on this hardware and measured Shapes",
+    "supporting_results": [{
+      "kernel_artifact_digest": "sha256:<kernel>",
+      "result_artifact_digests": ["sha256:<result>"]
+    }],
     "resolution": "fix, rollback, workaround, no fix, or deferred action",
     "lesson": "reusable lesson",
     "supporting_experiment_ids": ["experiment_<id>"]
@@ -488,20 +499,38 @@ Use `candidate_ready` when nominating the current Kernel for the controller-owne
 infrastructure blocker. `candidate_ready` does not mean the Kernel is retained or registered; only
 Runtime policy can make that decision. `candidate_ready` requires `final_candidate` and a null `blocker`; `pivot`
 requires both to be null; `blocked` requires a non-empty `blocker` and null `final_candidate`.
-Only `candidate_ready` requires non-empty Experiments, Direction events, and `findings`.
-`blocked` or `pivot` may carry zero Experiments and `findings: []` when no Direction needs closing;
-the Runtime-supplied Direction event list may also be empty when no Direction was started.
-Closing any `in_progress` Direction with `block` or `defer` first requires an associated Experiment,
-even when it records only an investigation or blocker using a real diagnostic Result rather than
-a performance measurement. With no Kernel-bound Result, closure cannot proceed. Explain the actual
-blocker or stopping decision in the structured report; never fabricate an Experiment, Finding,
-Trial, or measurement merely to satisfy a non-empty list.
-Keep `knowledge_used` and `findings` structured as shown. Directions left `proposed` or `deferred`
-are the next available directions and require no duplicate ID list in the report. Every finding
-must state its `resolution`: the applied fix, rollback,
-workaround, explicit absence of a fix, or deferred action. Every finding must also name one or more
-unique `supporting_experiment_ids`
-returned by `record-experiment`; each ID must belong to this Attempt's Experiment Journal.
+`candidate_ready` requires the enabled modules' nomination journals and at least one Finding.
+`blocked` or `pivot` may carry zero Experiments and `findings: []`; an unmeasured Direction can be
+closed unresolved with empty support. Never fabricate an Experiment, Finding, Trial, or measurement
+to satisfy a list. Directions left `proposed` or `deferred` require no duplicate next-direction list.
+Every Finding states a `resolution`: fix, rollback, workaround, no fix, or deferred action.
+
+Record one reusable claim per Finding. Set `claim_kind` to `observation` (what was observed),
+`implementation_outcome` (the measured outcome of a particular implementation), or
+`causal_hypothesis` (an explanation of why). Supply the exact sentence in `claim`, its tested
+Kernel/hardware/Shape scope in `scope`, and `assessment=unresolved|supported|refuted`.
+Use `root_cause: null` when the cause is unknown; neither a report nor a completed Attempt requires
+a causal explanation. Missing historical assessment means unresolved.
+
+Bind evidence to that claim using `supporting_results`, available with every Journal module
+selection: `[{"kernel_artifact_digest":"sha256:<kernel>","result_artifact_digests":["sha256:<result>"]}]`.
+When Experiments are enabled, optional `supporting_experiment_ids` may reference this Attempt's
+Journal as an additional organization of evidence; direct Result bindings do not require an
+Experiment. Reuse matching visible historical Results; do not repeat GPU work just to record a claim.
+Runtime validates exact visible bindings and completed operation eligibility: observations may use
+Check, Dev, Profile, or Evaluate; implementation outcomes require Dev or full Evaluate; causal
+hypotheses require Dev, Profile, or full Evaluate. Check-only or correctness-only evidence cannot
+support a performance or causal judgment. These checks do not establish causal relevance or truth.
+Missing claim, scope, or suitable completed evidence downgrades a requested supported/refuted
+Finding to unresolved with `assessment_notes`; invalid or invisible references are still errors.
+
+Keep an untested explanation unresolved even beside a successful measured optimization. General
+`analysis`, diagnosis, root-cause text, and lessons remain Agent interpretations, not verified
+conclusions. Before rejecting a potentially useful mechanism, identify the smallest targeted probe
+that could distinguish it from alternatives; if it is not worth testing now, defer it unresolved.
+For example, observing `autovec_copy` in source does not establish that output cost is negligible.
+A failed implementation does not refute every implementation of its proposed mechanism.
+
 `profile_evidence` must describe evidence returned by Runtime-bound profiling and
 bind every supporting Profile result to the exact Kernel Artifact and Result
 Artifact identifiers returned by Runtime. Any Runtime-recorded Profile result in your visible

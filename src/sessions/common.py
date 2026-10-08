@@ -409,6 +409,8 @@ def write_trace(
             "session_id": result.session_id,
             "state": "finished",
             "exit_status": result.exit_status,
+            "failure_kind": result.failure_kind,
+            "provider_error_code": result.provider_error_code,
             "timed_out": result.timed_out,
             "raw_provider_capture_complete": result.raw_provider_capture_complete,
             "response_usage_complete": result.response_usage_complete,

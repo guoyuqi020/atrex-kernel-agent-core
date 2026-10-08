@@ -1,4 +1,4 @@
-"""Bounded report completion across fresh invocations of one logical Agent session."""
+"""Bounded output-limit recovery and report completion in one logical Agent session."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from agent_config import AgentConfig
 from session_transcript import encode_records
 
 from . import common
+from .output_limit_recovery import recovery_prompt
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class _Segment:
     context: _SegmentContext
     path: str
     session_id: str
+    purpose: str = "initial"
     result: backends.AgentRunResult | None = None
     started: bool = False
     sealed: bool = False
@@ -120,6 +122,7 @@ def _publish_trace(
     segments: list[_Segment],
     completion: dict[str, Any],
     exit_status: int | None,
+    recovery: dict[str, Any],
 ) -> None:
     root = context.session_trace_path
     if root is None or not segments or not segments[0].metadata:
@@ -134,8 +137,11 @@ def _publish_trace(
                 "index": ordinal,
                 "path": segment.path,
                 "session_id": segment.metadata.get("session_id", segment.session_id),
+                "purpose": segment.purpose,
                 "state": segment.metadata.get("state", "pending"),
                 "exit_status": segment.metadata.get("exit_status"),
+                "failure_kind": segment.metadata.get("failure_kind"),
+                "provider_error_code": segment.metadata.get("provider_error_code"),
                 "raw_provider_capture_complete": segment.metadata.get(
                     "raw_provider_capture_complete", False
                 ),
@@ -179,6 +185,12 @@ def _publish_trace(
     )
     results = [segment.result for segment in segments if segment.result is not None]
     response_flags = [result.response_usage_complete for result in results]
+    terminal_result = results[-1] if results else None
+    if recovery["state"] == "exhausted" and exit_status == 1:
+        terminal_result = next(
+            (result for result in reversed(results) if result.failure_kind == "output_limit"),
+            terminal_result,
+        )
     response_complete = (
         False
         if not capture_complete or False in response_flags
@@ -192,6 +204,10 @@ def _publish_trace(
         if completion["state"] == "interrupted"
         else ("finished" if finished else "running"),
         "exit_status": exit_status,
+        "failure_kind": terminal_result.failure_kind if terminal_result and exit_status else None,
+        "provider_error_code": (
+            terminal_result.provider_error_code if terminal_result and exit_status else None
+        ),
         "timed_out": exit_status == 124 or any(result.timed_out for result in results),
         "raw_provider_capture_complete": capture_complete,
         "response_usage_complete": response_complete,
@@ -200,6 +216,7 @@ def _publish_trace(
         "policy_diagnostics": [item for result in results for item in result.policy_diagnostics],
         "segments": index,
         "report_completion": dict(completion),
+        "output_limit_recovery": dict(recovery),
         "accounting_usage": _aggregate_usage(context, segments),
         "normalizations": {
             "conversation": "fresh segments concatenated; segment_sequence retains local order",
@@ -234,11 +251,19 @@ def execute_report_completion(
         "retries_used": 0,
         "max_retries": config.report_completion_retries,
     }
+    recovery: dict[str, Any] = {
+        "state": "unused",
+        "retries_used": 0,
+        "max_retries": config.output_limit_recovery_retries,
+    }
+    original_prompt = prompt
+    purpose = "initial"
     exit_status: int | None = None
     current: _Segment | None = None
     checking_completion = False
     try:
-        for ordinal in range(config.report_completion_retries + 1):
+        while True:
+            ordinal = len(segments)
             checking_completion = False
             usage = _aggregate_usage(context, segments)
             remaining_budget = context.usage_budget - usage["consumed"]
@@ -251,6 +276,7 @@ def execute_report_completion(
                 _segment_context(context, ordinal),
                 "." if ordinal == 0 else f"continuations/{ordinal:03d}",
                 str(uuid.uuid4()),
+                purpose=purpose,
             )
             live = common.start_live_trace(
                 current.context,
@@ -262,8 +288,12 @@ def execute_report_completion(
             )
             current.refresh_trace()
             segments.append(current)
-            completion.update(state="continuing" if ordinal else "checking", retries_used=ordinal)
-            _publish_trace(context, segments, completion, None)
+            if purpose == "optimization_recovery":
+                recovery["retries_used"] += 1
+            elif purpose == "report_completion":
+                completion["retries_used"] += 1
+            completion.update(state="continuing" if ordinal else "checking")
+            _publish_trace(context, segments, completion, None, recovery)
             current.started = True
             common.atomic_json(context.token_usage_path, _aggregate_usage(context, segments))
             current.result = runtime.run(
@@ -294,11 +324,12 @@ def execute_report_completion(
             current.sealed = True
             usage = _aggregate_usage(context, segments)
             common.atomic_json(context.token_usage_path, usage)
+            output_limited = result.failure_kind == "output_limit" and result.exit_status == 1
             if result.budget_exhausted or usage["budget_exhausted"]:
                 exit_status = 125
             elif result.timed_out:
                 exit_status = 124
-            elif result.exit_status != 0:
+            elif result.exit_status != 0 and not output_limited:
                 exit_status = result.exit_status
             elif (
                 not result.raw_provider_capture_complete
@@ -321,7 +352,7 @@ def execute_report_completion(
                 completion["state"] = "failed"
                 return exit_status
             completion["state"] = "checking"
-            _publish_trace(context, segments, completion, None)
+            _publish_trace(context, segments, completion, None, recovery)
             checking_completion = True
             remaining_check = deadline - time.monotonic()
             if remaining_check <= 0:
@@ -342,16 +373,46 @@ def execute_report_completion(
                 if on_success is not None:
                     on_success()
                 completion["state"] = "complete"
+                if recovery["state"] == "continuing":
+                    recovery["state"] = "recovered"
                 exit_status = 0
                 return 0
             if not isinstance(repair_prompt, str) or not repair_prompt.strip():
                 raise ValueError("Report completion check must return a non-empty prompt or None")
-            if ordinal == config.report_completion_retries:
+            if output_limited and purpose != "report_completion":
+                if recovery["retries_used"] < config.output_limit_recovery_retries:
+                    checking_completion = True
+                    try:
+                        prompt = recovery_prompt(
+                            context,
+                            original_prompt,
+                            previous_stdout="\n".join(
+                                segment.result.stdout
+                                for segment in segments
+                                if segment.result is not None
+                            ),
+                            retry=recovery["retries_used"] + 1,
+                            max_retries=config.output_limit_recovery_retries,
+                            deadline=deadline,
+                        )
+                    except TimeoutError:
+                        completion["state"] = "failed"
+                        exit_status = 124
+                        return 124
+                    recovery["state"] = "continuing"
+                    purpose = "optimization_recovery"
+                    continue
+                recovery["state"] = "exhausted"
+            if completion["retries_used"] == config.report_completion_retries:
                 completion["state"] = "exhausted"
-                exit_status = 127
-                return 127
+                # Do not turn exhausted output recovery into exit 127, which the
+                # outer Runtime treats as permission to start optimization again.
+                exit_status = result.exit_status or (
+                    1 if recovery["state"] == "exhausted" else 127
+                )
+                return exit_status
+            purpose = "report_completion"
             prompt = repair_prompt
-        raise AssertionError("Report completion loop ended without a terminal result")
     except BaseException as error:
         if checking_completion and current is not None and current.sealed:
             # Report inspection failure does not invalidate completed model capture or charges.
@@ -369,4 +430,4 @@ def execute_report_completion(
     finally:
         # A later invocation without a result must not erase earlier charges or claim completeness.
         common.atomic_json(context.token_usage_path, _aggregate_usage(context, segments))
-        _publish_trace(context, segments, completion, exit_status)
+        _publish_trace(context, segments, completion, exit_status, recovery)

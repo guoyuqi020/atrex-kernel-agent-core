@@ -957,7 +957,13 @@ def _validate_direction_events(
         "derived_from_experiment_ids",
         "supersedes_direction_id",
     }
-    optional_fields = relationship_fields | {"hypothesis_status"}
+    optional_fields = relationship_fields | {
+        "hypothesis_status",
+        "claim_kind",
+        "scope",
+        "supporting_results",
+        "assessment_notes",
+    }
     for event in events:
         if not isinstance(event, dict) or set(event) - optional_fields != _direction_event_fields():
             raise ValueError(f"{label} contains a malformed event")
@@ -1056,13 +1062,6 @@ def _validate_direction_events(
             ):
                 raise ValueError("Direction update cannot redefine its proposal")
             _text(event.get("analysis"), "Direction analysis")
-            if (
-                action in {"complete", "abandon", "block", "defer"}
-                and not supporting
-                and experiments_enabled
-                and (hypothesis_status is not None or action in {"complete", "abandon"})
-            ):
-                raise ValueError(f"Direction {action} requires supporting Experiments")
         validated.append(event)
     return validated
 
@@ -1311,18 +1310,14 @@ def load_experiment(
     return runtime_journal(context, "load-experiment", request)
 
 
-def find_kernel_experiments(
-    context: RuntimeToolContext, request: dict[str, Any]
-) -> dict[str, Any]:
+def find_kernel_experiments(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
     """Find visible Experiment IDs citing one Kernel Artifact."""
     if set(request) != {"kernel_artifact_digest"}:
         raise ValueError("find-kernel-experiments requires exactly kernel_artifact_digest")
     return runtime_journal(context, "find-kernel-experiments", request)
 
 
-def find_kernel_directions(
-    context: RuntimeToolContext, request: dict[str, Any]
-) -> dict[str, Any]:
+def find_kernel_directions(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
     """Find visible Direction IDs linked through Experiments to one Kernel Artifact."""
     if set(request) != {"kernel_artifact_digest"}:
         raise ValueError("find-kernel-directions requires exactly kernel_artifact_digest")
@@ -1387,10 +1382,16 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         raise ValueError(
             f"Attempt report Experiment references unknown Directions: {unknown_direction_ids}"
         )
+    # Visible peers own their open Directions; handoff closes only this Attempt's work.
+    latest_direction_actions = {
+        str(event["direction_id"]): str(event["action"])
+        for event in direction_events
+        if event["action"] not in {"propose", "suggest"}
+    }
     in_progress_direction_ids = sorted(
         direction_id
-        for direction_id, direction in directions.items()
-        if direction["status"] == "in_progress"
+        for direction_id, action in latest_direction_actions.items()
+        if action == "start"
     )
     if in_progress_direction_ids:
         raise ValueError(
@@ -1559,27 +1560,55 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         raise ValueError("candidate_ready Attempt report findings must be a non-empty array")
     journal_experiment_ids = {experiment["experiment_id"] for experiment in experiments}
     for index, item in enumerate(findings):
-        finding = _exact_object(
-            item,
-            f"Attempt report findings[{index}]",
-            {
-                "category",
-                "observation",
-                "root_cause",
-                "resolution",
-                "lesson",
-            }
-            | ({"supporting_experiment_ids"} if "experiments" in modules else set()),
-        )
-        for field in ("category", "observation", "root_cause", "resolution", "lesson"):
-            _text(finding[field], f"Attempt report findings[{index}].{field}")
+        label = f"Attempt report findings[{index}]"
+        required_fields = {"category", "observation", "resolution", "lesson"}
+        optional_fields = {
+            "root_cause",
+            "claim",
+            "claim_kind",
+            "assessment",
+            "scope",
+            "supporting_results",
+        } | ({"supporting_experiment_ids"} if "experiments" in modules else set())
+        if (
+            not isinstance(item, dict)
+            or not required_fields <= set(item)
+            or set(item) - required_fields - optional_fields
+        ):
+            raise ValueError(f"{label} has missing or unknown fields")
+        finding = item
+        for field in required_fields:
+            _text(finding[field], f"{label}.{field}")
+        for field in ("root_cause", "claim", "scope"):
+            if finding.get(field) is not None:
+                _text(finding[field], f"{label}.{field}")
+        claim_kind = finding.get("claim_kind", "causal_hypothesis")
+        if not isinstance(claim_kind, str) or claim_kind not in {
+            "observation",
+            "implementation_outcome",
+            "causal_hypothesis",
+        }:
+            raise ValueError(f"{label}.claim_kind is invalid")
+        assessment = finding.get("assessment", "unresolved")
+        if not isinstance(assessment, str) or assessment not in {
+            "unresolved",
+            "supported",
+            "refuted",
+        }:
+            raise ValueError(f"{label}.assessment is invalid")
+        references = finding.get("supporting_results", [])
+        if not isinstance(references, list) or len(references) > 32:
+            raise ValueError(f"{label}.supporting_results must be an array of at most 32 subjects")
+        for subject_index, reference in enumerate(references):
+            if reference is None:
+                raise ValueError(f"{label}.supporting_results entries cannot be null")
+            _experiment_subject(reference, f"{label}.supporting_results[{subject_index}]")
         supporting_ids = _text_array(
-            finding["supporting_experiment_ids"] if "experiments" in modules else [],
-            f"Attempt report findings[{index}].supporting_experiment_ids",
-            required="experiments" in modules,
+            finding.get("supporting_experiment_ids", []),
+            f"{label}.supporting_experiment_ids",
         )
-        if "experiments" not in modules:
-            finding["supporting_experiment_ids"] = []
+        finding.setdefault("root_cause", None)
+        finding.setdefault("supporting_experiment_ids", [])
         if len(supporting_ids) > 32:
             raise ValueError("Attempt finding supports at most 32 Experiments")
         if len(set(supporting_ids)) != len(supporting_ids):
@@ -1626,18 +1655,23 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
             f"Attempt report exceeds byte limit: actual_bytes={report_bytes}, "
             f"max_bytes={max_report_bytes}; summarize evidence and reference recorded Trials"
         )
-    _register_attempt_report(context, report)
+    registration = _register_attempt_report(context, report) or {}
     _atomic_json(context.report_path, report, exclusive=True)
     return {
         "status": "published",
         "report_status": report["status"],
         "file": context.report_path.relative_to(context.workspace).as_posix(),
         "experiment_count": len(experiments),
-        "finding_count": len(findings),
+        "finding_count": len(report["findings"]),
+        **(
+            {"assessment_notes": registration["assessment_notes"]}
+            if registration.get("assessment_notes")
+            else {}
+        ),
     }
 
 
-def _register_attempt_report(context: RuntimeToolContext, report: dict[str, Any]) -> None:
+def _register_attempt_report(context: RuntimeToolContext, report: dict[str, Any]) -> dict[str, Any]:
     """Let Runtime seal the exact candidate and accept or refuse this nomination."""
     value: dict[str, Any] = {
         "schema_version": 2,
@@ -1656,6 +1690,21 @@ def _register_attempt_report(context: RuntimeToolContext, report: dict[str, Any]
     result = response.get("result")
     if not isinstance(result, dict) or result.get("status") != "registered":
         raise ValueError("Attempt report registration returned an invalid response")
+    accepted_report = result.get("report")
+    if "report" in result:
+        if (
+            not isinstance(accepted_report, dict)
+            or accepted_report.get("attempt_id") != context.attempt_id
+            or accepted_report.get("status") != report["status"]
+        ):
+            raise ValueError("Attempt report registration returned an invalid accepted report")
+        accepted_report = dict(accepted_report)
+        report.clear()
+        report.update(accepted_report)
+    notes = result.get("assessment_notes", [])
+    if not isinstance(notes, list):
+        raise ValueError("Attempt report registration returned invalid assessment notes")
+    return {"assessment_notes": notes}
 
 
 def _context(command: str) -> RuntimeToolContext:
@@ -1785,15 +1834,17 @@ def main(argv: list[str] | None = None) -> int:
         context = _context(args.command)
         modules = _tool_modules()
         if (
-            args.command in {
-                "update-direction", "list-directions", "load-direction", "find-kernel-directions"
-            }
+            args.command
+            in {"update-direction", "list-directions", "load-direction", "find-kernel-directions"}
             and "directions" not in modules
         ):
             raise ValueError("Direction tools are disabled for this Session")
         if (
-            args.command in {
-                "record-experiment", "list-experiments", "load-experiment",
+            args.command
+            in {
+                "record-experiment",
+                "list-experiments",
+                "load-experiment",
                 "find-kernel-experiments",
             }
             and "experiments" not in modules

@@ -152,16 +152,13 @@ Directions. Do not create `suggested` Directions. Later optimization sessions ch
 own Directions from the public contract, profiling, and durable Journal evidence.
 
 A `candidate_ready` Bootstrap report requires exactly one `baseline` Experiment. A blocked report
-may contain zero Experiments and empty `findings` if no Direction needs closing; do not manufacture
-evidence just to terminate.
+may contain zero Experiments and empty `findings`; do not manufacture evidence just to terminate.
 It may omit baseline when all recorded Experiments are `abandon_direction` diagnostics, or none
-exist. Diagnostic Results do not imply that a usable baseline exists.
-Closing an `in_progress` Direction with `block` or `defer` requires an associated Experiment
-first. Record the actual investigation or blocker using `abandon_direction` with at least one
-real Kernel-bound Gateway Result in `before` or `after`, then close with `hypothesis_status=unresolved`.
-Both sides may not be null; a diagnostic result is not evidence of a performance improvement. If no Direction was started,
-an empty Runtime Direction event list is valid for `blocked`.
-Every closure explicitly selects `supporting_experiment_ids` and declares `hypothesis_status`.
+exist. Diagnostic Results do not imply that a usable baseline exists. Close a started Direction
+with `hypothesis_status=unresolved` and empty support if no conclusive evidence exists. No Experiment
+or diagnostic Gateway call is needed merely to close it. When support exists, select relevant
+Experiment IDs or exact direct `supporting_results`; judged conclusions also require a tested scope.
+If no Direction was started, an empty Runtime Direction event list is valid for `blocked`.
 Unmeasured investigations remain `unresolved`; do not present a toolchain blocker or an
 untested structural interpretation as an experimentally refuted hypothesis.
 

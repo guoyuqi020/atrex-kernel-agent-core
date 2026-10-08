@@ -582,9 +582,18 @@ class CliAgentRuntime:
             cleanup_error = codex_temporary_home.close()
             if cleanup_error:
                 observation_errors += (cleanup_error,)
+        failure_kind, provider_error_code = self._adapter.classify_terminal_failure(
+            stdout, session_id
+        )
+        policy_diagnostics = process.policy_diagnostics
+        if failure_kind is not None and not process.process_scope_complete:
+            diagnostic = "Agent process scope could not be verified quiescent"
+            if diagnostic not in policy_diagnostics:
+                policy_diagnostics += (diagnostic,)
         return AgentRunResult(
             runtime_id=self.id,
-            exit_status=process.returncode,
+            # A structured terminal error remains a failure even if the CLI exits 0.
+            exit_status=process.returncode or (1 if failure_kind is not None else 0),
             timed_out=process.timed_out,
             terminal_usage=terminal_usage,
             events=events,
@@ -595,8 +604,10 @@ class CliAgentRuntime:
             raw_session_files=raw_session_files,
             raw_provider_capture_complete=raw_provider_capture_complete,
             response_usage_complete=response_usage_complete,
-            policy_diagnostics=process.policy_diagnostics,
+            policy_diagnostics=policy_diagnostics,
             session_id=session_id,
+            failure_kind=failure_kind,
+            provider_error_code=provider_error_code,
             budget_exhausted=(budget_observer.exhausted if budget_observer is not None else False),
         )
 

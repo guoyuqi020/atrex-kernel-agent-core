@@ -54,14 +54,19 @@ chain:
 evidence -> mechanism -> change -> expected measurable effect
 ```
 
-Before editing, write a concise plan under `scratch/` containing:
+Before editing, write a brief plan under `scratch/` containing:
 
-- one optimization category and concrete goal;
-- trusted facts, uncertain interpretations, and unsupported assumptions;
-- the smallest dependency-ordered edits that test the mechanism;
-- invariants, scope boundaries, risks, and rollback points;
-- correctness and performance acceptance/rejection criteria; and
-- measurable success and direction-exhaustion conditions.
+- the chosen change and expected effect, separating facts from assumptions;
+- the main correctness risks and the last viable candidate to restore;
+- the next concrete edit or focused probe; and
+- the next validation command and evidence that would support or reject the change.
+
+Once a step is actionable, write the change or run the focused probe instead of expanding the
+entire design. For a complex rewrite, first save the smallest end-to-end implementation that can
+be checked against the public contract, then add optimizations incrementally. Do not wait to
+resolve every layout, pipeline, and boundary question before the first implementation or probe.
+Keep the saved plan current with the next step. After an interruption, inspect the saved source
+and plan and continue from them; do not restart the entire design without new evidence.
 
 Treat numeric targets as trends unless the trusted task input makes them hard thresholds. Reject
 placeholders, hidden-case reconstruction, unrelated refactors, and plans that mix independent
@@ -118,14 +123,11 @@ Negative results are first-class evidence.
 
 Follow the Session-tool contracts for Direction state, Experiment linkage, incremental Report
 construction, retry behavior, and terminal validation; do not reconstruct the Journal from memory
-at the end. `blocked` or `pivot` may have zero Experiments and empty Findings if no Direction needs
-closing. Before `block` or `defer`, record an associated Experiment; if no performance measurement was possible,
-record the actual investigation or blocker with `abandon_direction`, citing a real Kernel-bound
-Gateway Result in at least one of `before` and `after`. Both cannot be null; no Result means the
-closure remains blocked, not permission to manufacture evidence.
-Do not fabricate evidence to finish.
-At closure, explicitly select relevant `supporting_experiment_ids` and declare
-`hypothesis_status` as `unresolved`, `supported`, or `refuted`. Lifecycle is not a verdict:
+at the end. `blocked` or `pivot` may have zero Experiments and empty Findings. Before handoff, close
+started Directions with an honest stopping reason and `hypothesis_status`; unmeasured or inconclusive
+work can close `unresolved` with empty support, even without a Gateway call. Select relevant
+Experiment IDs or direct `supporting_results` only when evidence exists. No diagnostic call or
+fabricated record is required to finish. Lifecycle is not a verdict:
 untested reasoning stays unresolved. Preserve this distinction in Findings, memory, and Skills;
 never promote incidental interpretations in unrelated Experiments into established constraints.
 

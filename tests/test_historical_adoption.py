@@ -61,7 +61,9 @@ def test_adopt_schema_exposes_action_and_requires_trial_reference_fields(
             "pattern": r"^sha256:[0-9a-f]{64}$",
         }
         assert subject["additionalProperties"] is False
-        assert schema["allOf"][1]["if"]["properties"]["action"] == {"enum": ["adopt", "keep_after", "restore_before"]}
+        assert schema["allOf"][1]["if"]["properties"]["action"] == {
+            "enum": ["adopt", "keep_after", "restore_before"]
+        }
         assert schema["allOf"][1]["then"]["properties"][side] == subject
 
 
@@ -143,7 +145,9 @@ def test_historical_adopt_survives_http_and_journal_snapshot_into_candidate_repo
     experiment_calls = [call for call in calls if call["operation"] == "experiment_record"]
     assert len(experiment_calls) == 1
     assert experiment_calls[0]["request"] == experiment
-    assert experiment_calls[0]["request"]["after"] == {"result_artifact_digest": "sha256:" + "f" * 64}
+    assert experiment_calls[0]["request"]["after"] == {
+        "result_artifact_digest": "sha256:" + "f" * 64
+    }
     snapshot_operation = runtime_tools._RUNTIME_JOURNAL_COMMANDS["_journal-snapshot"]
     assert any(call["operation"] == snapshot_operation for call in calls)
     assert published["report_status"] == "candidate_ready"
@@ -270,10 +274,7 @@ def test_zero_experiments_cannot_bypass_an_active_direction(
 ) -> None:
     context = helpers._context(tmp_path)
     direction_id = helpers._propose_and_start_direction(context)
-    # An active historical Direction must be checked even with an empty current journal.
-    state = helpers._fake_state(context)
-    helpers._FAKE_HISTORY[str(context.workspace)] = deepcopy(state)
-    state["direction_events"].clear()
+    # Missing Experiments cannot bypass this Attempt's own active Direction.
     report = _terminal_report(status)
 
     with pytest.raises(ValueError, match="cannot leave any Direction in progress"):
@@ -299,3 +300,25 @@ def test_zero_experiments_cannot_bypass_an_active_direction(
     assert published["report_status"] == status
     assert published["experiment_count"] == 1
     assert helpers._fake_state(context)["direction_events"][-1]["action"] == close_action
+
+
+@pytest.mark.parametrize("status", ["blocked", "pivot"])
+def test_empty_terminal_report_does_not_close_historical_open_direction(
+    tmp_path: Path, status: str
+) -> None:
+    source = helpers._context(tmp_path / "source")
+    direction_id = helpers._propose_and_start_direction(source)
+    reader = helpers._context(tmp_path / "reader")
+    helpers._FAKE_HISTORY[str(reader.workspace)] = deepcopy(helpers._fake_state(source))
+
+    published = runtime_tools.attempt_report(reader, _terminal_report(status))
+
+    assert published["report_status"] == status
+    assert published["experiment_count"] == 0
+    assert helpers._fake_state(reader)["direction_events"] == []
+    assert runtime_tools.load_direction(reader, {"direction_id": direction_id})["status"] == (
+        "in_progress(other)"
+    )
+    assert runtime_tools.load_direction(source, {"direction_id": direction_id})["status"] == (
+        "in_progress(self)"
+    )

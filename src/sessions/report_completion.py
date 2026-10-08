@@ -208,12 +208,27 @@ def _missing_prompt(context: ReportContext, backup: str | None) -> str:
         available = []
         if "directions" in modules:
             available.append(
-                "close any in_progress Direction; no Experiment support is required "
+                "close your in_progress(self) Direction, leaving others' Directions open; "
+                "no Experiment support is required "
                 "when Experiments are disabled"
             )
         if "experiments" in modules:
             available.append("reuse real recorded Experiments and their Result Artifact IDs")
         journal_note = "; ".join(available) if available else "no Journal tools are enabled"
+        reuse_note = (
+            "If the exact final Kernel reuses compatible visible historical "
+            "full-Evaluate evidence, "
+            "record an adopt Experiment with real before/after Result Artifact digests. "
+            if "experiments" in modules
+            else (
+                "For an unchanged final Kernel from visible history, Runtime can automatically "
+                "reuse compatible successful ordinary full Evaluate evidence at candidate_ready "
+                "without an Experiment or duplicate Evaluate. It preserves the original "
+                "measurement identity; custom inputs, correctness-only, Profile and exploratory "
+                "ABBA do not "
+                "qualify, and a failed current full Evaluate cannot be overridden. "
+            )
+        )
         preserved = (
             f"The unaccepted local report was backed up at `{backup}`. "
             if backup is not None
@@ -225,6 +240,7 @@ def _missing_prompt(context: ReportContext, backup: str | None) -> str:
             "the candidate or start new measurements. "
             f"Public task context: {_public_context(context)}. {_trace_hint(context)} "
             f"{preserved}Use the live runtime-contract and existing evidence; {journal_note}. "
+            f"{reuse_note}Keep the required findings and enabled Direction bookkeeping. "
             "Never invent evidence. If candidate_ready is unsupported, use blocked"
             + ("" if isinstance(context, RuntimeLineageBootstrapContext) else " or pivot")
             + ". Submit attempt-report and finish only after its Runtime receipt."
@@ -263,14 +279,17 @@ def _missing_prompt(context: ReportContext, backup: str | None) -> str:
         "Do not wait for authoritative ABBA: it runs after Report handoff and creates no Agent "
         "Trial. Agent ABBA cannot replace ordinary full-Evaluate evidence.\n"
         f"{fallback} Explain any remaining uncertainty or blocker.\n"
-        f"A {empty_status} report may have zero Experiments and empty findings "
-        "if no Direction needs closing; do not invent either. Closing an in_progress Direction "
-        "with block or defer requires an associated Experiment first. Every Experiment must "
+        f"A {empty_status} report may have zero Experiments and empty findings, "
+        "including after closing an unmeasured Direction; do not invent either. "
+        "Close only in_progress(self) Directions, leaving others' work open. "
+        "For unmeasured or inconclusive work, close with hypothesis_status=unresolved "
+        "and empty supporting_experiment_ids; no associated Experiment is required. "
+        "For supported/refuted conclusions, supply scope and relevant completed Result evidence "
+        "through supporting_results or selected Experiments. Every Experiment must "
         "cite at least one real Kernel-bound Gateway Result already available; both-null "
         "before/after is forbidden, even for abandon_direction. If no Result exists, explain "
         "the blocker; do not invent evidence or run new measurements in this recovery session. "
-        "Explicitly supply supporting_experiment_ids and hypothesis_status=unresolved for "
-        "diagnostics that did not test the performance hypothesis. "
+        "Keep hypothesis_status=unresolved for diagnostics that did not test the hypothesis. "
         "This is bookkeeping, not a new measurement.\n"
         f"Submit the terminal report through the real `python {_RUNTIME_TOOL} attempt-report "
         "--request scratch/report-completion-request.json` tool. "

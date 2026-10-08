@@ -46,10 +46,23 @@ def test_modular_prompt_lists_only_enabled_journal_tools(modules: frozenset[str]
     assert "input_path" in prompt
     assert "latency_prediction" in prompt
     assert "result-artifact-read" in prompt
+    assert "root_cause=null" in prompt
+    assert "supporting_results" in prompt
+    assert "downgrades to unresolved" in prompt
+    assert "not verified conclusions" in prompt
     assert ('scratch/directions-index.json' in prompt) == ("directions" in modules)
+    assert ("in_progress(self)" in prompt) == ("directions" in modules)
+    assert ("in_progress(other)" in prompt) == ("directions" in modules)
     assert ('scratch/experiments-index.json' in prompt) == ("experiments" in modules)
     assert ('{"direction_id":"direction_<id>"}' in prompt) == ("directions" in modules)
     assert ('{"experiment_id":"experiment_<id>"}' in prompt) == ("experiments" in modules)
+    assert ("Runtime automatically validates and reuses" in prompt) == (
+        "experiments" not in modules
+    )
+    if "experiments" not in modules:
+        assert "no Experiment or duplicate Evaluate is required" in prompt
+        assert "cannot override a failed current full Evaluate" in prompt
+        assert "cannot be adopted" not in prompt
     for bootstrap, name, common in (
         (False, "episode.md", "For multi-shape tasks"),
         (True, "framework_baseline.md", "Give every `Model` constructor parameter a default"),
@@ -58,10 +71,19 @@ def test_modular_prompt_lists_only_enabled_journal_tools(modules: frozenset[str]
             (CORE_ROOT / "prompts" / name).read_text(), bootstrap=bootstrap, modules=modules
         )
         assert common in phase
+        if not bootstrap:
+            assert "the next concrete edit or focused probe" in phase
+            assert "Once a step is actionable, write the change or run the focused probe" in phase
+            assert "smallest end-to-end implementation" in phase
+            assert "do not restart the entire design without new evidence" in phase
         if "directions" not in modules:
             assert "propose and start" not in phase
         if "experiments" not in modules:
             assert "record-experiment" not in phase
+            if not bootstrap:
+                assert "Runtime automatically validates and reuses" in phase
+                assert "cannot be adopted" not in phase
+                assert "measured in this Attempt" not in phase
     evidence = modular_evidence_prompt(
         "Workspace facts\n\n## Direction ancestry\n\nOld coupled instructions", modules
     )
@@ -114,6 +136,24 @@ def test_projected_contract_exposes_only_enabled_modules(
     if "directions" not in modules:
         with pytest.raises(ValueError, match="unknown Runtime tool"):
             project_contract(command="update-direction", allow_baseline=False)
+
+
+@pytest.mark.parametrize("modules", [frozenset(), frozenset({"directions"})])
+def test_legacy_evidence_prompt_permits_automatic_historical_reuse(
+    modules: frozenset[str],
+) -> None:
+    template = (
+        "Workspace facts\n\n## Direction ancestry\n\nJournal instructions"
+        "\n\n## Trust and measurement reuse\n\nTrust facts.\n\n"
+        "To select an unchanged Kernel use the old coupled path.\n\n"
+        "Agent-requested ABBA is exploratory.\n\n"
+        "`complete`, `abandon` are Journal closures."
+    )
+    prompt = modular_evidence_prompt(template, modules)
+    assert "Runtime automatically validates and reuses" in prompt
+    assert "no Experiment or duplicate Evaluate is required" in prompt
+    assert "cannot override a failed current full Evaluate" in prompt
+    assert "cannot be adopted" not in prompt
 
 
 def test_managed_prompt_paths_read_workspace_state(tmp_path: Path) -> None:
@@ -331,7 +371,7 @@ def test_evaluate_prompt_explains_overrides_and_full_contract_requirement() -> N
     assert 'register `action: "adopt"`' in text
     assert "Only `adopt` permits a historical Trial as `after`" in text
     assert "not an Agent Result Artifact" in text
-    assert "Only `candidate_ready` requires non-empty Experiments" in text
+    assert "`candidate_ready` requires the enabled modules' nomination journals" in text
     assert "input_scope" in text
     assert "input_py" in text and "shapes" in text
     assert "no further fields" not in text

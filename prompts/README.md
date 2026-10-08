@@ -12,7 +12,8 @@ configuration is updated too. Do not store credentials, temporary requests, or r
 
 ## Contents
 
-- episode.md: Optimizer methodology, including explicit adoption of matching historical evidence;
+- episode.md: Optimizer methodology, including brief executable plans, incremental implementation,
+  continuation from saved work, and explicit adoption of matching historical evidence;
   depends on the shared Session tools and trusted Runtime Journal/evaluation contract.
 - framework_baseline.md: Bootstrap methodology and honest blocked handoff without fabricated
   experiments; depends on the shared Session report schema and Runtime Bootstrap validation.

@@ -35,6 +35,35 @@ def _subject() -> dict[str, Any]:
     return _object({"result_artifact_digest": _digest()})
 
 
+def _claim_results() -> dict[str, Any]:
+    return {
+        "type": "array",
+        "maxItems": 32,
+        "items": _object(
+            {
+                "kernel_artifact_digest": _digest(),
+                "result_artifact_digests": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 4096,
+                    "uniqueItems": True,
+                    "items": _digest(),
+                },
+            }
+        ),
+        "description": (
+            "Exact visible Kernel/Result bindings; available with any Journal module selection."
+        ),
+    }
+
+
+def _claim_kind() -> dict[str, Any]:
+    return {
+        "enum": ["observation", "implementation_outcome", "causal_hypothesis"],
+        "default": "causal_hypothesis",
+    }
+
+
 def _evaluate_schema() -> dict[str, Any]:
     """Describe Agent inputs, including file helpers resolved before the HTTP request."""
     schema = _object(
@@ -169,9 +198,11 @@ def _direction_schema(*, experiments_enabled: bool = True) -> dict[str, Any]:
             "direction_id": _identifier("direction_"),
             "analysis": _text(),
             "hypothesis_status": {"enum": ["unresolved", "supported", "refuted"]},
+            "claim_kind": _claim_kind(),
+            "scope": {"oneOf": [_text(), {"type": "null"}]},
+            "supporting_results": _claim_results(),
             "supporting_experiment_ids": {
                 "type": "array",
-                "minItems": 1,
                 "maxItems": 32,
                 "uniqueItems": True,
                 "items": _identifier("experiment_"),
@@ -189,6 +220,9 @@ def _direction_schema(*, experiments_enabled: bool = True) -> dict[str, Any]:
                     "anyOf": [
                         {"required": ["hypothesis_status"]},
                         {"required": ["supporting_experiment_ids"]},
+                        {"required": ["supporting_results"]},
+                        {"required": ["scope"]},
+                        {"required": ["claim_kind"]},
                     ]
                 }
             },
@@ -201,13 +235,16 @@ def _direction_schema(*, experiments_enabled: bool = True) -> dict[str, Any]:
     ]
     update["description"] = (
         "complete, abandon, block, and defer each require hypothesis_status and analysis. "
-        "Unmeasured or inconclusive reasoning "
-        "should remain unresolved. "
+        "Use unresolved and empty support when unmeasured or inconclusive; stopping work does "
+        "not refute its hypothesis. For supported/refuted, provide scope and completed Result "
+        "evidence relevant to the proposal hypothesis, directly through supporting_results "
+        "or through selected Experiments. Runtime checks bindings and operation eligibility, "
+        "not scientific truth; insufficient support downgrades to unresolved "
+        "with assessment_notes. "
         + (
-            "Select supporting_experiment_ids belonging to this Direction; supported/refuted "
-            "requires completed Gateway evidence for every selected Experiment. "
+            "supporting_experiment_ids may be empty; selected IDs must belong to this Direction. "
             if experiments_enabled
-            else "The Experiment module is disabled, so no supporting_experiment_ids are required. "
+            else "The Experiment module is disabled; omit supporting_experiment_ids. "
         )
         + "Propose and start do not require outcome evidence."
     )
@@ -352,17 +389,25 @@ def _attempt_report_schema(
                     {
                         "category": _text(),
                         "observation": _text(),
-                        "root_cause": _text(),
+                        "root_cause": {"oneOf": [_text(), {"type": "null"}], "default": None},
+                        "claim": {"oneOf": [_text(), {"type": "null"}]},
+                        "claim_kind": _claim_kind(),
+                        "assessment": {
+                            "enum": ["unresolved", "supported", "refuted"],
+                            "default": "unresolved",
+                        },
+                        "scope": {"oneOf": [_text(), {"type": "null"}]},
+                        "supporting_results": _claim_results(),
                         "resolution": _text(),
                         "lesson": _text(),
                         "supporting_experiment_ids": {
                             "type": "array",
-                            "minItems": 1,
                             "maxItems": 32,
                             "uniqueItems": True,
                             "items": _identifier("experiment_"),
                         },
-                    }
+                    },
+                    required=("category", "observation", "resolution", "lesson"),
                 ),
             },
             "contributing_result_artifact_digests": {
@@ -385,7 +430,6 @@ def _attempt_report_schema(
     if not experiments_enabled:
         finding = schema["properties"]["findings"]["items"]
         finding["properties"].pop("supporting_experiment_ids")
-        finding["required"].remove("supporting_experiment_ids")
     return schema
 
 
@@ -485,18 +529,19 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         },
         {
             "instruction": (
-                "Before complete, abandon, block, or defer, select supporting_experiment_ids "
-                "from load-direction associated_experiment_ids and declare hypothesis_status. "
-                "Cite only experiments that address this Direction's hypothesis. "
-                "Every Experiment needs at least one real Kernel-bound Gateway Result. "
-                "Use unresolved for diagnostics; lifecycle closure is not hypothesis refutation"
+                "Before complete, abandon, block, or defer, declare hypothesis_status. "
+                "Use unresolved with empty support for untested ideas or blockers. Select IDs "
+                "from load-direction associated_experiment_ids only when relevant, or cite exact "
+                "Kernel/Result bindings directly with supporting_results. Judged conclusions need "
+                "scope and completed evidence; lifecycle closure is not hypothesis refutation"
             )
         },
         {
             "instruction": (
                 "When direction_concurrency_conflict is returned, continue the existing "
-                "in-progress Direction or close it with complete, abandon, defer, or block. "
-                "Retry start only after no other Direction is in progress"
+                "in_progress(self) Direction or close it with complete, abandon, defer, or block. "
+                "Retry start only after this Attempt has no in_progress(self) Direction; "
+                "do not close other Attempts' work"
             )
         },
         {
@@ -576,12 +621,11 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         },
         {
             "instruction": (
-                "Read both indexes and close every in_progress Direction with update-direction "
-                "before retrying attempt-report. complete, abandon, block, and defer all require "
-                "explicit supporting_experiment_ids and hypothesis_status. "
-                "Every Experiment needs at least one real Kernel-bound Gateway Result; "
-                "then select its Experiment ID and use hypothesis_status=unresolved. "
-                "blocked/pivot may have zero Experiments if no Direction needs closing; "
+                "Read both indexes and close every in_progress(self) Direction "
+                "with update-direction before retrying attempt-report; "
+                "do not close other Attempts' Directions. complete, abandon, block, and defer "
+                "all require hypothesis_status; unresolved permits empty support. "
+                "blocked/pivot may have zero Experiments even after an unmeasured closure; "
                 "never fabricate evidence to end a session"
             )
         },
@@ -619,7 +663,9 @@ def tool_recovery(
             {
                 "instruction": (
                     "Close the Direction with analysis and hypothesis_status; "
-                    "omit supporting_experiment_ids."
+                    "omit supporting_experiment_ids. Use unresolved if unmeasured; for a judged "
+                    "conclusion provide scope and supporting_results with exact "
+                    "Kernel/Result bindings."
                 )
             }
         ]

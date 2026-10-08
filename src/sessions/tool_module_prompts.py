@@ -10,6 +10,15 @@ from runtime_contract import load_live_contract
 
 _DEFAULT = frozenset({"directions", "experiments"})
 _RUNTIME_TOOL = "agent/optimizer/src/runtime_tools.py"
+_AUTOMATIC_HISTORICAL_REUSE = (
+    "To nominate an unchanged visible historical Kernel, restore its exact source in work/kernel "
+    "and submit candidate_ready. Runtime automatically validates and reuses successful ordinary "
+    "full Evaluate evidence for the same operator, hardware, DSL and sealed Contract; no Experiment "
+    "or duplicate Evaluate is required. Custom inputs, correctness-only, Profile and exploratory "
+    "ABBA do not qualify. Reuse preserves the original measurement identity and cannot override "
+    "a failed current full Evaluate. Changed source needs its own qualifying evidence; independent "
+    "retention is unchanged."
+)
 
 
 def active_modules() -> frozenset[str]:
@@ -34,21 +43,28 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
     common = template.split(anchor, 1)[0]
     if "directions" not in modules:
         common = "\n".join(
-            line for line in common.splitlines()
+            line
+            for line in common.splitlines()
             if not any(
                 f" {tool} " in line
                 for tool in (
-                    "update-direction", "list-directions", "load-direction", "find-kernel-directions",
+                    "update-direction",
+                    "list-directions",
+                    "load-direction",
+                    "find-kernel-directions",
                 )
             )
         )
     if "experiments" not in modules:
         common = "\n".join(
-            line for line in common.splitlines()
+            line
+            for line in common.splitlines()
             if not any(
                 f" {tool} " in line
                 for tool in (
-                    "record-experiment", "list-experiments", "load-experiment",
+                    "record-experiment",
+                    "list-experiments",
+                    "load-experiment",
                     "find-kernel-experiments",
                 )
             )
@@ -64,7 +80,7 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         "`adopt` Experiment using real before/after Result Artifact digests. Runtime validates "
         "whether that evidence qualifies for nomination."
         if "experiments" in modules
-        else "Reuse historical evidence for analysis, but nomination requires a newly measured candidate with an ordinary full Evaluate in this Attempt. Exact historical Kernel tasks may be rejected as duplicates, and this Session cannot record an adoption decision."
+        else _AUTOMATIC_HISTORICAL_REUSE
     )
     common = before + adoption + adoption_end + after
     common = common.replace(
@@ -72,7 +88,7 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         (
             "or a Runtime-accepted `adopt` Experiment binding matching historical full-Evaluate evidence."
             if "experiments" in modules
-            else "and cannot use an adoption decision because the Experiment module is disabled."
+            else "or compatible visible historical full-Evaluate evidence automatically validated by Runtime."
         ),
     )
     common = common.replace(
@@ -84,19 +100,28 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
             "Never wait for that later ABBA to create evidence for an Experiment\nor to make the Report submittable.",
             "Never wait for that later ABBA to make the Report submittable.",
         )
-    common = common.replace("Runtime Journal and local Report errors", "Enabled Journal and local Report errors")
+    common = common.replace(
+        "Runtime Journal and local Report errors", "Enabled Journal and local Report errors"
+    )
     common = common.replace("{{DSL}}", dsl).replace("{{RUNTIME_TOOL}}", _RUNTIME_TOOL)
     commands = [
-        "gateway-execute", "kernel-artifact-read", "result-artifact-read",
+        "gateway-execute",
+        "kernel-artifact-read",
+        "result-artifact-read",
         "kernel-pareto-frontier",
     ]
     if "directions" in modules:
         commands += [
-            "update-direction", "list-directions", "load-direction", "find-kernel-directions",
+            "update-direction",
+            "list-directions",
+            "load-direction",
+            "find-kernel-directions",
         ]
     if "experiments" in modules:
         commands += [
-            "record-experiment", "list-experiments", "load-experiment",
+            "record-experiment",
+            "list-experiments",
+            "load-experiment",
             "find-kernel-experiments",
         ]
     commands.append("attempt-report")
@@ -105,27 +130,35 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         "Read relevant history before choosing a hypothesis; those queries require no new Direction. "
         "Use update-direction to propose and start the chosen hypothesis before new probes or edits. "
         "An Attempt may advance at most three Directions, with only one in_progress at a time. "
-        "Close every started Direction before handoff with hypothesis_status and analysis. "
+        "Queries label open status in_progress(self) for work started by this Attempt and "
+        "in_progress(other) for another Attempt's work, regardless of who proposed it. "
+        "Close every in_progress(self) Direction before handoff with hypothesis_status and analysis; "
+        "do not close others' Directions, which do not block your report. "
         + (
-            "When closing, select real supporting_experiment_ids from this Direction's recorded Experiments."
+            "When closing, supporting_experiment_ids may be empty for unresolved work; "
+            "select real associated Experiments only when relevant."
             if "experiments" in modules
             else "No Experiment module is available, so closure needs no supporting_experiment_ids."
         )
+        + " Unmeasured closures need no experiment or GPU call. Supported/refuted judgments need scope "
+        "and relevant completed evidence via supporting_results or selected Experiments; otherwise "
+        "Runtime keeps them unresolved with assessment_notes. Invalid references remain errors. "
+        "Optional claim_kind defaults to causal_hypothesis; closing work does not refute it. "
         + ' Call `list-directions` with {"file":"scratch/directions-index.json"}, then read that file; '
-        'its response contains only status, file, and count. Call `load-direction` with '
+        "its response contains only status, file, and count. Call `load-direction` with "
         '{"direction_id":"direction_<id>"} for the selected hypothesis, plan, criteria, and analysis. '
         'For a known Kernel digest, `find-kernel-directions` takes {"kernel_artifact_digest":"sha256:<digest>"} '
-        'and returns linked direction_ids through visible Experiments; an empty result does not mean no prior work. '
-        'An unclaimed visible Direction may be started with its existing ID. On direction_trajectory_conflict, '
-        'propose a derived Direction with relationship=reimplementation and the claimed ID as its parent.'
+        "and returns linked direction_ids through visible Experiments; an empty result does not mean no prior work. "
+        "An unclaimed visible Direction may be started with its existing ID. On direction_trajectory_conflict, "
+        "propose a derived Direction with relationship=reimplementation and the claimed ID as its parent."
         if "directions" in modules
         else "Direction tools are unavailable; do not create or cite Direction IDs."
     )
     experiments = (
         'Call `list-experiments` with {"file":"scratch/experiments-index.json"}, then read the written file; '
-        'its response contains only status, file, and count. The index includes hypotheses, changes, and analyses. '
+        "its response contains only status, file, and count. The index includes hypotheses, changes, and analyses. "
         'Call `load-experiment` with {"experiment_id":"experiment_<id>"} when you need exact before/after '
-        'Artifact bindings or other full-record details. For a known Kernel digest, `find-kernel-experiments` '
+        "Artifact bindings or other full-record details. For a known Kernel digest, `find-kernel-experiments` "
         'takes {"kernel_artifact_digest":"sha256:<digest>"} and returns visible experiment_ids. '
         "Record each meaningful measured candidate decision with record-experiment. "
         "Cite real Kernel-bound Result Artifacts: keep_after, restore_before, and adopt require "
@@ -140,15 +173,30 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         else "Experiment tools are unavailable; do not create or cite Experiment IDs."
     )
     findings = (
-        "Each Finding must cite nonempty supporting_experiment_ids from this Attempt's Journal."
-        if "experiments" in modules
-        else "Findings describe measured facts and decisions without supporting_experiment_ids."
+        "Each Finding names one claim, its claim_kind (observation, implementation_outcome, or "
+        "causal_hypothesis), assessment (unresolved, supported, or refuted), and scope. "
+        "Use root_cause=null when unknown; no causal explanation is required. Missing historical "
+        "assessment means unresolved. Bind direct supporting_results as "
+        '[{"kernel_artifact_digest":"sha256:<kernel>","result_artifact_digests":["sha256:<result>"]}], '
+        "available in every module combination. Observations may cite completed Check/Dev/Profile/Evaluate; "
+        "implementation outcomes need Dev or full Evaluate; causal hypotheses need Dev/Profile/full Evaluate. "
+        "Check-only or correctness-only evidence cannot establish performance or causal judgments. "
+        "Missing claim, scope, or suitable evidence downgrades to unresolved with assessment_notes; "
+        "invalid references are errors. Runtime verifies bindings and operation eligibility, not truth. "
+        "Reuse existing visible Results; do not launch duplicate GPU work for bookkeeping. "
+        "Free-text analysis, diagnosis, and lessons remain interpretations, not verified conclusions. "
+        + (
+            "Optional supporting_experiment_ids may organize evidence from this Attempt's Journal."
+            if "experiments" in modules
+            else "Omit supporting_experiment_ids because Experiments are disabled."
+        )
     )
     journal_reads = (
         "Journal writes are durable across recovery. Read indexes to select records; known IDs can be loaded directly. "
         "Use returned Artifact digests to retrieve exact observations and source. Do not reload prose "
         "that already answers the question. Query the live schema for exact write fields and validation limits.\n\n"
-        if modules else "No Journal tools are available. Use relevant reports and Artifact reads for history.\n\n"
+        if modules
+        else "No Journal tools are available. Use relevant reports and Artifact reads for history.\n\n"
     )
     return (
         common.rstrip() + "\n\n## Enabled Journal and terminal Report\n\n"
@@ -207,7 +255,8 @@ def _modular_attempt(template: str, modules: frozenset[str]) -> str:
     planning = planning[planning.index("State a falsifiable") :]
     opening = (
         "Continue a useful visible Direction or propose and start a distinct one before its research or edits. "
-        if "directions" in modules else "Choose one causal hypothesis before research or edits. "
+        if "directions" in modules
+        else "Choose one causal hypothesis before research or edits. "
     )
     template = _replace_section(template, headings[1], headings[2], opening + planning)
     recovery = (
@@ -219,7 +268,7 @@ def _modular_attempt(template: str, modules: frozenset[str]) -> str:
             "To nominate exact historical source, record this Attempt's `adopt` Experiment using real "
             "before/after Result Artifact digests. Runtime validates matching full-Evaluate evidence."
             if "experiments" in modules
-            else "Historical evidence may guide the work, but nominate a newly measured candidate; an exact historical Kernel can be rejected as a duplicate and cannot be adopted in this Session."
+            else _AUTOMATIC_HISTORICAL_REUSE
         )
     )
     template = _replace_section(template, headings[0], headings[1], recovery)
@@ -237,7 +286,8 @@ def _modular_attempt(template: str, modules: frozenset[str]) -> str:
         "successful ordinary full Evaluate for the exact current `work/kernel/` tree"
         + (
             ", either measured here or bound by a Runtime-accepted historical `adopt` Experiment. "
-            if "experiments" in modules else ", measured in this Attempt. "
+            if "experiments" in modules
+            else ", measured here or automatically reused by Runtime from compatible visible history. "
         )
         + "Require reported correctness, finite positive latency, and credible performance evidence. "
         "Agent ABBA is exploratory and cannot replace that full Evaluate. Runtime's authoritative "
@@ -249,21 +299,25 @@ def _modular_attempt(template: str, modules: frozenset[str]) -> str:
         "After every decisive measured keep, restoration, or ending result, record the Experiment before "
         "another edit. Keep observations in `evidence`, interpretation in `analysis`, and cite exact "
         "Result Artifact digests. Negative results are first-class evidence. "
-        if "experiments" in modules else "Preserve factual measurements and decisions in the Report draft. "
+        if "experiments" in modules
+        else "Preserve factual measurements and decisions in the Report draft. "
     )
     recording += (
-        "Close every started Direction before handoff, explicitly selecting relevant supporting "
-        "Experiment IDs and `hypothesis_status` (`unresolved`, `supported`, or `refuted`). "
-        if modules == _DEFAULT else
-        "Close every started Direction before handoff with `hypothesis_status`; no Experiment linkage is required. "
-        if "directions" in modules else ""
+        "Close every started Direction before handoff with `hypothesis_status` "
+        "(`unresolved`, `supported`, or `refuted`); unresolved work permits empty support. "
+        if modules == _DEFAULT
+        else "Close every started Direction before handoff with `hypothesis_status`; no Experiment linkage is required. "
+        if "directions" in modules
+        else ""
     )
     recording += (
         "Keep the structured Report draft current. Do not fabricate evidence to finish. "
         "Submit with `attempt-report`; `blocked` or `pivot` may have empty Findings when justified."
     )
     template = _replace_section(template, headings[6], headings[7], recording)
-    helper = _section(template, headings[7], "## Terminal behavior").split("Use existing Prompts", 1)[0]
+    helper = _section(template, headings[7], "## Terminal behavior").split(
+        "Use existing Prompts", 1
+    )[0]
     helper += (
         "Use existing Prompts and Skills when relevant, but do not modify them. Evolver reviews "
         "completed Session evidence and may make only task-independent changes to Prompts, Skills, "
@@ -288,7 +342,7 @@ def _modular_kda_attempt(template: str, modules: frozenset[str]) -> str:
             "For exact historical source, record an `adopt` Experiment with real before/after "
             "Result Artifact digests; Runtime validates matching full-Evaluate evidence."
             if "experiments" in modules
-            else "Historical results may guide the work, but nominate a newly measured candidate; an exact historical Kernel may be rejected as a duplicate and cannot be adopted in this Session."
+            else _AUTOMATIC_HISTORICAL_REUSE
         ),
     )
     workflow = workflow.replace(
@@ -299,14 +353,17 @@ def _modular_kda_attempt(template: str, modules: frozenset[str]) -> str:
     execution = _section(template, "## Execution and evidence", "## Terminal handoff")
     execution = execution.replace(
         "- Register and start a Direction with `update-direction` when beginning its research or exploration, not only when editing the Kernel. Follow the shared tool contract for the single in-progress Direction and per-Attempt limits.\n",
-        "" if "directions" not in modules else "- Propose and start a Direction before its research or exploration; close it before handoff.\n",
+        ""
+        if "directions" not in modules
+        else "- Propose and start a Direction before its research or exploration; close it before handoff.\n",
     )
     execution = execution.replace(
         "- After every decisive measured keep, restoration, or direction-ending result, call `record-experiment` before another edit. Supply the exact before/after Result Artifact digests; Runtime resolves their Kernel and Result Artifacts. Separate factual evidence from analysis. Negative results are first-class evidence.\n",
         (
             "- After every decisive measured decision, call `record-experiment` before another edit. "
             "Cite exact Result Artifact digests, separate factual evidence from analysis, and retain negative results.\n"
-            if "experiments" in modules else "- Preserve decisive measured decisions and negative results in the Report draft.\n"
+            if "experiments" in modules
+            else "- Preserve decisive measured decisions and negative results in the Report draft.\n"
         ),
     )
     execution = execution.split("- Treat `prompts/` and `skills/`", 1)[0] + (
@@ -315,14 +372,20 @@ def _modular_kda_attempt(template: str, modules: frozenset[str]) -> str:
         "Only reusable executable helpers belong in `tools/`; keep its index current. Evolver may "
         "curate task-independent Prompts, Skills, and Tools from completed Session evidence.\n"
     )
-    template = _replace_section(template, "## Execution and evidence", "## Terminal handoff", execution)
+    template = _replace_section(
+        template, "## Execution and evidence", "## Terminal handoff", execution
+    )
     terminal = (
         "Build the terminal Report incrementally. Submit it with `attempt-report` using the live schema; "
         "repair validation errors and resubmit when needed. "
         + ("Close every started Direction before handoff. " if "directions" in modules else "")
         + "Stop with an evaluated candidate, an exhausted hypothesis, or a genuine blocker. "
         "An ordinary full Evaluate of the exact candidate is required for nomination"
-        + (" unless Runtime accepts a matching historical `adopt` Experiment. " if "experiments" in modules else ". ")
+        + (
+            " unless Runtime accepts a matching historical `adopt` Experiment. "
+            if "experiments" in modules
+            else ", measured here or automatically reused by Runtime from compatible visible history. "
+        )
         + "Agent ABBA is exploratory; Runtime's authoritative ABBA runs after terminal handoff. "
         "Do not fabricate evidence to finish; chat text is not a terminal Report."
     )
@@ -342,14 +405,20 @@ def _modular_baseline(template: str, modules: frozenset[str]) -> str:
     ]
     learning = (
         "After the minimal operator-contract review, choose one baseline-construction hypothesis. "
-        + ("Propose and start it before direction-specific work. " if "directions" in modules else "")
+        + (
+            "Propose and start it before direction-specific work. "
+            if "directions" in modules
+            else ""
+        )
         + "Use the seed, included Skills, and public contract. Select knowledge relevant to the actual "
         "architecture, DSL, operator, and mechanism. Stop once one viable approach has adequate support "
         "and keep its actionable constraints in `scratch/`."
     )
     template = _replace_section(template, headings[1], headings[2], learning)
     construction = _section(template, headings[2], headings[3])
-    construction = construction.replace("Under the already-started baseline-construction Direction, inspect", "Inspect")
+    construction = construction.replace(
+        "Under the already-started baseline-construction Direction, inspect", "Inspect"
+    )
     construction = construction.replace(
         "Use the shared Direction and Experiment Journal to preserve every\ndecisive construction, repair, retained change, and reverted failure for later optimization\nAttempts, but do not expand framework bring-up into an unbounded performance search.",
         (
@@ -365,8 +434,13 @@ def _modular_baseline(template: str, modules: frozenset[str]) -> str:
         "Record each meaningful repair as an Experiment with real before/after Result Artifact digests. "
         "The first measured construction requires exactly one `baseline` Experiment with `before=null` "
         "and the measured Result as `after`. "
-        + ("Supply its started Direction ID. " if "directions" in modules else "Omit `direction_id`. ")
-        if "experiments" in modules else "Preserve measured repair evidence in the Report draft. "
+        + (
+            "Supply its started Direction ID. "
+            if "directions" in modules
+            else "Omit `direction_id`. "
+        )
+        if "experiments" in modules
+        else "Preserve measured repair evidence in the Report draft. "
     )
     validation += "\n\nBefore nomination," + _section(
         template, "Before nomination,", "## Terminal contract"
@@ -377,7 +451,11 @@ def _modular_baseline(template: str, modules: frozenset[str]) -> str:
     terminal += (
         "Do not use `pivot` during Bootstrap. Before handoff, "
         + ("close every started Direction. " if "directions" in modules else "")
-        + ("Record exactly one baseline Experiment for `candidate_ready`. " if "experiments" in modules else "")
+        + (
+            "Record exactly one baseline Experiment for `candidate_ready`. "
+            if "experiments" in modules
+            else ""
+        )
         + "Do not fabricate evidence to satisfy a schema. Use the shared Report fields with Bootstrap "
         "semantics: `diagnosis` names the bring-up or correctness issue, `approach` explains construction "
         "or repair, and `expected_impact` states the expected correctness or compatibility effect. "
@@ -422,25 +500,47 @@ def modular_evidence_prompt(prompt: str, modules: frozenset[str]) -> str:
         "`supersedes_direction_id` to one of its parents. Read real IDs with `list-directions` "
         "and `load-direction` first. Historical suggestions remain readable, but no new suggestion "
         "can be created. Ancestry records an interpretation, not proof of a performance gain.\n\n"
-        if "directions" in modules else ""
+        if "directions" in modules
+        else ""
     )
     trust = prompt.split("## Trust and measurement reuse", 1)[1]
     trust_prefix = trust.split("To select an unchanged Kernel", 1)[0]
     trust_tail = trust.split("Agent-requested ABBA is exploratory", 1)[1]
-    trust_tail = "Agent-requested ABBA is exploratory" + trust_tail.split("`complete`, `abandon`", 1)[0]
-    trust_tail = trust_tail.replace("before recording an Experiment or submitting", "before submitting")
+    trust_tail = (
+        "Agent-requested ABBA is exploratory" + trust_tail.split("`complete`, `abandon`", 1)[0]
+    )
+    trust_tail = trust_tail.replace(
+        "before recording an Experiment or submitting", "before submitting"
+    )
+    claims = ""
+    if "Record one reusable claim per Finding." in prompt:
+        claims = (
+            "Record one reusable claim per Finding."
+            + prompt.split("Record one reusable claim per Finding.", 1)[1].split(
+                "`blocked` or `pivot`", 1
+            )[0]
+        )
     trust_private = "Private evaluator inputs remain hidden; opaque Shape identifiers and measurements must not be used to reconstruct them."
     reuse = (
         "To select an unchanged Kernel from visible history, record an `adopt` Experiment with real "
         "before and after Result Artifact digests. Runtime verifies matching successful ordinary "
         "full-Evaluate evidence for the exact source."
         if "experiments" in modules
-        else "Reuse historical measurements for analysis. Nomination needs a newly measured candidate "
-        "with an ordinary full Evaluate in this Attempt; an exact historical Kernel task may be "
-        "rejected as a duplicate and cannot be adopted in this Session."
+        else _AUTOMATIC_HISTORICAL_REUSE
     )
     return (
-        prefix.rstrip() + "\n\n" + ancestry + "## Trust and measurement reuse\n\n"
-        + trust_prefix.strip() + "\n\n" + reuse + "\n\n"
-        + trust_tail.strip() + "\n\n" + trust_private + "\n"
+        prefix.rstrip()
+        + "\n\n"
+        + ancestry
+        + "## Trust and measurement reuse\n\n"
+        + trust_prefix.strip()
+        + "\n\n"
+        + reuse
+        + "\n\n"
+        + trust_tail.strip()
+        + "\n\n"
+        + claims.strip()
+        + "\n\n"
+        + trust_private
+        + "\n"
     )

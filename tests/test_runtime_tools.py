@@ -29,6 +29,7 @@ from runtime_tools import (
     runtime_query,
     update_direction,
 )
+from runtime_tools import _register_attempt_report as real_register_report
 from runtime_tools import runtime_journal as real_runtime_journal
 
 
@@ -38,9 +39,11 @@ def _change_direction(context: Any, request: dict[str, Any]) -> dict[str, Any]:
         request = {
             "hypothesis_status": "unresolved",
             "supporting_experiment_ids": [
-                item["experiment_id"] for item in _fake_visible(context, "experiments")
+                item["experiment_id"]
+                for item in _fake_visible(context, "experiments")
                 if item["direction_id"] == request["direction_id"]
-            ], **request,
+            ],
+            **request,
         }
     return update_direction(context, request)
 
@@ -172,9 +175,7 @@ def _runtime_contract(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             }
         )
     )
-    (contract / "environment.json").write_text(
-        json.dumps({"schema_version": 1, "dsl": "triton"})
-    )
+    (contract / "environment.json").write_text(json.dumps({"schema_version": 1, "dsl": "triton"}))
     (contract / "limits.json").write_text(
         json.dumps({"schema_version": 1, "session_timeout_seconds": 60})
     )
@@ -299,12 +300,38 @@ def _fake_direction_views(context: Any) -> dict[str, dict[str, Any]]:
     return directions
 
 
+def _fake_own_open_directions(context: Any) -> set[str]:
+    latest = {
+        str(event["direction_id"]): str(event["action"])
+        for event in _fake_state(context)["direction_events"]
+        if event["action"] not in {"propose", "suggest"}
+    }
+    return {direction_id for direction_id, action in latest.items() if action == "start"}
+
+
+def _fake_direction_query_views(context: Any) -> dict[str, dict[str, Any]]:
+    directions = _fake_direction_views(context)
+    own_open = _fake_own_open_directions(context)
+    for direction_id, direction in directions.items():
+        if direction["status"] == "in_progress":
+            ownership = "self" if direction_id in own_open else "other"
+            direction["status"] = f"in_progress({ownership})"
+    return directions
+
+
 def _fake_citable_profile_results(context: Any) -> list[dict[str, Any]]:
     # The Runtime projection comes from observations, not Experiment subjects.
-    return deepcopy(_FAKE_PROFILES.setdefault(str(context.workspace), [{
-        "kernel_artifact_digest": "sha256:" + "d" * 64,
-        "result_artifact_digest": "sha256:" + "f" * 64,
-    }]))
+    return deepcopy(
+        _FAKE_PROFILES.setdefault(
+            str(context.workspace),
+            [
+                {
+                    "kernel_artifact_digest": "sha256:" + "d" * 64,
+                    "result_artifact_digest": "sha256:" + "f" * 64,
+                }
+            ],
+        )
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -360,14 +387,7 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                     }
                     if direction_id not in started and len(started) >= 3:
                         raise ValueError("Direction advancement limit exceeded: maximum=3")
-                    in_progress = sorted(
-                        visible_direction_id
-                        for visible_direction_id, visible_direction in _fake_direction_views(
-                            context
-                        ).items()
-                        if visible_direction["status"] == "in_progress"
-                        and visible_direction_id != direction_id
-                    )
+                    in_progress = sorted(_fake_own_open_directions(context) - {direction_id})
                     if in_progress:
                         raise ValueError(
                             "Only one Direction may be in progress at a time: "
@@ -408,12 +428,12 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                         "status": value["status"],
                         "hypothesis_status": value["hypothesis_status"],
                     }
-                    for value in _fake_direction_views(context).values()
+                    for value in _fake_direction_query_views(context).values()
                 ]
             }
         if command == "load-direction":
             try:
-                return _fake_direction_views(context)[str(request["direction_id"])]
+                return _fake_direction_query_views(context)[str(request["direction_id"])]
             except KeyError as error:
                 raise ValueError(
                     "Direction ID is outside the current Attempt's visible history"
@@ -440,7 +460,11 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
             if direction is None:
                 raise ValueError("Experiment Direction is outside visible history")
             if direction["status"] not in {
-                "in_progress", "completed", "abandoned", "blocked", "deferred",
+                "in_progress",
+                "completed",
+                "abandoned",
+                "blocked",
+                "deferred",
             }:
                 raise ValueError(
                     "Experiment Direction must be in progress or closed; current status is proposed"
@@ -852,9 +876,7 @@ def test_optimizer_suggestion_error_keeps_precise_issue_and_recovery() -> None:
     assert response["issues"][0]["path"] == "request.action"
     assert response["issues"][0]["code"] == "forbidden_action"
     assert response["recovery"] == recovery
-    assert response["request_schema"]["oneOf"][0]["properties"]["action"] == {
-        "const": "propose"
-    }
+    assert response["request_schema"]["oneOf"][0]["properties"]["action"] == {"const": "propose"}
 
 
 def test_suggested_direction_start_error_keeps_precise_recovery() -> None:
@@ -906,7 +928,7 @@ def test_attempt_report_error_returns_actionable_direction_recovery() -> None:
     ]
     assert response["recovery"][0]["tool"] == "list-directions"
     assert response["recovery"][1]["tool"] == "list-experiments"
-    assert "close every in_progress Direction" in response["recovery"][2]["instruction"]
+    assert "close every in_progress(self) Direction" in response["recovery"][2]["instruction"]
 
 
 def test_attempt_report_validates_and_atomically_publishes_once(tmp_path: Path) -> None:
@@ -1028,7 +1050,7 @@ def test_direction_journal_can_be_recorded_listed_and_loaded(tmp_path: Path) -> 
             {
                 "direction_id": direction_id,
                 "name": "vectorize loads",
-                "status": "in_progress",
+                "status": "in_progress(self)",
                 "hypothesis_status": "unresolved",
             }
         ]
@@ -1089,7 +1111,7 @@ def test_direction_reads_include_frozen_history_without_provenance(
             {
                 "direction_id": direction_id,
                 "name": "vectorize loads",
-                "status": "in_progress",
+                "status": "in_progress(other)",
                 "hypothesis_status": "unresolved",
             }
         ]
@@ -1199,7 +1221,7 @@ def test_attempt_may_explore_only_one_direction_at_a_time(tmp_path: Path) -> Non
                 "analysis": "incorrectly interleave two explorations",
             },
         )
-    assert load_direction(context, {"direction_id": first})["status"] == "in_progress"
+    assert load_direction(context, {"direction_id": first})["status"] == "in_progress(self)"
     assert load_direction(context, {"direction_id": second})["status"] == "proposed"
 
     _record_diagnostic_experiment(context, first)
@@ -1219,7 +1241,29 @@ def test_attempt_may_explore_only_one_direction_at_a_time(tmp_path: Path) -> Non
             "analysis": "begin only after the first Direction is closed",
         },
     )
-    assert load_direction(context, {"direction_id": second})["status"] == "in_progress"
+    assert load_direction(context, {"direction_id": second})["status"] == "in_progress(self)"
+
+
+def test_attempt_report_ignores_visible_peers_open_directions(tmp_path: Path) -> None:
+    peer = _context(tmp_path / "peer")
+    peer_direction_id = _propose_and_start_direction(peer)
+    context = _context(tmp_path / "reader")
+    _FAKE_HISTORY[str(context.workspace)] = {
+        "direction_events": deepcopy(_fake_state(peer)["direction_events"]),
+        "experiments": [],
+    }
+    # A peer's open work must not prevent this Attempt starting or reporting its own work.
+    own_direction_id, receipt = _completed_test_experiment(context)
+    assert load_direction(context, {"direction_id": own_direction_id})["status"] == "completed"
+    assert load_direction(context, {"direction_id": peer_direction_id})["status"] == (
+        "in_progress(other)"
+    )
+    report = attempt_report(context, _report(str(receipt["experiment_id"])))
+    assert report["report_status"] == "candidate_ready"
+    assert load_direction(peer, {"direction_id": peer_direction_id})["status"] == (
+        "in_progress(self)"
+    )
+    assert _fake_direction_views(context)[peer_direction_id]["status"] == "in_progress"
 
 
 def test_attempt_report_rejects_unexperimented_direction_left_in_progress(
@@ -1252,7 +1296,7 @@ def test_attempt_report_rejects_unexperimented_direction_left_in_progress(
 
 @pytest.mark.parametrize("action", ["complete", "abandon", "block", "defer"])
 @pytest.mark.parametrize("has_experiment", [False, True])
-def test_direction_event_validation_requires_experiment_for_every_closure(
+def test_direction_event_validation_allows_unresolved_closure_without_experiment(
     tmp_path: Path, action: str, has_experiment: bool
 ) -> None:
     context = _context(tmp_path)
@@ -1266,8 +1310,7 @@ def test_direction_event_validation_requires_experiment_for_every_closure(
         event["supporting_experiment_ids"] = [receipt["experiment_id"]]
         assert runtime_tools._validate_direction_events([event], "journal") == [event]
     else:
-        with pytest.raises(ValueError, match=f"Direction {action} requires supporting Experiments"):
-            runtime_tools._validate_direction_events([event], "journal")
+        assert runtime_tools._validate_direction_events([event], "journal") == [event]
 
 
 def test_experiment_journal_can_be_listed_and_loaded_by_id(
@@ -1393,7 +1436,8 @@ def test_attempt_report_rejects_invalid_lists_before_publication(tmp_path: Path)
     [["not-a-trial"], ["not-a-trial"] * 2, [123], ["sha256:" + "a" * 64] * 65],
 )
 def test_attempt_report_rejects_invalid_contributing_result_artifact_digests(
-    tmp_path: Path, trials: list[object],
+    tmp_path: Path,
+    trials: list[object],
 ) -> None:
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
@@ -1408,7 +1452,8 @@ def test_attempt_report_rejects_invalid_contributing_result_artifact_digests(
 
 @pytest.mark.parametrize("suffixes", ["", "ab", "ba", "baba", "a" * 64])
 def test_attempt_report_normalizes_contributing_result_artifact_digests(
-    tmp_path: Path, suffixes: str,
+    tmp_path: Path,
+    suffixes: str,
 ) -> None:
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
@@ -1438,13 +1483,18 @@ def test_attempt_report_rejects_incomplete_profile_evidence(tmp_path: Path) -> N
     assert not context.report_path.exists()
 
 
-@pytest.mark.parametrize(("field", "value"), [
-    ("kernel_artifact_digest", "sha256:" + "1" * 64),
-    ("result_artifact_digest", "sha256:" + "1" * 64),
-    ("result_artifact_digest", "sha256:" + "1" * 64),
-])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("kernel_artifact_digest", "sha256:" + "1" * 64),
+        ("result_artifact_digest", "sha256:" + "1" * 64),
+        ("result_artifact_digest", "sha256:" + "1" * 64),
+    ],
+)
 def test_attempt_report_rejects_profile_not_observed_by_runtime(
-    tmp_path: Path, field: str, value: str,
+    tmp_path: Path,
+    field: str,
+    value: str,
 ) -> None:
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
@@ -1465,10 +1515,12 @@ def test_attempt_report_can_cite_a_profile_without_any_experiment_reference(tmp_
     _direction_id, receipt = _completed_test_experiment(context)
     prior_journal = deepcopy(_fake_state(context))
     # A visible historical or newly measured Profile need not be in this Journal.
-    _FAKE_PROFILES[str(context.workspace)] = [{
-        "kernel_artifact_digest": "sha256:" + "2" * 64,
-        "result_artifact_digest": "sha256:" + "4" * 64,
-    }]
+    _FAKE_PROFILES[str(context.workspace)] = [
+        {
+            "kernel_artifact_digest": "sha256:" + "2" * 64,
+            "result_artifact_digest": "sha256:" + "4" * 64,
+        }
+    ]
     report = _report(str(receipt["experiment_id"]))
     profile = report["profile_evidence"]
     assert isinstance(profile, dict)
@@ -1488,8 +1540,13 @@ def test_attempt_report_can_cite_a_profile_without_any_experiment_reference(tmp_
 def test_blocked_report_can_cite_profile_without_creating_a_journal(tmp_path: Path) -> None:
     context = _context(tmp_path)
     report = _report("unused")
-    report.update(status="blocked", final_candidate=None, blocker="cannot repair the candidate",
-                  findings=[], contributing_result_artifact_digests=[])
+    report.update(
+        status="blocked",
+        final_candidate=None,
+        blocker="cannot repair the candidate",
+        findings=[],
+        contributing_result_artifact_digests=[],
+    )
 
     assert attempt_report(context, report)["report_status"] == "blocked"
     assert _REGISTERED_REPORTS[-1]["experiments"] == []
@@ -1742,9 +1799,7 @@ def test_gateway_execute_preserves_canonical_evaluation_result(
 
     monkeypatch.setattr(runtime_tools, "_post", fake_post)
 
-    response = gateway_execute(
-        context, {"operation": "evaluate", "latency_prediction": "retained"}
-    )
+    response = gateway_execute(context, {"operation": "evaluate", "latency_prediction": "retained"})
 
     assert "evaluation" not in response
     assert response["result"] == {
@@ -2037,3 +2092,98 @@ def test_an_unreachable_runtime_still_fails_fast(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(RuntimeError, match="Runtime service is unavailable"):
         runtime_tools._post("http://runtime.invalid", "cap", "/v1/operations", {})
+
+
+@pytest.mark.parametrize("experiments_enabled", [False, True])
+@pytest.mark.parametrize("root_cause_mode", ["null", "omitted"])
+def test_attempt_report_allows_unknown_cause_and_direct_claim_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    experiments_enabled: bool,
+    root_cause_mode: str,
+) -> None:
+    context = _context(tmp_path)
+    if experiments_enabled:
+        _, receipt = _completed_test_experiment(context)
+        request = _report(receipt["experiment_id"])
+    else:
+        monkeypatch.setattr(runtime_tools, "_tool_modules", lambda: frozenset())
+        request = _report("experiment_" + "0" * 32)
+    findings = request["findings"]
+    assert isinstance(findings, list)
+    finding = findings[0]
+    assert isinstance(finding, dict)
+    finding.pop("supporting_experiment_ids")
+    finding["root_cause"] = None
+    if root_cause_mode == "omitted":
+        finding.pop("root_cause")
+    finding.update(
+        claim="The measured implementation completed correctly",
+        claim_kind="observation",
+        assessment="unresolved",
+        scope="this exact Kernel and input",
+        supporting_results=[
+            {
+                "kernel_artifact_digest": "sha256:" + "a" * 64,
+                "result_artifact_digests": ["sha256:" + "b" * 64],
+            }
+        ],
+    )
+    receipt = attempt_report(context, request)
+    assert receipt["status"] == "published"
+    saved = json.loads(context.report_path.read_text())["findings"][0]
+    assert saved["root_cause"] is None
+    assert saved["supporting_experiment_ids"] == []
+    assert saved["supporting_results"] == finding["supporting_results"]
+
+
+def test_report_receipt_persists_effective_assessment_without_echoing_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context(tmp_path)
+    context.working_kernel = context.workspace / "work/kernel"
+    _, experiment = _completed_test_experiment(context)
+    request = _report(experiment["experiment_id"])
+    findings = request["findings"]
+    assert isinstance(findings, list)
+    findings[0]["assessment"] = "refuted"
+    notes = [{"path": "findings.0", "reason": "No tested scope; judgment remains unresolved"}]
+
+    def post(_url: str, _capability: str, _route: str, value: dict[str, Any]) -> dict[str, Any]:
+        accepted = deepcopy(value["report"])
+        accepted["findings"][0]["assessment"] = "unresolved"
+        accepted["findings"][0]["assessment_notes"] = ["No tested scope"]
+        return {"result": {"status": "registered", "report": accepted, "assessment_notes": notes}}
+
+    monkeypatch.setattr(runtime_tools, "_register_attempt_report", real_register_report)
+    monkeypatch.setattr(runtime_tools, "_post", post)
+    monkeypatch.setattr(runtime_tools, "_candidate", lambda _path: {})
+    receipt = attempt_report(context, request)
+    saved = json.loads(context.report_path.read_text())
+    assert saved["findings"][0]["assessment"] == "unresolved"
+    assert saved["findings"][0]["assessment_notes"] == ["No tested scope"]
+    assert receipt["assessment_notes"] == notes
+    assert "report" not in receipt
+
+
+@pytest.mark.parametrize("accepted", [None, {}, {"attempt_id": "another", "status": "blocked"}])
+def test_report_receipt_rejects_wrong_accepted_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    accepted: object,
+) -> None:
+    context = _context(tmp_path)
+    context.working_kernel = context.workspace / "work/kernel"
+    monkeypatch.setattr(runtime_tools, "_candidate", lambda _path: {})
+    monkeypatch.setattr(
+        runtime_tools,
+        "_post",
+        lambda *_args: {
+            "result": {"status": "registered", "report": accepted},
+        },
+    )
+    with pytest.raises(ValueError, match="invalid accepted report"):
+        real_register_report(
+            context, {"attempt_id": context.attempt_id, "status": "candidate_ready"}
+        )

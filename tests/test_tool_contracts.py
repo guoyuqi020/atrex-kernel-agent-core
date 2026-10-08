@@ -216,12 +216,9 @@ def test_attempt_report_recovery_explains_how_to_close_open_directions() -> None
         "tool": "list-experiments",
         "request": {"file": "scratch/experiments-index.json"},
     }
-    assert "close every in_progress Direction" in recovery[2]["instruction"]
+    assert "close every in_progress(self) Direction" in recovery[2]["instruction"]
     assert "complete, abandon, block, and defer all require" in recovery[2]["instruction"]
-    assert (
-        "Every Experiment needs at least one real Kernel-bound Gateway Result"
-        in recovery[2]["instruction"]
-    )
+    assert "unresolved permits empty support" in recovery[2]["instruction"]
     assert "failed attempt-report publishes nothing" in recovery[3]["instruction"]
     assert "then retry" in recovery[3]["instruction"]
     assert "never retry after a successful response" in recovery[3]["instruction"]
@@ -244,7 +241,7 @@ def test_direction_schema_and_recovery_describe_all_closure_requirements() -> No
     assert "complete, abandon, block, and defer each require" in schema["oneOf"][1]["description"]
     assert "hypothesis_status" in schema["oneOf"][1]["description"]
     assert "Before complete, abandon, block, or defer" in recovery[1]["instruction"]
-    assert "at least one real Kernel-bound Gateway Result" in recovery[1]["instruction"]
+    assert "unresolved with empty support" in recovery[1]["instruction"]
 
 
 def test_tool_schemas_drop_disabled_cross_module_links() -> None:
@@ -268,12 +265,32 @@ def test_direction_concurrency_recovery_says_to_close_the_active_direction() -> 
         for item in recovery
         if "direction_concurrency_conflict" in item.get("instruction", "")
     )
-    assert "continue the existing in-progress Direction" in instruction
+    assert "continue the existing in_progress(self) Direction" in instruction
     assert "complete, abandon, defer, or block" in instruction
-    assert "Retry start only after no other Direction is in progress" in instruction
+    assert "Retry start only after this Attempt has no in_progress(self) Direction" in instruction
 
     issue = local_validation_issue(
         "Only one Direction may be in progress at a time: requested_direction_id=direction_b"
     )
     assert issue["path"] == "direction_id"
     assert issue["code"] == "direction_concurrency_conflict"
+
+
+@pytest.mark.parametrize("experiments_enabled", [False, True])
+def test_claim_schema_support_is_independent_of_experiment_module(
+    experiments_enabled: bool,
+) -> None:
+    schema = tool_request_schema("attempt-report", experiments_enabled=experiments_enabled)
+    assert schema is not None
+    finding = schema["properties"]["findings"]["items"]
+    assert finding["properties"]["assessment"]["default"] == "unresolved"
+    assert finding["properties"]["root_cause"]["oneOf"][-1] == {"type": "null"}
+    assert "root_cause" not in finding["required"]
+    assert "supporting_results" in finding["properties"]
+    assert "supporting_experiment_ids" not in finding["required"]
+    direction = tool_request_schema("update-direction", experiments_enabled=experiments_enabled)
+    assert direction is not None
+    update = direction["oneOf"][1]
+    assert "supporting_results" in update["properties"]
+    if experiments_enabled:
+        assert update["properties"]["supporting_experiment_ids"].get("minItems", 0) == 0

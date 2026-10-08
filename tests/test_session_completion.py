@@ -52,6 +52,8 @@ class _Outcome:
     error: Exception | None = None
     observation_errors: tuple[str, ...] = ()
     policy_diagnostics: tuple[str, ...] = ()
+    failure_kind: str | None = None
+    provider_error_code: str | None = None
 
 
 class _Runtime:
@@ -113,6 +115,8 @@ class _Runtime:
             session_id=request.session_id or "",
             budget_exhausted=outcome.budget_exhausted,
             response_usage_complete=outcome.response_usage_complete,
+            failure_kind=outcome.failure_kind,
+            provider_error_code=outcome.provider_error_code,
         )
         self.results.append(result)
         return result
@@ -151,7 +155,7 @@ def _setup(
     return context, runtime, clock
 
 
-def _config(retries: int = 2) -> AgentConfig:
+def _config(retries: int = 2, *, output_retries: int = 2) -> AgentConfig:
     return AgentConfig(
         "codex",
         "max",
@@ -159,6 +163,7 @@ def _config(retries: int = 2) -> AgentConfig:
         {},
         model="test-model",
         report_completion_retries=retries,
+        output_limit_recovery_retries=output_retries,
     )
 
 
@@ -856,3 +861,263 @@ def test_reconciled_child_usage_counts_towards_budget_before_report_completion(
     assert execute_agent_session(context, _config(), "prompt", completion_check=unexpected) == 125
     report = _read_json(context.token_usage_path)
     assert report["consumed"] == 313_187 and report["budget_exhausted"]
+
+
+def _output_limit(**overrides: Any) -> _Outcome:
+    return replace(
+        _Outcome(
+            exit_status=1,
+            failure_kind="output_limit",
+            provider_error_code="max_output_tokens",
+        ),
+        **overrides,
+    )
+
+
+def test_output_limit_recovers_twice_with_saved_candidate_and_remaining_allowances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, runtime, clock = _setup(
+        tmp_path,
+        monkeypatch,
+        [_output_limit(elapsed=7), _output_limit(elapsed=8), _Outcome()],
+    )
+    candidate = tmp_path / "work/kernel/kernel.py"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("# partial implementation already saved\n")
+    plan = tmp_path / "scratch/plan.md"
+    plan.parent.mkdir()
+    plan.write_text("Next: finish the tail mask and compile.\n")
+    checks: list[float] = []
+    successes: list[bool] = []
+
+    def completion_check(remaining: float) -> str | None:
+        checks.append(remaining)
+        clock.now += 2
+        return "Submit only the report." if len(runtime.requests) < 3 else None
+
+    assert execute_agent_session(
+        context,
+        _config(),
+        "original optimization contract",
+        system_prompt="fixed public DSL and enabled tools",
+        completion_check=completion_check,
+        on_success=lambda: successes.append(True),
+    ) == 0
+    assert len(runtime.requests) == 3
+    assert len({request.session_id for request in runtime.requests}) == 3
+    assert successes == [True]
+    assert candidate.read_text() == "# partial implementation already saved\n"
+    assert plan.read_text() == "Next: finish the tail mask and compile.\n"
+    assert [request.usage_budget for request in runtime.requests] == [1000, 984, 968]
+    assert [request.timeout_s for request in runtime.requests] == [55, 46, 36]
+    assert checks == [48, 38, 36]
+    for request in runtime.requests:
+        assert request.workspace == context.workspace
+        assert request.system_prompt == "fixed public DSL and enabled tools"
+        assert request.model == "test-model"
+        assert request.reasoning_effort == "max"
+        assert request.session_settings == _config().session_settings
+        assert request.prompt.startswith("original optimization contract")
+    for number, request in enumerate(runtime.requests[1:], 1):
+        assert request.prompt.count("## Continue the existing attempt") == 1
+        assert f'"recovery_number": {number}' in request.prompt
+        assert "work/kernel/kernel.py" in request.prompt
+        assert "scratch/plan.md" in request.prompt
+        assert "do not initialize or reset" in request.prompt
+    usage = _read_json(context.token_usage_path)
+    assert usage["consumed"] == 48
+    assert usage["session_count"] == 3
+    assert context.session_trace_path is not None
+    metadata = _read_json(context.session_trace_path / "session.json")
+    assert metadata["report_completion"] == {
+        "state": "complete", "retries_used": 0, "max_retries": 2,
+    }
+    assert metadata["output_limit_recovery"] == {
+        "state": "recovered", "retries_used": 2, "max_retries": 2,
+    }
+    assert [row["purpose"] for row in metadata["segments"]] == [
+        "initial", "optimization_recovery", "optimization_recovery",
+    ]
+    assert [row["failure_kind"] for row in metadata["segments"]] == [
+        "output_limit", "output_limit", None,
+    ]
+    assert [row["provider_error_code"] for row in metadata["segments"]] == [
+        "max_output_tokens", "max_output_tokens", None,
+    ]
+    assert metadata["failure_kind"] is None
+    for number in (1, 2):
+        trace = context.session_trace_path / f"continuations/{number:03d}"
+        assert (trace / "input/prompt.md").read_text() == runtime.requests[number].prompt
+        assert (trace / "provider/stdout.stream-json").read_text() == runtime.results[number].stdout
+
+
+def test_output_limit_then_report_only_failure_never_reopens_optimization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, runtime, _clock = _setup(
+        tmp_path, monkeypatch, [_output_limit(), _Outcome(), _output_limit(), _Outcome()]
+    )
+
+    def completion_check(_remaining: float) -> str | None:
+        return f"Report only {len(runtime.requests)}" if len(runtime.requests) < 4 else None
+
+    assert execute_agent_session(
+        context, _config(), "optimize", completion_check=completion_check,
+    ) == 0
+    assert len(runtime.requests) == 4
+    assert [request.prompt for request in runtime.requests[2:]] == [
+        "Report only 2", "Report only 3",
+    ]
+    assert context.session_trace_path is not None
+    metadata = _read_json(context.session_trace_path / "session.json")
+    assert metadata["output_limit_recovery"]["retries_used"] == 1
+    assert metadata["report_completion"]["retries_used"] == 2
+    assert [row["purpose"] for row in metadata["segments"]] == [
+        "initial", "optimization_recovery", "report_completion", "report_completion",
+    ]
+
+
+@pytest.mark.parametrize("report_output_limit", [False, True])
+def test_three_output_limit_failures_use_separate_report_only_allowance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    report_output_limit: bool,
+) -> None:
+    context, runtime, _clock = _setup(
+        tmp_path, monkeypatch,
+        [_output_limit()] * 3 + [_output_limit() if report_output_limit else _Outcome()] * 2,
+    )
+    assert execute_agent_session(
+        context,
+        _config(),
+        "optimize",
+        completion_check=lambda _remaining: "Existing evidence only. Submit report.",
+    ) == 1
+    assert len(runtime.requests) == 5
+    assert [request.prompt for request in runtime.requests[3:]] == [
+        "Existing evidence only. Submit report.", "Existing evidence only. Submit report.",
+    ]
+    assert context.session_trace_path is not None
+    metadata = _read_json(context.session_trace_path / "session.json")
+    assert metadata["output_limit_recovery"] == {
+        "state": "exhausted", "retries_used": 2, "max_retries": 2,
+    }
+    assert metadata["report_completion"] == {
+        "state": "exhausted", "retries_used": 2, "max_retries": 2,
+    }
+    assert metadata["failure_kind"] == "output_limit"
+    assert _read_json(context.token_usage_path)["consumed"] == 80
+
+
+@pytest.mark.parametrize("report_retries", [0, 2])
+def test_zero_output_retries_disables_optimization_recovery_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    report_retries: int,
+) -> None:
+    context, runtime, _clock = _setup(
+        tmp_path, monkeypatch, [_output_limit()] + [_Outcome()] * report_retries
+    )
+    assert execute_agent_session(
+        context,
+        _config(report_retries, output_retries=0),
+        "optimize",
+        completion_check=lambda _remaining: "Report only.",
+    ) == 1
+    assert [request.prompt for request in runtime.requests] == [
+        "optimize", *(["Report only."] * report_retries),
+    ]
+    assert context.session_trace_path is not None
+    metadata = _read_json(context.session_trace_path / "session.json")
+    assert metadata["output_limit_recovery"]["retries_used"] == 0
+
+
+def test_output_limit_with_accepted_report_does_not_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, runtime, _clock = _setup(tmp_path, monkeypatch, [_output_limit()])
+    assert execute_agent_session(
+        context, _config(), "optimize", completion_check=lambda _remaining: None,
+    ) == 0
+    assert len(runtime.requests) == 1
+    assert context.session_trace_path is not None
+    metadata = _read_json(context.session_trace_path / "session.json")
+    assert metadata["report_completion"]["state"] == "complete"
+    assert metadata["output_limit_recovery"]["retries_used"] == 0
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_status"),
+    [
+        pytest.param(_output_limit(timed_out=True), 124, id="timeout"),
+        pytest.param(_output_limit(budget_exhausted=True), 125, id="backend-budget"),
+        pytest.param(
+            _output_limit(usage=TokenUsage(1000, 0, 0, 0, 1000, "exact")),
+            125, id="measured-budget",
+        ),
+        pytest.param(_output_limit(raw_provider_capture_complete=False), 126, id="capture"),
+        pytest.param(_output_limit(policy_diagnostics=("policy violation",)), 126, id="policy"),
+        pytest.param(_output_limit(response_usage_complete=False), 126, id="response-usage"),
+        pytest.param(_output_limit(usage=TokenUsage.unavailable()), 126, id="unknown-usage"),
+        pytest.param(
+            _output_limit(usage=TokenUsage(10, 3, 2, 1, 16, "partial")),
+            126, id="partial-usage",
+        ),
+    ],
+)
+def test_output_limit_cannot_bypass_terminal_safety_gates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: _Outcome,
+    expected_status: int,
+) -> None:
+    context, runtime, _clock = _setup(tmp_path, monkeypatch, [outcome])
+
+    def unexpected(_remaining: float) -> None:
+        pytest.fail("unrecoverable session must not inspect reports or start recovery")
+
+    assert execute_agent_session(
+        context, _config(), "optimize", completion_check=unexpected,
+    ) == expected_status
+    assert len(runtime.requests) == 1
+
+
+def test_output_limit_snapshot_time_counts_against_shared_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, runtime, clock = _setup(tmp_path, monkeypatch, [_output_limit()])
+
+    def slow_snapshot(*args: Any, **kwargs: Any) -> str:
+        clock.now += 60
+        return "continue"
+
+    monkeypatch.setattr("sessions.session_segments.recovery_prompt", slow_snapshot)
+    assert execute_agent_session(
+        context, _config(), "optimize", completion_check=lambda _remaining: "Report only.",
+    ) == 124
+    assert len(runtime.requests) == 1
+    assert _read_json(context.token_usage_path)["consumed"] == 16
+
+
+@pytest.mark.parametrize("exit_status", [-2, -9, 130])
+def test_output_limit_classification_cannot_restart_a_cancelled_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_status: int,
+) -> None:
+    context, runtime, _clock = _setup(
+        tmp_path, monkeypatch, [_output_limit(exit_status=exit_status)]
+    )
+
+    def unexpected(_remaining: float) -> None:
+        pytest.fail("cancelled process must not trigger report inspection or recovery")
+
+    assert execute_agent_session(
+        context, _config(), "optimize", completion_check=unexpected,
+    ) == exit_status
+    assert len(runtime.requests) == 1
