@@ -76,7 +76,7 @@ def test_complex_local_schemas_track_validator_top_level_fields() -> None:
     assert report is not None
     assert bootstrap_report is not None
     assert set(experiment["required"]) == _EXPERIMENT_FIELDS
-    assert set(experiment["properties"]) == _EXPERIMENT_FIELDS
+    assert set(experiment["properties"]) == _EXPERIMENT_FIELDS | {"knowledge_used"}
     assert set(report["required"]) == _REPORT_FIELDS
     assert set(report["properties"]) == _REPORT_FIELDS
     assert experiment["additionalProperties"] is False

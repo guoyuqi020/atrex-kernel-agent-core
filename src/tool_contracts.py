@@ -307,6 +307,22 @@ def _experiment_schema(*, allow_baseline: bool, directions_enabled: bool = True)
             "action": {"enum": actions},
         }
     )
+    schema["properties"]["knowledge_used"] = {
+        "type": "array",
+        "default": [],
+        "items": _object(
+            {
+                field: {**_text(), "pattern": r"\S"}
+                for field in ("record_id", "finding", "application")
+            }
+        ),
+        "description": (
+            "Optional knowledge actually used in this Experiment. Cite an exact known Record ID, "
+            "the relevant finding and why it applies, and how you applied it. These declarations "
+            "do not establish current Kernel correctness or performance; use measured Results. "
+            "Historical citations remain valid when Wiki queries are disabled."
+        ),
+    }
     if not directions_enabled:
         schema["properties"].pop("direction_id")
         schema["required"].remove("direction_id")
@@ -439,6 +455,7 @@ def _attempt_report_schema(
 
 _SCRATCH_FILE = _object({"file": {"type": "string", "pattern": r"^scratch/.+"}})
 _SCHEMAS: dict[str, dict[str, Any]] = {
+    "wiki-query": _object({"query": {**_text(), "pattern": r"\S"}}),
     "kernel-artifact-read": _object(
         {
             "kernel_artifact_digest": _digest(),

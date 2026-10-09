@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 
-from runtime_contract import load_live_contract
+from runtime_contract import load_live_contract, wiki_enabled
 
 _DEFAULT = frozenset({"directions", "experiments"})
 _RUNTIME_TOOL = "agent/optimizer/src/runtime_tools.py"
@@ -33,6 +33,29 @@ def active_modules() -> frozenset[str]:
     ):
         raise ValueError("Runtime contract tool modules are invalid")
     return frozenset(modules)
+
+
+def wiki_tool_instructions() -> str:
+    """Describe the optional Wiki only when this Session can actually query it."""
+    if not wiki_enabled():
+        return ""
+    return (
+        "\n\n## GPU Wiki query\n\n"
+        "Use `wiki-query` when you need hardware, DSL, or optimization-mechanism knowledge "
+        "for a specific decision; prefer a focused query over repeated broad searches. "
+        "Write only a nonempty query string to a JSON file under scratch/, for example "
+        '`{"query":"What are the vectorized-load requirements for this target and DSL?"}`, then run:\n\n'
+        "```bash\n"
+        f"python3 {_RUNTIME_TOOL} wiki-query --request scratch/wiki-query.json\n"
+        "```\n\n"
+        "Runtime supplies the current operator, DSL, target hardware, and Attempt identity. "
+        "The response contains query_id, records, and notes; each record includes its served "
+        "knowledge and no second read tool is needed. Preserve exact Record IDs for knowledge "
+        "actually used. Check architecture, toolchain, applicability, and evidence limitations. "
+        "Historical measurements and interpretations are hypotheses for this task, not current "
+        "correctness or performance evidence; validate relevant claims using the evaluation tools. "
+        "An unavailable service or an empty result is not by itself a blocker."
+    )
 
 
 def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) -> str:
@@ -110,6 +133,8 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         "result-artifact-read",
         "kernel-pareto-frontier",
     ]
+    if wiki_enabled():
+        commands.append("wiki-query")
     if "directions" in modules:
         commands += [
             "update-direction",
@@ -161,6 +186,11 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         "Artifact bindings or other full-record details. For a known Kernel digest, `find-kernel-experiments` "
         'takes {"kernel_artifact_digest":"sha256:<digest>"} and returns visible experiment_ids. '
         "Record each meaningful measured candidate decision with record-experiment. "
+        'Its optional knowledge_used defaults to []; entries are {"record_id":"<actual known Record ID>",'
+        '"finding":"relevant knowledge and why it applies","application":"how it informed this experiment"}. '
+        "Use exactly these three nonblank strings and cite only actual known IDs; omit or use [] when none. "
+        "Historical citations need no new Wiki query and remain usable when that tool is disabled. "
+        "They declare influences, not proof of current correctness, speedup, or causation; cite measured Results. "
         "Cite real Kernel-bound Result Artifacts: keep_after, restore_before, and adopt require "
         "both before and after; abandon_direction permits one null side, but not both; "
         "Bootstrap baseline requires before=null and a measured after. "

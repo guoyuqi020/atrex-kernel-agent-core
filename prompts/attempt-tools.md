@@ -377,7 +377,7 @@ previous closure. A merely `proposed` Direction must still be started first.
 Late recording uses the same Trial visibility, ownership, and evidence checks as ordinary recording.
 Use it to complete the Journal before terminal handoff, not to resume research without `start`.
 
-Each `record-experiment` request must contain exactly these fields:
+Each `record-experiment` request uses these required fields, with optional `knowledge_used`:
 
 ```json
 {
@@ -389,9 +389,21 @@ Each `record-experiment` request must contain exactly these fields:
   "after": {"result_artifact_digest": "sha256:<after-trial>"},
   "evidence": "concise before/after measurements and observations",
   "analysis": "what the evidence means, including whether the hypothesis held",
-  "action": "keep_after"
+  "action": "keep_after",
+  "knowledge_used": [{
+    "record_id": "<actual known Record ID>",
+    "finding": "the cited constraint and why it applies to this experiment",
+    "application": "the concrete implementation or experiment choice it informed"
+  }]
 }
 ```
+
+`knowledge_used` defaults to `[]`; omit it or use `[]` when no knowledge informed this Experiment.
+Each entry has exactly `record_id`, `finding`, and `application`, all nonblank strings. Copy an
+actual known Record ID; never invent one or submit the placeholder above. Historical citations
+remain usable when Wiki queries are disabled; no new query is required to cite existing knowledge.
+These entries declare influences, not proof of current correctness, speedup, or a causal explanation;
+support those claims with the relevant measured Results.
 
 `before` and `after` identify both measured sides using only their Result Artifact digests. Runtime resolves
 and freezes the selected Result Artifact and its exact Kernel Artifact when it records the

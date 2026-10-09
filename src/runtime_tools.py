@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from contexts.attempt import RuntimeAttemptContext
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
-from runtime_contract import load_live_contract, project_contract
+from runtime_contract import load_live_contract, project_contract, wiki_enabled
 from tool_contracts import local_validation_issue, tool_recovery, tool_request_schema
 
 _CANDIDATE_OPERATIONS = {
@@ -116,6 +116,10 @@ _REPORT_FIELDS = {
     "blocker",
 }
 RuntimeToolContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
+
+
+def _available_attempt_commands() -> tuple[str, ...]:
+    return _ATTEMPT_COMMANDS + (("wiki-query",) if wiki_enabled() else ())
 
 
 def _tool_modules() -> frozenset[str]:
@@ -800,6 +804,27 @@ def _dev_files(context: RuntimeToolContext, value: dict[str, Any]) -> list[dict[
     return files
 
 
+def wiki_query(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    """Query the optional trusted Wiki proxy without changing its knowledge content."""
+    if not wiki_enabled():
+        raise RuntimeError("GPU Wiki is disabled for this Session")
+    if not context.wiki_url or not context.wiki_capability:
+        raise RuntimeError("GPU Wiki capability is unavailable for this Session")
+    unknown = set(request) - {"query"}
+    if unknown:
+        raise ValueError(f"unknown Wiki request fields: {sorted(unknown)}")
+    query = request.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("Wiki request requires a non-empty query")
+    value = {"schema_version": 1, "attempt_id": context.attempt_id, "query": query}
+    value["idempotency_key"] = _idempotency_key("wiki", value)
+    response = _post(context.wiki_url, context.wiki_capability, "/v1/wiki/query", value)
+    content = response.get("content")
+    if not isinstance(content, dict):
+        raise RuntimeError("Runtime Wiki response has no Agent-readable content object")
+    return content
+
+
 def runtime_query(
     context: RuntimeToolContext,
     command: str,
@@ -1178,6 +1203,11 @@ def _validate_experiment_comparison(
 
 
 def record_experiment(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    _object_array(
+        request.get("knowledge_used", []),
+        "Experiment knowledge_used",
+        {"record_id", "finding", "application"},
+    )
     if request.get("before") is None and request.get("after") is None:
         raise ValueError(
             "Experiment requires at least one Gateway Result: before and after cannot both be null"
@@ -1248,7 +1278,10 @@ def _validate_experiment_entries(
     expected_fields = _EXPERIMENT_FIELDS | {"experiment_id", "sequence", "recorded_at"}
     validated: list[dict[str, Any]] = []
     for sequence, experiment in enumerate(experiments, start=1):
-        if not isinstance(experiment, dict) or set(experiment) != expected_fields:
+        if (
+            not isinstance(experiment, dict)
+            or set(experiment) - {"knowledge_used"} != expected_fields
+        ):
             raise ValueError(f"{label} contains a malformed entry")
         if experiment.get("sequence") != sequence:
             raise ValueError(f"{label} sequence must be contiguous")
@@ -1282,8 +1315,20 @@ def _validate_experiment_entries(
         if experiment.get("action") not in allowed_actions:
             raise ValueError("Experiment action is invalid")
         _validate_experiment_comparison(experiment, allow_baseline=allow_baseline)
-        validated.append(experiment)
+        validated.append(_experiment_knowledge(experiment))
     return validated
+
+
+def _experiment_knowledge(experiment: object) -> dict[str, Any]:
+    """Normalize historical omissions without modifying request or frozen record objects."""
+    if not isinstance(experiment, dict):
+        raise ValueError("Runtime returned an invalid Experiment record")
+    knowledge = _object_array(
+        experiment.get("knowledge_used", []),
+        "Experiment knowledge_used",
+        {"record_id", "finding", "application"},
+    )
+    return {**experiment, "knowledge_used": knowledge}
 
 
 def list_experiments(
@@ -1302,6 +1347,7 @@ def list_experiments(
     experiments = value.get("experiments")
     if set(value) != {"experiments"} or not isinstance(experiments, list):
         raise ValueError("Runtime returned an invalid Experiment index")
+    value = {"experiments": [_experiment_knowledge(experiment) for experiment in experiments]}
     _atomic_json(destination, value)
     return {
         "status": "completed",
@@ -1317,7 +1363,7 @@ def load_experiment(
     """Return one exact visible historical or current Experiment record."""
     if set(request) != {"experiment_id"}:
         raise ValueError("load-experiment request requires exactly experiment_id")
-    return runtime_journal(context, "load-experiment", request)
+    return _experiment_knowledge(runtime_journal(context, "load-experiment", request))
 
 
 def find_kernel_experiments(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
@@ -1822,12 +1868,13 @@ def _augment_agent_error(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in _ATTEMPT_COMMANDS:
+    available_commands = _available_attempt_commands()
+    for name in available_commands:
         command = commands.add_parser(name)
         command.add_argument("--request", required=True, type=Path)
     contract = commands.add_parser("runtime-contract")
     contract.add_argument("--output", required=True, type=Path)
-    contract.add_argument("--tool", choices=_ATTEMPT_COMMANDS)
+    contract.add_argument("--tool", choices=available_commands)
     contract.add_argument("--operation")
     args = parser.parse_args(argv)
     context: RuntimeToolContext | None = None
@@ -1867,6 +1914,8 @@ def main(argv: list[str] | None = None) -> int:
             result = gateway_execute(context, request)
         elif args.command in _RUNTIME_QUERY_COMMANDS:
             result = runtime_query(context, args.command, request)
+        elif args.command == "wiki-query":
+            result = wiki_query(context, request)
         elif args.command == "update-direction":
             result = update_direction(context, request)
         elif args.command == "list-directions":
