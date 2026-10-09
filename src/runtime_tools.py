@@ -610,8 +610,18 @@ def _evaluate_candidates(context: RuntimeToolContext, value: dict[str, Any]) -> 
                 "evaluate comparison has unknown fields; use method, baseline_path, and repeats"
             )
         repeats = comparison.get("repeats", 2)
-        if isinstance(repeats, bool) or not isinstance(repeats, int) or not 2 <= repeats <= 20:
-            raise ValueError("evaluate comparison.repeats must be an integer from 2 to 20")
+        if (
+            isinstance(repeats, bool)
+            or not isinstance(repeats, int)
+            or not 2 <= repeats <= 16
+            or repeats % 2
+        ):
+            raise ValueError(
+                "evaluate comparison.repeats must be an even integer from 2 to 16: "
+                f"2, 4, 6, 8, 10, 12, 14, 16; got {repeats!r}. "
+                "Unsupported native Agate ABBA schedules have no Dev fallback; "
+                "2 means one A, B, B, A block"
+            )
         if value.get("mode", "full") != "full":
             raise ValueError("evaluate mode must be full when comparison is supplied")
         wire_comparison = dict(comparison)

@@ -104,10 +104,14 @@ def _evaluate_schema() -> dict[str, Any]:
                             "repeats": {
                                 "type": "integer",
                                 "minimum": 2,
-                                "maximum": 20,
+                                "maximum": 16,
+                                "multipleOf": 2,
                                 "default": 2,
                                 "description": (
-                                    "Observations per side; 2 schedules A, B, B, A. "
+                                    "Even integer observations per side, from 2 to 16; "
+                                    "2 means one A, B, B, A block. "
+                                    "Use native-compatible ABBA schedules; "
+                                    "unsupported values are rejected without Dev fallback. "
                                     "The schedule must fit Runtime's allocation budget."
                                 ),
                             },
@@ -736,9 +740,12 @@ def _evaluate_recovery(detail: str) -> list[dict[str, Any]]:
     elif field.startswith("comparison") or field in {"baseline_path", "repeats"}:
         instruction = (
             "Set comparison.method to abba and name a workspace .py file or Kernel "
-            "directory in comparison.baseline_path. Set comparison.repeats from 2 to 20 "
-            "(default 2). ABBA requires full mode (normally omitted); "
-            "use 2 when a larger schedule exceeds Runtime's allocation budget."
+            "directory in comparison.baseline_path. Set comparison.repeats to an even integer "
+            "from 2 to 16 (default 2), not a boolean, float, or string. "
+            "2 means two observations per side in one A, B, B, A block. "
+            "Unsupported native Agate schedules are rejected without Dev fallback. "
+            "ABBA requires full mode (normally omitted); use 2 when a larger schedule "
+            "exceeds Runtime's allocation budget."
         )
     elif field == "mode" and "comparison" in detail:
         instruction = (

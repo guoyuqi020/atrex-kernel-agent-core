@@ -99,7 +99,11 @@ Python file is uploaded as `kernel.py`; a directory preserves its relative file 
 absolute/traversal paths, Runtime control paths, and empty source directories are rejected. The tool uploads
 both sources and computes the request identity from their contents, not the local paths.
 Do not embed `baseline` or `candidate` source payloads in the request.
-Both sides use the same evaluation inputs. The live schema defines the permitted paired schedule.
+Both sides use the same evaluation inputs. `comparison.repeats` is the number of observations
+per side: an even integer from 2 to 16, default 2. The value 2 means one A, B, B, A block;
+4 means two blocks. Booleans, floats, strings, odd values, and values outside this range are
+rejected. ABBA requires a schedule supported by native Agate Eval; unsupported schedules
+never fall back to Dev.
 Each Shape batch runs both sides within one allocation; different Shape batches may use different
 allocations. ABBA requires full correctness and timing; omit `mode` or set it to `"full"`.
 It is always exploratory, does not retain or promote a Kernel or Agent, and does not satisfy the
