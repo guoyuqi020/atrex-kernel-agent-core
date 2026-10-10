@@ -74,6 +74,8 @@ if __name__ == "__main__":
     sys.modules["orchestrator.optimize"] = sys.modules[__name__]
     setattr(_orchestrator_package, "optimize", sys.modules[__name__])
 
+from orchestrator.process_launch import optimizer_entrypoint
+
 try:
     from . import agent_runtime as _agent_runtime
     from .campaign import Campaign
@@ -306,7 +308,7 @@ def dispatch_framework_campaigns(
             )
             cmd = [
                 sys.executable,
-                str(Path(__file__).resolve()),
+                str(optimizer_entrypoint()),
                 *common_argv,
                 "--framework",
                 framework,
@@ -317,7 +319,13 @@ def dispatch_framework_campaigns(
             ]
             if arch:
                 cmd += ["--arch", arch]
+            from aka.legacy.application.processes import child_environment as launch_environment
             child_environment = os.environ.copy()
+            for name, value in launch_environment().items():
+                if value is None:
+                    child_environment.pop(name, None)
+                else:
+                    child_environment[name] = value
             child_environment["ATREX_ENVIRONMENT_RECOVERY_OWNER"] = "0"
             proc = subprocess.Popen(
                 cmd,
@@ -838,7 +846,7 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
         configure_recovery(
             workspace_base=workspace_base,
             raw_argv=raw_argv,
-            optimize_script=Path(__file__),
+            optimize_script=optimizer_entrypoint(),
             sandbox_hardware=sandbox_hardware,
             ssh_target=args.sandbox_ssh,
             ssh_init=args.sandbox_ssh_init,
@@ -1017,7 +1025,7 @@ def _run_main(argv: Optional[list[str]] = None) -> int:
             signal.signal(handled_signal, previous_handler)
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def _run_application(argv: Optional[list[str]] = None) -> int:
     try:
         result = _run_main(argv)
     except EnvironmentUnavailable:
@@ -1039,6 +1047,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         return ENVIRONMENT_TEMPFAIL
     return result
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    from orchestrator._bootstrap import run
+
+    return run(argv)
 
 
 if __name__ == "__main__":

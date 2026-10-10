@@ -19,8 +19,9 @@ It coordinates coding agents, GPU profiling, correctness checks, performance ver
 isolation, recovery, and final packaging while keeping acceptance and termination under mechanical
 supervisor control.
 
-The repository has one supported entry point, `orchestrator/optimize.py`. The internal
-`long_horizon/` package supplies the episode engine; it is not a second CLI.
+The optimization application can be launched through `orchestrator/optimize.py`
+or the installed `aka optimize` command. Both select the application through Core;
+the internal `long_horizon/` package supplies its episode engine.
 The supervisor establishes an evaluator-backed V0 and, when enabled, a framework-native V1. Coding
 agents then explore fast, full, or goal episodes in isolated Git worktrees. The supervisor owns
 correctness, production policy, performance verification, and promotion; every outcome is recorded
@@ -128,6 +129,20 @@ If AKA is useful in your work, please cite the [Atrex paper](https://arxiv.org/a
   url           = {https://arxiv.org/abs/2607.14541}
 }
 ```
+
+## Application framework
+
+The existing script keeps its arguments and default behavior. After installing
+the Core, Contracts, Bootstrap and Optimization packages, the new command is:
+
+```sh
+aka optimize --repo-root /path/to/aka -- \
+  --op-dir /path/to/problem --platform L20N --framework Triton
+```
+
+`--repo-root` selects the matching AKA checkout; `--op-dir` selects the native
+Atrex-Bench or SOL problem. See the [installation and application selection
+guide](docs/application-plugin-migration.md) and [Core interface](docs/plugin-framework.md).
 
 ## License
 

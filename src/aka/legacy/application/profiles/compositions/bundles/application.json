@@ -1,0 +1,4 @@
+{"api_version": 1, "entries": [
+  {"id": "application", "name": "aka.legacy.application.plugin", "required": true,
+   "config": {"repo_root": "${aka:repo_root}"}}
+]}
