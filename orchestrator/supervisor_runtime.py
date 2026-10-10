@@ -814,8 +814,10 @@ class SupervisorRuntime:
                 self.publish_evaluation_log(capability.workspace, staged)
                 if process.returncode == 0:
                     self.publish_legacy_outputs(capability.workspace, staged, parsed)
-            from supervisor.projection import project_response
+            from supervisor.projection import credential_values, project_response
             return project_response(process, generalized=self.config.private_reference_dir is not None,
+                                    operation=parsed.kind if kind == "gateway" and parsed is not None else None,
+                                    private_values=credential_values(environment),
                                     wiki=kind == "wiki", private_paths=(str(staged), str(self.root),
                                     str(self.config.private_reference_dir or ""), str(ROOT),
                                     self.config.url, str(self.config.atrex_bench_root or "")))

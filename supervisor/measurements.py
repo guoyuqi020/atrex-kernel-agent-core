@@ -178,10 +178,11 @@ def _typed_six_case_evidence(store, record_id: str) -> bool:
 
 def execute(runtime, capability, staged, args, argv, environment, command, *,
             reuse_completed=False, reuse_correctness=False) -> dict:
-    from supervisor.gateway import measurement_inputs, metadata_speedup_mean
+    from supervisor.gateway import measurement_inputs, metadata_speedup_mean, public_dev_output
     from orchestrator.supervisor_runtime import ROOT, RequestDispatchTimeout
     from supervisor.projection import (
-        SOURCE_ERROR_PREFIX, candidate_source_rejection, project_response, source_error_from_stdout,
+        GATEWAY_ERROR_PREFIX, SOURCE_ERROR_PREFIX, candidate_source_rejection, credential_values,
+        project_response, source_error_from_stdout,
     )
     store = runtime.measurements
     try:
@@ -235,6 +236,9 @@ def execute(runtime, capability, staged, args, argv, environment, command, *,
                               "stdout": process.stdout, "stderr": process.stderr})
                 runtime.audit_process(capability, "gateway", argv, process, task.record_id)
                 response = project_response(process, generalized=runtime.config.private_reference_dir is not None,
+                    operation=operation,
+                    public_dev=operation == "dev" and public_dev_output(request["options"]["command"]),
+                    private_values=credential_values(env),
                     private_paths=(str(staged), str(runtime.root), str(store.root), str(ROOT), str(runtime.config.private_reference_dir or ""),
                                    runtime.config.url, str(runtime.config.atrex_bench_root or "")))
                 responses.append(response)
@@ -276,9 +280,10 @@ def execute(runtime, capability, staged, args, argv, environment, command, *,
             # last result marker represents the sample selected for aggregation.
             lines = response["stdout"].splitlines()
             markers = [index for index, line in enumerate(lines)
-                       if (prefix and line.startswith(prefix)) or line.startswith(SOURCE_ERROR_PREFIX)]
+                       if (prefix and line.startswith(prefix)) or line.startswith((SOURCE_ERROR_PREFIX, GATEWAY_ERROR_PREFIX))]
             for index in markers:
-                marker_prefix = SOURCE_ERROR_PREFIX if lines[index].startswith(SOURCE_ERROR_PREFIX) else prefix
+                marker_prefix = next((item for item in (SOURCE_ERROR_PREFIX, GATEWAY_ERROR_PREFIX)
+                                      if lines[index].startswith(item)), prefix)
                 value = (aggregated_result if aggregated_result is not None and index == markers[-1]
                          else json.loads(lines[index][len(marker_prefix):]))
                 lines[index] = marker_prefix + json.dumps(value | identity)

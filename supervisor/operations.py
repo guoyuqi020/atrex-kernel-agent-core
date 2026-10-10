@@ -14,7 +14,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-from supervisor.projection import SOURCE_ERROR_PREFIX, candidate_source_rejection
+from supervisor.projection import (
+    GATEWAY_ERROR_PREFIX, SOURCE_ERROR_PREFIX, candidate_source_rejection,
+    emit_gateway_error, gateway_error_result, gateway_errors_from_stdout,
+)
 
 
 def _workload_shape_ids(path: Path) -> list[str]:
@@ -44,14 +47,18 @@ def _workload_shape_ids(path: Path) -> list[str]:
     return ids
 
 
-def _abba_batch_error(gateway, batch: str, message: str, stderr) -> RuntimeError:
+def _abba_batch_error(gateway, batch: str, message: str, stderr, stdout="") -> RuntimeError:
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", errors="replace")
     detail = gateway.bounded_actionable_diagnostic(stderr, limit=4000) or "(empty)"
+    errors = [dict(error, operation="same_allocation_abba", batch=batch)
+              for error in gateway_errors_from_stdout(stdout or "")]
+    for error in errors:
+        print(GATEWAY_ERROR_PREFIX + json.dumps(gateway_error_result(error)))
     return RuntimeError(
         f"{batch} {message}; no completed comparison is available. "
         "Inspect the Supervisor diagnostics and remote job state; do not resubmit blindly.\n"
-        f"Nested stderr:\n{detail}"
+        f"Nested stderr:\n{detail}",
     )
 
 
@@ -91,8 +98,10 @@ def diagnostic(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
         return process.returncode or 1
     job = gateway.parse_job_response(process.stdout or "")
     if not job or job.get("status") != "succeeded" or not isinstance(job.get("result"), dict):
-        print(json.dumps({"status": "failed", "operation": args.kind,
-                          "error": (job or {}).get("error") or "Gateway returned no result"}))
+        if not emit_gateway_error(process, args.kind):
+            print(GATEWAY_ERROR_PREFIX + json.dumps(gateway_error_result({
+                "operation": args.kind, "error": process.stderr or "Gateway returned no result", "outcome": "unknown",
+            })))
         return process.returncode or 1
     prefix = "[sandbox] CHECK_JSON=" if args.kind == "check" else "[sandbox] DISASSEMBLE_JSON="
     print(prefix + json.dumps(job["result"]))
@@ -196,9 +205,10 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
         except subprocess.TimeoutExpired as exc:
             raise _abba_batch_error(
                 gateway, batch, "timed out; remote execution may have completed", exc.stderr,
+                exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout,
             ) from exc
         if process.returncode:
-            raise _abba_batch_error(gateway, batch, f"exited with code {process.returncode}", process.stderr)
+            raise _abba_batch_error(gateway, batch, f"exited with code {process.returncode}", process.stderr, process.stdout)
         try:
             payload = parse_abba_payload(process.stdout)
             validate_batch(payload, schedule, shapes)
@@ -206,7 +216,7 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
                 checkpoints.save(identity, payload, stdout=process.stdout, stderr=process.stderr)
             payloads.append(payload)
         except ValueError as exc:
-            raise _abba_batch_error(gateway, batch, f"returned an invalid result ({exc})", process.stderr) from exc
+            raise _abba_batch_error(gateway, batch, f"returned an invalid result ({exc})", process.stderr, process.stdout) from exc
     try:
         value = abba(merge_abba_batch_payloads(payloads, schedule, ids), schedule, ids, args.comparison_repeats)
     except (ValueError, KeyError, TypeError, AttributeError) as exc:

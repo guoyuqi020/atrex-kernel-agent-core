@@ -99,9 +99,12 @@ from orchestrator.ssh_health import (  # noqa: E402
     combined_health_command,
 )
 from supervisor.errors import GatewayConfigurationError  # noqa: E402
+from supervisor.measurement_records import JOB_ROOT_ENV  # noqa: E402
 from supervisor.projection import (  # noqa: E402
-    NUMERICAL_RESULT_PREFIX, SOURCE_ERROR_PREFIX, bounded_text, candidate_source_rejection,
-    numerical_result, profile_result,
+    GATEWAY_ERROR_PREFIX, NUMERICAL_RESULT_PREFIX, SOURCE_ERROR_PREFIX,
+    bounded_text, candidate_source_rejection, credential_values, emit_gateway_error,
+    gateway_error_result, gateway_http_error_result,
+    numerical_result, profile_result, redact_diagnostics,
 )
 from supervisor.gateway_jobs import (  # noqa: E402
     SubmissionRejected, bundle_digest, command_identity, eval_retry_kind,
@@ -358,7 +361,8 @@ def _run_environment_query(args: argparse.Namespace) -> int:
         try:
             value = _gateway_json(url, "GET", path, None, 120 if args.env_force else 30)
         except GatewayHTTPError as exc:
-            raise SystemExit(f"sandbox: env gateway request failed: {exc}") from exc
+            print(GATEWAY_ERROR_PREFIX + json.dumps(gateway_http_error_result(exc.status, exc.detail, "env")))
+            return 1
     else:
         if executable is None:
             raise SystemExit("sandbox: agate not found and no explicit --url was provided")
@@ -380,10 +384,11 @@ def _run_environment_query(args: argparse.Namespace) -> int:
             check=False,
         )
         if completed.returncode:
-            raise SystemExit(
-                "sandbox: env query failed: "
-                + bounded_text(completed.stderr or completed.stdout, 2000)
-            )
+            if not emit_gateway_error(completed, "env"):
+                print(GATEWAY_ERROR_PREFIX + json.dumps(gateway_error_result({
+                    "operation": "env", "error": completed.stderr or completed.stdout,
+                })))
+            return completed.returncode
         try:
             value = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
@@ -855,6 +860,12 @@ def _is_unsafe_target_command(parts: list[str]) -> bool:
     ):
         return False
     return any(_mentions_evaluator_target(token) for token in command)
+
+
+def public_dev_output(command: list[str]) -> bool:
+    """Custom Dev probes retain their output; canonical private evaluators do not."""
+    return not (_is_test_kernel_command(command) or _is_numerical_probe_command(command)
+                or _is_profile_command(command) or _is_unsafe_target_command(command))
 
 
 def _option_value(parts: list[str], name: str, default: Any = None) -> Any:
@@ -4034,6 +4045,9 @@ def _record_profile_job(
          "result": profile_result(job["result"], generalized=True)}
         if generalized else job
     )
+    visible = redact_diagnostics(visible, private_values=credential_values(dict(os.environ)),
+        private_paths=(str(workspace), str(REPO_ROOT), str(private_reference_dir(workspace) or ""),
+                       os.environ.get(JOB_ROOT_ENV, "")))
     for relative in sync_paths:
         path = PurePosixPath(relative)
         if not path.parts or path.parts[0] not in {"profiles", "scratch"}:
@@ -4253,17 +4267,15 @@ def _run_typed_gateway(
                 file=sys.stderr,
             )
             return None
+        print(GATEWAY_ERROR_PREFIX + json.dumps(gateway_http_error_result(
+            exc.status, exc.detail, "evaluate" if kind == "run" else kind,
+        )))
         if exc.status == 429 or exc.status >= 500:
             if not generalized:
                 print(str(exc), file=sys.stderr)
             print("sandbox: Gateway submission outcome may be unknown; inspect the private checkpoint before resubmitting.", file=sys.stderr)
             return ENVIRONMENT_TEMPFAIL
-        if generalized:
-            raise SystemExit(
-                f"sandbox: generalized {kind} gateway request failed; "
-                "hidden-case details withheld"
-            ) from exc
-        raise SystemExit(f"sandbox: {kind} gateway request failed: {exc}") from exc
+        return 1
     except FileNotFoundError as exc:
         raise SystemExit(
             "sandbox: agate not found and no explicit --url was provided; "
@@ -4292,6 +4304,7 @@ def _run_typed_gateway(
             print(proc.stderr.rstrip(), file=sys.stderr)
         job = parse_job_response(proc.stdout or "")
         if job is None:
+            emit_gateway_error(proc, "evaluate" if kind == "run" else kind)
             rejection = submission_rejection(proc)
             if kind == "run" and rejection is None and proc.returncode:
                 print(
@@ -4316,14 +4329,7 @@ def _run_typed_gateway(
             infrastructure = (
                 eval_retry_kind(job) if kind == "run" else retry_kind(job)
             ) is not None
-            if generalized:
-                print(
-                    "[sandbox] generalized evaluation failed; hidden-case details withheld; "
-                    f"job_id={job.get('job_id')}",
-                    file=sys.stderr,
-                )
-            else:
-                print(json.dumps(job, ensure_ascii=False))
+            emit_gateway_error(proc, "evaluate" if kind == "run" else kind)
             if infrastructure:
                 return ENVIRONMENT_TEMPFAIL
             return proc.returncode or 1
@@ -5049,6 +5055,10 @@ def _main(argv: list[str] | None = None) -> int:
         return proc.returncode or 2
 
     result = job.get("result") or {}
+    if job.get("status") != "succeeded" or job.get("error") is not None:
+        emit_gateway_error(proc, "profile" if profile_command else "dev")
+        if not isinstance(result, dict) or not result:
+            return proc.returncode or 1
     remote_stdout = str(result.get("stdout") or "")
     remote_stderr = str(result.get("stderr") or "")
     try:
@@ -5297,6 +5307,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         if isinstance(exc, GatewayConfigurationError):
             raise SystemExit(f"sandbox: {exc} {exc.response['error']['next_action']}") from None
+        # Preserve the exception message, not the full traceback or private
+        # evaluator streams. The outer Runtime redacts paths and credentials.
+        if isinstance(exc, Exception) or (isinstance(exc, SystemExit) and not isinstance(exc.code, int)):
+            # Do not re-run argument parsing while another exception is active.
+            operation = _option_value(arguments, "--kind", category)
+            if operation == "run":
+                operation = "same_allocation_abba" if _option_value(arguments, "--baseline-path") else "evaluate"
+            print(GATEWAY_ERROR_PREFIX + json.dumps(gateway_error_result({
+                "operation": operation, "error": str(exc),
+                **({"outcome": "unknown"} if isinstance(exc, Exception) else {}),
+            })))
         raise
     finally:
         for signum, handler in previous_handlers.items():

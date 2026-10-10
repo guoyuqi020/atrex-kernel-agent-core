@@ -67,7 +67,7 @@ Task reservations are protected by OS file locks, released on process exit. A se
 
 Responses use operation-specific result markers and CLI exit codes. Structured result markers include `gateway_record_id` and `kernel_id`; ABBA also includes `baseline_kernel_id`. Arbitrary Dev stdout need not be evaluator output: a separate `[sandbox] RECORD_JSON=` line carries the operation, status and IDs. A Dev probe before Kernel creation has a Gateway Record but no Kernel ID. Raw Gateway envelopes and private inputs never become the record-read result.
 
-Recording preserves non-marker stdout lines already allowed by the Supervisor's result projection, including warnings, progress notes and diagnostics, in their original order. With one measurement, only the record identities are injected into result markers; stdout is not replaced by a marker-only response. Hidden-case filtering, path redaction and output limits still apply before recording.
+Recording preserves non-marker stdout lines already allowed by the Supervisor's result projection, including warnings, progress notes and diagnostics, in their original order. With one measurement, only the record identities are injected into result markers; stdout is not replaced by a marker-only response. Failed custom Dev probes retain their stdout/stderr. Other GPU failures preserve the original `error` through `[sandbox] GATEWAY_ERROR_JSON=` or the operation-specific result marker, with the same Record/Kernel IDs. Private evaluator logs remain filtered; credential/path redaction and output limits apply before recording. See [original GPU errors](supervisor-runtime.md#original-gpu-errors).
 
 ```bash
 python3 tools/sandbox.py --kind run --no-sync
@@ -113,8 +113,8 @@ A confirmed HTTP 400 source-validation rejection that names the **candidate** re
 `error.code: "candidate_source_rejected"`, `error_class: "code"` and
 `job_submitted: false`. Evaluate, Profile, Check and Disassemble use the same
 projection. It lists at most 16 forbidden candidate imports, attributes and string
-matching rules; matched literal contents, reference/input diagnostics, private
-paths and raw Gateway output remain hidden. For example:
+matching rules, plus the redacted original rejection in `gateway_error`.
+Private paths, credentials, full requests and evaluator logs remain hidden. For example:
 
 ```json
 {

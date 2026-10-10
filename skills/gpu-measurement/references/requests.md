@@ -94,6 +94,13 @@ Typed-only options fail if the fallback cannot honor them.
 For hidden-Shape Typed Profile, `--sync scratch/profile` writes a projected
 `scratch/profile/gateway_profile.json`; raw profiler artifacts and private diagnostics are not synchronized.
 
+Profile maps Agate's `dram_pct` to `dram_throughput_pct` and preserves per-Kernel
+`traffic` counters: `dram_bytes`, `dram_bytes_read`, `dram_bytes_write`, `l2_bytes`,
+`duration_ns` and `achieved_dram_gbps`, when supplied. Missing counters are omitted,
+not reported as zero. High `memory_sol_pct` alone does not establish DRAM saturation
+or an algorithmic speedup limit; inspect the DRAM/traffic counters and request
+subsystem-specific counters when the limiting unit remains unclear.
+
 Reuse recorded facts across Episodes. Replace these placeholder IDs with values
 returned by the Runtime; these queries do not submit GPU jobs:
 

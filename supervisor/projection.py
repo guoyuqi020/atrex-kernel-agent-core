@@ -15,6 +15,18 @@ MAX_AGENT_DISASSEMBLY_BYTES = 64 * 1024
 MAX_AGENT_PROFILE_METRICS = 64
 MAX_AGENT_DIAGNOSTICS = 16
 SOURCE_ERROR_PREFIX = "[sandbox] SOURCE_ERROR_JSON="
+GATEWAY_ERROR_PREFIX = "[sandbox] GATEWAY_ERROR_JSON="
+MAX_GATEWAY_ERROR_BYTES = 64 * 1024
+_SECRET_KEY = re.compile(
+    r"(?:authorization|password|ak|sk|atrex_aka_identity_key|agate[_-]?(?:ak|sk|token)|"
+    r"(?:.*[_-])?(?:api|access|secret)[_-]?key(?:[_-]?id)?|"
+    r".*(?:token|password|secret|credential).*)", re.I
+)
+_SECRET_TEXT = re.compile(
+    r"(?i)(\b(?:AGATE_AK|AGATE_SK|AGATE_TOKEN|API_KEY|ACCESS_KEY|SECRET_KEY|PASSWORD)"
+    r"\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;\"'\]}]+)"
+    r"|(\b(?:Authorization\s*:\s*)?Bearer\s+)[A-Za-z0-9._~+/-]+=*"
+)
 _SOURCE_VIOLATION = re.compile(
     r"(?:Blocked import|Forbidden attribute access): [A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
     r"|Forbidden string literal matching: [A-Za-z_]\w*"
@@ -77,9 +89,13 @@ def candidate_source_rejection(process: subprocess.CompletedProcess) -> dict[str
         if match:
             # Do not expose the matched literal, which may contain paths/data.
             violations.append(f"Forbidden string literal matching: {match[1]}")
-    return source_error_result({"error": {
+    result = source_error_result({"error": {
         "code": "candidate_source_rejected", "job_submitted": False, "violations": violations,
     }})
+    raw = gateway_error_from_process(process, "source_validation")
+    if raw is not None:
+        result["gateway_error"] = raw["error"]
+    return result
 
 
 def source_error_from_stdout(stdout: str) -> dict[str, Any] | None:
@@ -90,6 +106,105 @@ def source_error_from_stdout(stdout: str) -> dict[str, Any] | None:
             except (ValueError, TypeError, AttributeError):
                 continue
     return None
+
+
+def bounded_error(value: Any) -> Any:
+    """Retain the original JSON error, with an explicit bound for oversized errors."""
+    # Redact credential fields before truncation can turn a JSON tree into a
+    # text fragment and lose the field names needed for credential redaction.
+    value = redact_diagnostics(value)
+    rendered = json.dumps(value, ensure_ascii=False, allow_nan=False)
+    if len(rendered.encode("utf-8")) <= MAX_GATEWAY_ERROR_BYTES:
+        return value
+    text, omitted = _bounded_utf8_text(rendered, MAX_GATEWAY_ERROR_BYTES, marker="error")
+    return {"truncated": True, "bytes_omitted": omitted, "raw_error": text}
+
+
+def gateway_error_result(value: dict[str, Any]) -> dict[str, Any]:
+    """The original error, not the private request or the full Gateway envelope."""
+    if "error" not in value:
+        raise ValueError("Gateway error response omitted error")
+    result = {key: value[key] for key in (
+        "operation", "status", "job_id", "trace_id", "http_status", "batch", "outcome",
+    ) if key in value and (value[key] is None or type(value[key]) in {str, int})}
+    result["error"] = bounded_error(value["error"])
+    return result
+
+
+def gateway_error_from_process(process: subprocess.CompletedProcess, operation: str) -> dict[str, Any] | None:
+    """Extract an actual job/HTTP error; a nonzero exit alone proves no submission outcome."""
+    try:
+        payload = json.loads(process.stdout or "")
+    except (ValueError, TypeError):
+        payload = None
+    if isinstance(payload, dict) and (
+        payload.get("error") is not None or (payload.get("job_id") and payload.get("status") != "succeeded")
+    ):
+        return gateway_error_result({"operation": operation, **payload, "error": payload.get("error")})
+    rejection = submission_rejection(process)
+    if rejection is None:
+        return None
+    error = payload.get("detail") if isinstance(payload, dict) and "detail" in payload else (
+        payload if payload is not None else process.stderr or process.stdout or ""
+    )
+    return gateway_error_result({"operation": operation, "status": "rejected",
+                                 "http_status": rejection.status, "error": error})
+
+
+def gateway_errors_from_stdout(stdout: str) -> list[dict[str, Any]]:
+    errors = []
+    for line in stdout.splitlines():
+        if line.startswith(GATEWAY_ERROR_PREFIX):
+            try:
+                value = json.loads(line[len(GATEWAY_ERROR_PREFIX):])
+                if isinstance(value, dict):
+                    errors.append(gateway_error_result(value))
+            except (ValueError, TypeError):
+                continue
+    return errors
+
+
+def credential_values(environment: dict[str, str]) -> tuple[str, ...]:
+    return tuple(value for key, value in environment.items()
+                 if _SECRET_KEY.fullmatch(key) and isinstance(value, str) and len(value) >= 4)
+
+
+def emit_gateway_error(process: subprocess.CompletedProcess, operation: str) -> bool:
+    result = gateway_error_from_process(process, operation)
+    if result is not None:
+        print(GATEWAY_ERROR_PREFIX + json.dumps(result, ensure_ascii=False))
+    return result is not None
+
+
+def gateway_http_error_result(status: int, detail: str, operation: str) -> dict[str, Any]:
+    try:
+        body = json.loads(detail)
+    except ValueError:
+        body = detail
+    error = body.get("error", body.get("detail", body)) if isinstance(body, dict) else body
+    return gateway_error_result({
+        "operation": operation, "http_status": status, "error": error,
+        "outcome": "failed" if operation == "env" else (
+            "unknown" if status >= 500 and status != 503 else "rejected"
+        ),
+    })
+
+
+def redact_diagnostics(value: Any, *, private_paths=(), private_values=()) -> Any:
+    """Redact paths and credentials without replacing the original error classification/text."""
+    if isinstance(value, dict):
+        return {key: "<redacted>" if _SECRET_KEY.fullmatch(key) else
+                redact_diagnostics(item, private_paths=private_paths, private_values=private_values)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_diagnostics(item, private_paths=private_paths, private_values=private_values) for item in value]
+    if not isinstance(value, str):
+        return value
+    for secret in sorted(set(item for item in private_values if item), key=len, reverse=True):
+        value = value.replace(secret, "<redacted>")
+    for path in sorted(set(item for item in private_paths if item), key=len, reverse=True):
+        value = value.replace(path, "<supervisor>")
+    return _SECRET_TEXT.sub(lambda match: (match[1] or match[2]) + "<redacted>", value)
 
 def _finite_number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -149,6 +264,7 @@ def _agent_profile_kernel(raw: dict[str, Any], *, total_duration_us: float) -> d
 
     aliases = {
         "mem_sol_pct": "memory_sol_pct",
+        "dram_pct": "dram_throughput_pct",
         "registers": "registers_per_thread",
         "smem_bytes": "shared_memory_bytes",
     }
@@ -171,6 +287,23 @@ def _agent_profile_kernel(raw: dict[str, Any], *, total_duration_us: float) -> d
             value = _finite_number(raw.get(source)) if source else None
         if value is not None:
             projected[field] = value
+
+    # SOL is a roll-up of memory subsystems, not DRAM bandwidth. Preserve the
+    # measured traffic alongside it so callers can distinguish cache activity
+    # from device-memory traffic without exposing private workload parameters.
+    traffic = raw.get("traffic")
+    if isinstance(traffic, dict):
+        projected_traffic = {}
+        for key in (
+            "dram_bytes", "dram_bytes_read", "dram_bytes_write", "l2_bytes",
+            "duration_ns", "achieved_dram_gbps",
+        ):
+            value = _finite_number(traffic.get(key))
+            if value is not None and value >= 0:
+                projected_traffic[key] = traffic[key]
+        if projected_traffic:
+            projected["traffic"] = projected_traffic
+
     bound = raw.get("bound")
     if isinstance(bound, str) and bound:
         projected["bound"] = bounded_text(bound, 64)
@@ -256,10 +389,7 @@ def profile_result(result: dict[str, Any], *, generalized: bool = False) -> dict
         projected["summary"] = bounded_text(summary, 2000)
     error = result.get("error")
     if error:
-        projected["error"] = (
-            "Hidden-case diagnostics withheld; ask the operator to inspect the failure."
-            if generalized else bounded_text(error, 1000)
-        )
+        projected["error"] = bounded_error(error)
 
     projected["kernel_count"] = kernel_count
     if total_duration_us > 0.0:
@@ -391,7 +521,7 @@ def _agent_check_result(result: dict[str, Any]) -> dict[str, Any]:
             projected["diagnostics_omitted"] = len(diagnostics) - MAX_AGENT_DIAGNOSTICS
     error = result.get("error")
     if error:
-        projected["error"] = bounded_text(error, 4000)
+        projected["error"] = bounded_error(error)
     return projected
 
 def _bounded_utf8_text(
@@ -522,7 +652,7 @@ def _agent_disassembly_result(
             projected["assembly"]["bytes_omitted"] = bytes_omitted
     error = result.get("error")
     if error:
-        projected["error"] = bounded_text(error, 4000)
+        projected["error"] = bounded_error(error)
     return projected
 
 def _positive_number(value: object) -> float | None:
@@ -559,6 +689,8 @@ def evaluation(result: dict) -> dict:
         {key: bounded_text(item) for key, item in row.items() if key in {"stage", "shape_id", "message"}}
         for row in (result.get("actionable_diagnostics") or [])[:8] if isinstance(row, dict)
     ]
+    if result.get("error") is not None:
+        value["error"] = bounded_error(result["error"])
     return value
 
 
@@ -591,7 +723,8 @@ def numerical_result(payload: dict) -> dict:
     return public
 
 
-def project_response(process: subprocess.CompletedProcess, *, generalized=False, wiki=False, private_paths=()) -> dict:
+def project_response(process: subprocess.CompletedProcess, *, generalized=False, wiki=False,
+                     private_paths=(), private_values=(), public_dev=False, operation=None) -> dict:
     """Keep legacy sentinels parseable, bound diagnostics, omit transport envelopes."""
     stdout, stderr = process.stdout or "", process.stderr or ""
     numerical = any(line.startswith(NUMERICAL_RESULT_PREFIX) for line in stdout.splitlines())
@@ -601,50 +734,66 @@ def project_response(process: subprocess.CompletedProcess, *, generalized=False,
             "[test_kernel] RESULT_JSON=", "[sandbox] PROFILE_JSON=",
             "[sandbox] CHECK_JSON=", "[sandbox] DISASSEMBLE_JSON=",
             "[sandbox] ABBA_JSON=",
+            "[sandbox] ENV_JSON=",
             NUMERICAL_RESULT_PREFIX,
             SOURCE_ERROR_PREFIX,
+            GATEWAY_ERROR_PREFIX,
         ) if line.startswith(prefix)), None)
         if prefix:
             try:
                 raw = json.loads(line[len(prefix):])
                 if not isinstance(raw, dict):
                     raise ValueError("not an object")
-                if prefix == "[sandbox] ABBA_JSON=" and generalized and raw.get("error"):
-                    raw["error"] = "Hidden-case diagnostics withheld; ask the operator to inspect the failure."
+                raw = redact_diagnostics(raw, private_paths=private_paths, private_values=private_values)
                 formatter = {
                     "[test_kernel] RESULT_JSON=": evaluation,
                     "[sandbox] PROFILE_JSON=": lambda value: profile_result(value, generalized=generalized),
                     "[sandbox] CHECK_JSON=": _agent_check_result,
                     "[sandbox] DISASSEMBLE_JSON=": _agent_disassembly_result,
                     # compare() already emits abba()'s public metric projection.
-                    "[sandbox] ABBA_JSON=": dict,
+                    "[sandbox] ABBA_JSON=": lambda value: dict(value, error=bounded_error(value["error"])) if value.get("error") else dict(value),
+                    "[sandbox] ENV_JSON=": dict,
                     NUMERICAL_RESULT_PREFIX: numerical_result,
                     SOURCE_ERROR_PREFIX: source_error_result,
+                    GATEWAY_ERROR_PREFIX: gateway_error_result,
                 }[prefix]
-                projected.append(prefix + json.dumps(formatter(raw), ensure_ascii=False))
-            except (ValueError, TypeError):
+                value = redact_diagnostics(formatter(raw), private_paths=private_paths, private_values=private_values)
+                # Source-repair records can also carry the original rejection.
+                if prefix == SOURCE_ERROR_PREFIX and "gateway_error" in raw:
+                    value["gateway_error"] = redact_diagnostics(
+                        bounded_error(raw["gateway_error"]), private_paths=private_paths, private_values=private_values,
+                    )
+                projected.append(prefix + json.dumps(value, ensure_ascii=False))
+            except (ValueError, TypeError, RecursionError, OverflowError):
                 projected.append(json.dumps({"error": "Gateway result could not be projected"}))
         else:
-            projected.append(line)
+            projected.append(redact_diagnostics(line, private_paths=private_paths, private_values=private_values))
     stdout = "\n".join(projected) + ("\n" if projected else "")
-    if generalized and (process.returncode or numerical) and not wiki:
+    if generalized and (process.returncode or numerical) and not wiki and not public_dev and operation != "env":
         # A completed comparison can fail correctness while still providing
         # useful, public per-side results. Keep them without exposing raw logs.
         stdout = "\n".join(line for line in projected if line.startswith((
             "[test_kernel] RESULT_JSON=", "[sandbox] ABBA_JSON=",
-            NUMERICAL_RESULT_PREFIX, SOURCE_ERROR_PREFIX,
+            "[sandbox] PROFILE_JSON=", "[sandbox] CHECK_JSON=", "[sandbox] DISASSEMBLE_JSON=",
+            NUMERICAL_RESULT_PREFIX, SOURCE_ERROR_PREFIX, GATEWAY_ERROR_PREFIX,
         )))
-        stderr = (
-            "Candidate source rejected; fix the violations in SOURCE_ERROR_JSON and retry.\n"
-            if source_error_from_stdout(stdout) is not None
-            else "ABBA comparison failed; see ABBA_JSON for baseline/candidate results; hidden-case diagnostics withheld.\n"
-            if any(line.startswith("[sandbox] ABBA_JSON=") for line in projected)
-            else "GPU request failed; hidden-case diagnostics withheld. Ask the operator to inspect the failure.\n"
-        )
+        errors = gateway_errors_from_stdout(stdout)
+        if source_error_from_stdout(stdout) is not None:
+            stderr = "Candidate source rejected; fix the violations in SOURCE_ERROR_JSON and retry.\n"
+        elif errors:
+            from supervisor.errors import UNKNOWN_OUTCOME
+            stderr = UNKNOWN_OUTCOME + "\n" if any(error.get("outcome") == "unknown" for error in errors) else ""
+        elif stdout and not numerical:
+            # Operation-specific results already include failure/diagnostic
+            # fields. Do not contradict them with an infrastructure-sounding error.
+            stderr = ""
+        else:
+            stderr = "GPU request failed; hidden-case diagnostics withheld. Ask the operator to inspect the failure.\n"
         if numerical and process.returncode == 0:
             stderr = ""
-    for path in sorted((path for path in private_paths if path), key=len, reverse=True):
-        stdout, stderr = stdout.replace(path, "<supervisor>"), stderr.replace(path, "<supervisor>")
+    # Structured lines were redacted before JSON encoding. Re-running free-form
+    # regexes over encoded JSON can eat delimiters and corrupt result markers.
+    stderr = redact_diagnostics(stderr, private_paths=private_paths, private_values=private_values)
     result = {"exit_code": process.returncode, "stdout": stdout, "stderr": stderr}
     for key, limit in (("stdout", 256 * 1024 if wiki else 384 * 1024), ("stderr", 16 * 1024)):
         encoded = result[key].encode()
@@ -694,7 +843,7 @@ def _abba_side_metrics(
         if len(scores) == repeats and all(value is not None for value in scores)
         else None
     )
-    return {
+    result = {
         "correct": (
             len(successful) == repeats and set(by_shape) == set(shape_ids)
             and latency is not None
@@ -709,6 +858,18 @@ def _abba_side_metrics(
             (row["result"].get("max_rel_err") or 0 for row in successful), default=0,
         ),
     }
+    # Keep the evaluator's public failure diagnostics for the affected side;
+    # never forward the private per-run stdout_tail/stderr_tail logs.
+    for row in selected:
+        if isinstance(row.get("result"), dict) and row["result"].get("all_pass") is not True:
+            failure = evaluation(row["result"])
+            for key in ("failures", "actionable_diagnostics"):
+                if failure.get(key):
+                    result.setdefault(key, []).extend(failure[key])
+                    result[key] = result[key][:MAX_AGENT_DIAGNOSTICS]
+            if "error" in failure:
+                result["error"] = failure["error"]
+    return result
 
 def _agent_abba_public_result(
     payload: dict[str, Any],
@@ -765,7 +926,7 @@ def _agent_abba_public_result(
             for row in rows
         ],
         "shape_batch_count": payload.get("shape_batch_count", 1),
-        "error": bounded_text(payload.get("error"), 1000) if payload.get("error") else None,
+        "error": bounded_error(payload.get("error")) if payload.get("error") else None,
     }
 
 def abba(payload, schedule, shape_ids, repeats):
