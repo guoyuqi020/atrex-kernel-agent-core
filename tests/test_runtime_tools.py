@@ -2065,6 +2065,7 @@ def test_a_slow_operation_is_collected_on_reconnect(monkeypatch: pytest.MonkeyPa
     attempts: list[int] = []
 
     def urlopen(request: Any, timeout: float) -> Any:
+        assert timeout == 72 * 60 * 60
         attempts.append(len(attempts))
         if len(attempts) < 3:
             raise TimeoutError("read timed out")
@@ -2087,6 +2088,42 @@ def test_a_slow_operation_is_collected_on_reconnect(monkeypatch: pytest.MonkeyPa
         "result": {"status": "completed"}
     }
     assert len(attempts) == 3
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_timeout"),
+    [
+        ("/v1/operations", 72 * 60 * 60),
+        ("/proxy/v1/operations", 72 * 60 * 60),
+        ("/v1/runtime/queries", 600),
+        ("/v1/runtime/journals", 600),
+        ("/v1/wiki/query", 600),
+    ],
+)
+def test_only_gateway_requests_use_the_long_http_timeout(
+    monkeypatch: pytest.MonkeyPatch, path: str, expected_timeout: int,
+) -> None:
+    observed = []
+
+    class Response:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return b'{"status":"completed"}'
+
+    def urlopen(request: Any, timeout: float) -> Any:
+        observed.append(timeout)
+        return Response()
+
+    monkeypatch.setattr(runtime_tools.urllib.request, "urlopen", urlopen)
+    assert runtime_tools._post("http://runtime.invalid", "cap", path, {}) == {
+        "status": "completed"
+    }
+    assert observed == [expected_timeout]
 
 
 def test_an_unreachable_runtime_still_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:

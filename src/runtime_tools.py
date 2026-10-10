@@ -13,6 +13,7 @@ import os
 import stat
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -145,8 +146,9 @@ _MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _MAX_ERROR_RESPONSE_BYTES = 64 * 1024
 _HTTP_TIMEOUT_SECONDS = 600
-# Seven ten-minute reads outlast Runtime's own Agate wait, so a slow operation is
-# collected on a later reconnect instead of being abandoned half-finished.
+_GATEWAY_HTTP_TIMEOUT_SECONDS = 72 * 60 * 60
+# Runtime-local queries keep a bounded retry budget. Gateway commands wait for
+# their final result, subject to the owning Session/process lifetime.
 _MAX_TIMEOUT_RECONNECTS = 6
 
 
@@ -301,8 +303,13 @@ def _post(url: str, capability: str, path: str, value: object) -> dict[str, Any]
 
 
 def _exchange(request: urllib.request.Request) -> dict[str, Any]:
+    timeout = (
+        _GATEWAY_HTTP_TIMEOUT_SECONDS
+        if urllib.parse.urlsplit(request.full_url).path.endswith("/v1/operations")
+        else _HTTP_TIMEOUT_SECONDS
+    )
     try:
-        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read(_MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
         body = error.read(_MAX_ERROR_RESPONSE_BYTES + 1)
