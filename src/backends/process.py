@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from session_clock import active_time
 from session_transcript import record_provider_line
 
 DEPENDENCY_GUARD_POLL_SECONDS = 0.25
@@ -437,7 +438,8 @@ def run_bounded(
     env: dict[str, str] | None = None,
     observer: ProcessObserver | None = None,
 ) -> ProcessResult:
-    """Run a guarded command with live output observation and a wall deadline."""
+    """Run a guarded command with live output observation and an active-time budget."""
+    deadline = None if timeout is None else active_time(time.monotonic(), environment=env) + timeout
     proc = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -524,7 +526,6 @@ def run_bounded(
     )
     stdout_reader.start()
     stderr_reader.start()
-    deadline = None if timeout is None else time.monotonic() + timeout
     try:
         while not _process_exited(proc):
             scope.live_groups()
@@ -533,7 +534,7 @@ def run_bounded(
             if observation_stop.is_set() or dependency_violations:
                 scope.signal(signal.SIGKILL)
                 break
-            if deadline is not None and time.monotonic() >= deadline:
+            if deadline is not None and active_time(time.monotonic(), environment=env) >= deadline:
                 timed_out = True
                 scope.signal(signal.SIGKILL)
                 break

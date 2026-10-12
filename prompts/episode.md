@@ -117,7 +117,7 @@ Secondary hypotheses belong to another Direction or Attempt.
 ### 7. Record as work proceeds
 
 After every decisive measured keep, restoration, or direction-ending result, record the Experiment
-before another edit. Keep observations in `evidence` and interpretation in `analysis`, preserve the
+before another edit. Runtime supplies measurement_summary; analysis is optional and only adds new interpretations. Preserve the
 exact source/Trial/Result identities supplied by the tools, and record the action actually taken.
 Negative results are first-class evidence.
 

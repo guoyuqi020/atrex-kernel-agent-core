@@ -1103,7 +1103,8 @@ def _validate_direction_events(
                 or event.get("plan") != []
             ):
                 raise ValueError("Direction update cannot redefine its proposal")
-            _text(event.get("analysis"), "Direction analysis")
+            if event.get("analysis") is not None:
+                _text(event["analysis"], "Direction analysis")
         validated.append(event)
     return validated
 
@@ -1287,7 +1288,7 @@ def _validate_experiment_entries(
     for sequence, experiment in enumerate(experiments, start=1):
         if (
             not isinstance(experiment, dict)
-            or set(experiment) - {"knowledge_used"} != expected_fields
+            or set(experiment) - {"knowledge_used", "measurement_summary"} != expected_fields
         ):
             raise ValueError(f"{label} contains a malformed entry")
         if experiment.get("sequence") != sequence:
@@ -1305,8 +1306,11 @@ def _validate_experiment_entries(
             datetime.fromisoformat(str(experiment["recorded_at"]).replace("Z", "+00:00"))
         except ValueError as error:
             raise ValueError("Experiment recorded_at must be ISO-8601") from error
-        for field in _EXPERIMENT_FIELDS - {"action", "before", "after", "direction_id"}:
+        for field in ("name", "change"):
             _text(experiment.get(field), f"Experiment {field}")
+        for field in ("hypothesis", "evidence", "analysis"):
+            if experiment.get(field) is not None:
+                _text(experiment[field], f"Experiment {field}")
         if directions_enabled:
             _validate_direction_id(experiment.get("direction_id"))
         elif experiment.get("direction_id") is not None:
@@ -1314,6 +1318,7 @@ def _validate_experiment_entries(
         allowed_actions = {
             "keep_after",
             "restore_before",
+            "discard",
             "abandon_direction",
             "adopt",
         }
@@ -1473,7 +1478,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         has_identity_bearing_experiment = any(
             experiment[side] is not None
             for experiment in experiments
-            if experiment["action"] != "abandon_direction"
+            if experiment["action"] not in {"abandon_direction", "discard"}
             for side in ("before", "after")
         )
         if status == "blocked" and baseline_count == 0 and has_identity_bearing_experiment:
@@ -1619,8 +1624,6 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     findings = request.get("findings")
     if not isinstance(findings, list):
         raise ValueError("Attempt report findings must be an array")
-    if status == "candidate_ready" and not findings:
-        raise ValueError("candidate_ready Attempt report findings must be a non-empty array")
     journal_experiment_ids = {experiment["experiment_id"] for experiment in experiments}
     for index, item in enumerate(findings):
         label = f"Attempt report findings[{index}]"

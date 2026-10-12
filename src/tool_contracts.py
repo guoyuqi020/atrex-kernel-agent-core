@@ -212,7 +212,7 @@ def _direction_schema(*, experiments_enabled: bool = True) -> dict[str, Any]:
                 "items": _identifier("experiment_"),
             },
         },
-        required=("action", "direction_id", "analysis"),
+        required=("action", "direction_id"),
     )
     if not experiments_enabled:
         update["properties"].pop("supporting_experiment_ids")
@@ -238,7 +238,8 @@ def _direction_schema(*, experiments_enabled: bool = True) -> dict[str, Any]:
         }
     ]
     update["description"] = (
-        "complete, abandon, block, and defer each require hypothesis_status and analysis. "
+        "Closures require hypothesis_status; analysis is optional and only adds new "
+        "route-level conclusions. "
         "Use unresolved and empty support when unmeasured or inconclusive; stopping work does "
         "not refute its hypothesis. For supported/refuted, provide scope and completed Result "
         "evidence relevant to the proposal hypothesis, directly through supporting_results "
@@ -291,21 +292,36 @@ def _direction_schema(*, experiments_enabled: bool = True) -> dict[str, Any]:
 
 def _experiment_schema(*, allow_baseline: bool, directions_enabled: bool = True) -> dict[str, Any]:
     nullable_subject = {"oneOf": [_subject(), {"type": "null"}]}
-    actions = ["keep_after", "restore_before", "abandon_direction", "adopt"]
+    actions = ["keep_after", "restore_before", "discard", "adopt"]
     if allow_baseline:
         actions.append("baseline")
     schema = _object(
         {
             "direction_id": _identifier("direction_"),
             "name": _text(),
-            "hypothesis": _text(),
+            "hypothesis": {
+                **_text(),
+                "description": "Local hypothesis; omit when inherited from Direction.",
+            },
             "change": _text(),
             "before": nullable_subject,
             "after": nullable_subject,
-            "evidence": _text(),
-            "analysis": _text(),
+            "evidence": {
+                **_text(),
+                "description": (
+                    "Optional legacy prose; Runtime generates measurement_summary from Results."
+                ),
+            },
+            "analysis": {
+                **_text(),
+                "description": (
+                    "Optional new interpretation, not repeated measurements; "
+                    "omit if the cause is unknown."
+                ),
+            },
             "action": {"enum": actions},
-        }
+        },
+        required=("direction_id", "name", "change", "before", "after", "action"),
     )
     schema["properties"]["knowledge_used"] = {
         "type": "array",
@@ -326,6 +342,7 @@ def _experiment_schema(*, allow_baseline: bool, directions_enabled: bool = True)
     if not directions_enabled:
         schema["properties"].pop("direction_id")
         schema["required"].remove("direction_id")
+        schema["required"].append("hypothesis")
     schema["allOf"] = [
         {
             "anyOf": [
@@ -438,15 +455,6 @@ def _attempt_report_schema(
             "blocker": {"oneOf": [_text(), {"type": "null"}]},
         }
     )
-    schema["allOf"] = [
-        {
-            "if": {
-                "properties": {"status": {"const": "candidate_ready"}},
-                "required": ["status"],
-            },
-            "then": {"properties": {"findings": {"minItems": 1}}},
-        }
-    ]
     if not experiments_enabled:
         finding = schema["properties"]["findings"]["items"]
         finding["properties"].pop("supporting_experiment_ids")
@@ -485,9 +493,9 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
     "list-experiments": {
         **_SCRATCH_FILE,
         "description": (
-            "Find visible experiments and their recorded hypothesis, change, evidence, analysis, "
-            "and action. Writes the index to file; returns only status/file/count. Load selected "
-            "records only when more detail or exact Artifact bindings are needed."
+            "List compact experiment IDs, changes, decisions, knowledge_used and Runtime "
+            "measurement comparisons. Writes the index to file; returns only status/file/count. "
+            "Load selected records for interpretations and exact Artifact bindings."
         ),
     },
     "load-experiment": {
@@ -600,7 +608,7 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         },
         {
             "instruction": (
-                "before and after cannot both be null, even for abandon_direction. "
+                "before and after cannot both be null, even for discard. "
                 "Set each non-null before/after subject to one real Kernel-bound "
                 "result_artifact_digest; "
                 "Runtime resolves the Kernel and Result Artifacts. For exact historical source "
@@ -683,7 +691,8 @@ def tool_recovery(
         return [
             {
                 "instruction": (
-                    "Close the Direction with analysis and hypothesis_status; "
+                    "Close the Direction with hypothesis_status and optional new route-level "
+                    "analysis; "
                     "omit supporting_experiment_ids. Use unresolved if unmeasured; for a judged "
                     "conclusion provide scope and supporting_results with exact "
                     "Kernel/Result bindings."

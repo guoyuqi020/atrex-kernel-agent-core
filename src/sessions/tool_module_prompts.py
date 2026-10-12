@@ -164,7 +164,7 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         "An Attempt may advance at most three Directions, with only one in_progress at a time. "
         "Queries label open status in_progress(self) for work started by this Attempt and "
         "in_progress(other) for another Attempt's work, regardless of who proposed it. "
-        "Close every in_progress(self) Direction before handoff with hypothesis_status and analysis; "
+        "Close every in_progress(self) Direction before handoff with hypothesis_status; analysis is optional and adds only new route-level judgments; "
         "do not close others' Directions, which do not block your report. "
         + (
             "When closing, supporting_experiment_ids may be empty for unresolved work; "
@@ -188,29 +188,29 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
     )
     experiments = (
         'Call `list-experiments` with {"file":"scratch/experiments-index.json"}, then read the written file; '
-        "its response contains only status, file, and count. The index includes hypotheses, changes, and analyses. "
+        "its response contains only status, file, and count. The index contains changes, decisions, and compact Runtime measurement comparisons; load selected records for interpretations. "
         'Call `load-experiment` with {"experiment_id":"experiment_<id>"} when you need exact before/after '
         "Artifact bindings or other full-record details. For a known Kernel digest, `find-kernel-experiments` "
         'takes {"kernel_artifact_digest":"sha256:<digest>"} and returns visible experiment_ids. '
-        "Record each meaningful measured candidate decision with record-experiment. "
+        "Record each meaningful measured candidate decision with record-experiment. Runtime returns a deterministic measurement_summary from the cited Results; do not repeat metrics in evidence. Analysis is optional and only adds a new interpretation; omit it when the cause is unknown. "
         'Its optional knowledge_used defaults to []; entries are {"record_id":"<actual known Record ID>",'
         '"finding":"relevant knowledge and why it applies","application":"how it informed this experiment"}. '
         "Use exactly these three nonblank strings and cite only actual known IDs; omit or use [] when none. "
         "Historical citations need no new Wiki query and remain usable when that tool is disabled. "
         "They declare influences, not proof of current correctness, speedup, or causation; cite measured Results. "
         "Cite real Kernel-bound Result Artifacts: keep_after, restore_before, and adopt require "
-        "both before and after; abandon_direction permits one null side, but not both; "
+        "both before and after; discard permits one null side, but not both, and never closes a Direction; "
         "Bootstrap baseline requires before=null and a measured after. "
         + (
-            "Supply the visible Direction ID to which the Experiment belongs."
+            "Supply the visible Direction ID; omit hypothesis when inherited, adding it only for a new local hypothesis. "
             if "directions" in modules
-            else "Omit direction_id: Experiments in this Session do not belong to Directions."
+            else "Omit direction_id and supply a local hypothesis: Experiments in this Session do not belong to Directions."
         )
         if "experiments" in modules
         else "Experiment tools are unavailable; do not create or cite Experiment IDs."
     )
     findings = (
-        "Each Finding names one claim, its claim_kind (observation, implementation_outcome, or "
+        "Findings may be empty even for candidate_ready. Add only new cross-experiment or cross-direction conclusions, not copies of Journal analyses. Each Finding names one claim, its claim_kind (observation, implementation_outcome, or "
         "causal_hypothesis), assessment (unresolved, supported, or refuted), and scope. "
         "Use root_cause=null when unknown; no causal explanation is required. Missing historical "
         "assessment means unresolved. Bind direct supporting_results as "
@@ -247,7 +247,7 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         "blocked requires final_candidate=null and a nonempty blocker. Bootstrap does not allow pivot. "
         "Profile evidence must cite real Runtime Profile Result and Kernel Artifact digests; use null "
         "when none exists. Knowledge and contributing digests must cite actually used material. "
-        f"{findings} Candidate_ready requires at least one real Finding; blocked or pivot may have none. "
+        f"{findings} "
         "Query the live `attempt-report` schema for exact fields and submit once after all enabled "
         "Journal bookkeeping and in-flight Gateway calls finish. The CLI attaches authoritative "
         "Journal snapshots and enabled module names. On validation error, repair `issues` using "
@@ -334,7 +334,7 @@ def _modular_attempt(template: str, modules: frozenset[str]) -> str:
     template = _replace_section(template, headings[5], headings[6], validation)
     recording = (
         "After every decisive measured keep, restoration, or ending result, record the Experiment before "
-        "another edit. Keep observations in `evidence`, interpretation in `analysis`, and cite exact "
+        "another edit. Runtime generates measurement_summary; omit repeated evidence and add analysis only for new interpretations. Cite exact "
         "Result Artifact digests. Negative results are first-class evidence. "
         if "experiments" in modules
         else "Preserve factual measurements and decisions in the Report draft. "
@@ -349,7 +349,7 @@ def _modular_attempt(template: str, modules: frozenset[str]) -> str:
     )
     recording += (
         "Keep the structured Report draft current. Do not fabricate evidence to finish. "
-        "Submit with `attempt-report`; `blocked` or `pivot` may have empty Findings when justified."
+        "Submit with `attempt-report`; all report statuses allow empty Findings when there is no new conclusion."
     )
     template = _replace_section(template, headings[6], headings[7], recording)
     helper = _section(template, headings[7], "## Terminal behavior").split(
@@ -398,7 +398,7 @@ def _modular_kda_attempt(template: str, modules: frozenset[str]) -> str:
         "- After every decisive measured keep, restoration, or direction-ending result, call `record-experiment` before another edit. Supply the exact before/after Result Artifact digests; Runtime resolves their Kernel and Result Artifacts. Separate factual evidence from analysis. Negative results are first-class evidence.\n",
         (
             "- After every decisive measured decision, call `record-experiment` before another edit. "
-            "Cite exact Result Artifact digests, separate factual evidence from analysis, and retain negative results.\n"
+            "Cite exact Result Artifact digests; Runtime generates measurement_summary. Add only new optional analysis and retain negative results.\n"
             if "experiments" in modules
             else "- Preserve decisive measured decisions and negative results in the Report draft.\n"
         ),

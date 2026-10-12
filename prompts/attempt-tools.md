@@ -274,11 +274,11 @@ it to the logical Attempt before the command returns; the Journal therefore surv
 Session and a new recovery generation. Invoke `list-experiments` with
 `{"file":"scratch/experiments-index.json"}`; it asks Runtime for the authorized live-plus-history
 view, then atomically writes compact
-Experiment ID, name, hypothesis, change, evidence, analysis, and action entries to that
+Experiment ID, name, Direction ID, change, action, and compact Runtime measurement_summary entries to that
 file and returns only status, file, and count. Read the file, then invoke `load-experiment` with
 `{"experiment_id":"experiment_<id>"}` only for selected entries to retrieve their complete
 Agent-visible records, including exact before/after Kernel and Result Artifact bindings. The index
-already contains conclusions; load only when more detail or those bindings are needed. Runtime-internal
+contains measured comparisons, not full Agent interpretations; load selected records when those details are needed. Runtime-internal
 ordering metadata is omitted. Both commands are Runtime-local and bounded by Runtime-authorized Lineage
 history. Bootstrap starts with no earlier journal history; its current live Journal remains visible.
 To reverse-lookup one exact Kernel Artifact, invoke `find-kernel-experiments` or
@@ -377,18 +377,17 @@ previous closure. A merely `proposed` Direction must still be started first.
 Late recording uses the same Trial visibility, ownership, and evidence checks as ordinary recording.
 Use it to complete the Journal before terminal handoff, not to resume research without `start`.
 
-Each `record-experiment` request uses these required fields, with optional `knowledge_used`:
+Each `record-experiment` request supplies the fields below. `knowledge_used`, `analysis`, and legacy
+`evidence` prose are optional. With Directions enabled, omit `hypothesis` when inherited from the
+Direction; with Directions disabled, omit `direction_id` and supply a local `hypothesis`:
 
 ```json
 {
   "direction_id": "direction_<id>",
   "name": "short experiment name",
-  "hypothesis": "falsifiable expected mechanism",
   "change": "exact candidate change, including a reverted change",
   "before": {"result_artifact_digest": "sha256:<before-trial>"},
   "after": {"result_artifact_digest": "sha256:<after-trial>"},
-  "evidence": "concise before/after measurements and observations",
-  "analysis": "what the evidence means, including whether the hypothesis held",
   "action": "keep_after",
   "knowledge_used": [{
     "record_id": "<actual known Record ID>",
@@ -417,23 +416,31 @@ and evaluation contract, and a successful ordinary full Evaluate for that exact 
 The adopted Trial keeps its original ownership; adoption creates a decision, not a new measurement
 or a replacement Trial. It can qualify the exact restored Kernel for `candidate_ready` without
 rerunning Evaluate. A custom-input, correctness-only, or Agent ABBA result does not qualify.
-Every Experiment must bind at least one Kernel-bound Gateway Result. For `abandon_direction`,
+Every Experiment must bind at least one Kernel-bound Gateway Result. For `discard`,
 `before` or `after` may be null, but not both. A Check/Profile or failed diagnostic Result can
 record an investigation without claiming a performance improvement. Health/Env calls and raw Dev
 results without a Kernel binding do not qualify. The phase Prompt may permit Bootstrap-only
 `baseline`, which requires `before=null` and a measured `after` Result.
-`record-experiment` persists the complete entry and prints only a compact receipt such as
-`{"status":"recorded","experiment_id":"experiment_<id>"}`; use that ID when referring to the
-experiment later. It does not echo the Agent-authored text, assigned sequence, or timestamp.
-Keep `evidence` factual: report observations and measurements. Use `analysis` for interpretation,
-the hypothesis verdict, causal explanation, limitations, and remaining uncertainty. Do not use a
-top-level `result` field; that term is reserved for Gateway responses. `action` records what you
-actually did after analysis and normally must be `keep_after`, `restore_before`, `adopt`, or
-`abandon_direction`; use `baseline` only when the phase Prompt explicitly permits it.
+`record-experiment` persists the entry and returns `status`, `experiment_id`, and an automatically generated
+`measurement_summary`. Do not submit measurement_summary yourself. It preserves exact Result
+references, operation status, correctness, available error details and returned Shape coverage.
+Comparable completed full Evaluates yield geometric-mean latency, speedup, latency reduction and
+per-Shape improved/retained/degraded counts using the inclusive +/-1% boundary. ABBA is explicitly
+labelled and uses A/B from that Result, not an unrelated Experiment before. Correctness-only,
+failed, incomplete, or incompatible measurements do not receive a performance verdict. Shape counts
+are returned timing coverage, not invented correctness pass counts. Predictions remain audit-only.
+The summary is deterministic measured evidence, not a causal explanation or proof against noise.
+`analysis` is optional: add only a new local interpretation or uncertainty; omit it when no cause is
+known. Do not duplicate metrics in `evidence`, repeat the Direction hypothesis, or invent a lesson.
+`action` is a local candidate decision: `keep_after`, `restore_before`, `adopt`, or `discard`;
+`baseline` is Bootstrap-only. `discard` permits one null side and never changes Direction lifecycle.
+The old `abandon_direction` spelling remains readable for compatibility; close the Direction
+separately with update-direction. Direction closure analysis is optional and describes only new
+route-level conclusions, untested alternatives, or next steps; start needs no analysis.
 After each receipt, update the working terminal Report draft
-`scratch/attempt-report-draft.json`. Accumulate the Experiment ID in the relevant Finding and
-refine the diagnosis, evidence summaries, Profile bindings, knowledge use, and Attempt-level
-analysis while the evidence is fresh. The draft may be overwritten throughout the session. Do not
+`scratch/attempt-report-draft.json`. Reference existing Experiment IDs instead of rewriting their analyses. Add a Finding only for a
+new cross-experiment or cross-direction conclusion; findings may be empty for every report status.
+Keep the diagnosis and handoff concise, pointing to recorded evidence. The draft may be overwritten throughout the session. Do not
 call `attempt-report` during this process. When the engineering loop and all started Directions are
 closed, validate the completed draft and use it as the request. The first successful call publishes
 the write-once terminal handoff to the separate `scratch/attempt-report.json` and prints only a
@@ -515,7 +522,7 @@ Use `candidate_ready` when nominating the current Kernel for the controller-owne
 infrastructure blocker. `candidate_ready` does not mean the Kernel is retained or registered; only
 Runtime policy can make that decision. `candidate_ready` requires `final_candidate` and a null `blocker`; `pivot`
 requires both to be null; `blocked` requires a non-empty `blocker` and null `final_candidate`.
-`candidate_ready` requires the enabled modules' nomination journals and at least one Finding.
+`candidate_ready` requires the enabled modules' nomination journals; Findings may be empty.
 `blocked` or `pivot` may carry zero Experiments and `findings: []`; an unmeasured Direction can be
 closed unresolved with empty support. Never fabricate an Experiment, Finding, Trial, or measurement
 to satisfy a list. Directions left `proposed` or `deferred` require no duplicate next-direction list.

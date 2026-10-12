@@ -153,7 +153,7 @@ own Directions from the public contract, profiling, and durable Journal evidence
 
 A `candidate_ready` Bootstrap report requires exactly one `baseline` Experiment. A blocked report
 may contain zero Experiments and empty `findings`; do not manufacture evidence just to terminate.
-It may omit baseline when all recorded Experiments are `abandon_direction` diagnostics, or none
+It may omit baseline when all recorded Experiments are `discard` diagnostics, or none
 exist. Diagnostic Results do not imply that a usable baseline exists. Close a started Direction
 with `hypothesis_status=unresolved` and empty support if no conclusive evidence exists. No Experiment
 or diagnostic Gateway call is needed merely to close it. When support exists, select relevant

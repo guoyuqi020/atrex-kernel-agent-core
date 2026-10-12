@@ -21,6 +21,7 @@ from uuid import uuid4
 import runtime_tools
 from contexts.attempt import RuntimeAttemptContext
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
+from session_clock import SESSION_CLOCK_ENV, active_time
 
 from .tool_module_prompts import active_modules
 
@@ -30,7 +31,7 @@ _MAX_LOCAL_REPORT_BYTES = 4 * 1024 * 1024
 
 
 def _remaining(deadline: float) -> float:
-    remaining = deadline - time.monotonic()
+    remaining = deadline - active_time(time.monotonic())
     if remaining <= 0:
         raise TimeoutError("Report acceptance check exceeded the remaining session deadline")
     return remaining
@@ -89,19 +90,22 @@ def _status_response(context: ReportContext, deadline: float) -> dict[str, Any]:
 
     def query() -> None:
         try:
-            result = _post_once(context, _remaining(deadline))
+            remaining = _remaining(deadline)
+            # Socket wall time must not accidentally enforce the active-time budget.
+            timeout = max(remaining, 72 * 3600) if os.environ.get(SESSION_CLOCK_ENV) else remaining
+            result = _post_once(context, timeout)
         except BaseException as error:
             outcomes.put(error)
         else:
             outcomes.put(result)
 
     threading.Thread(target=query, name="report-acceptance-status", daemon=True).start()
-    try:
-        outcome = outcomes.get(timeout=_remaining(deadline))
-    except queue.Empty as error:
-        raise TimeoutError(
-            "Report acceptance check exceeded the remaining session deadline"
-        ) from error
+    while True:
+        try:
+            outcome = outcomes.get(timeout=min(0.1, _remaining(deadline)))
+            break
+        except queue.Empty:
+            _remaining(deadline)
     _remaining(deadline)
     if isinstance(outcome, BaseException):
         raise outcome
@@ -273,7 +277,9 @@ def _missing_prompt(context: ReportContext, backup: str | None) -> str:
         "list-experiments, and load-experiment as needed. Reuse already measured results "
         "and their actual identifiers; "
         "do not invent trials, measurements, successful checks, or supporting evidence. "
-        "Complete only the Journal bookkeeping needed to describe the work already done.\n"
+        "Complete only the Journal bookkeeping needed to describe the work already done. "
+        "Runtime supplies measurement_summary; evidence and analysis need not repeat it. "
+        "Findings may be empty for every report status; do not manufacture lessons.\n"
         "If the exact final Kernel reuses matching successful historical full-Evaluate evidence, "
         "record an adopt decision with the real before/after Trials and let Runtime validate it. "
         "Do not wait for authoritative ABBA: it runs after Report handoff and creates no Agent "
@@ -287,7 +293,7 @@ def _missing_prompt(context: ReportContext, backup: str | None) -> str:
         "For supported/refuted conclusions, supply scope and relevant completed Result evidence "
         "through supporting_results or selected Experiments. Every Experiment must "
         "cite at least one real Kernel-bound Gateway Result already available; both-null "
-        "before/after is forbidden, even for abandon_direction. If no Result exists, explain "
+        "before/after is forbidden, even for discard. If no Result exists, explain "
         "the blocker; do not invent evidence or run new measurements in this recovery session. "
         "Keep hypothesis_status=unresolved for diagnostics that did not test the hypothesis. "
         "This is bookkeeping, not a new measurement.\n"
@@ -308,7 +314,7 @@ def report_completion_prompt(
     """Check Runtime acceptance within the remaining logical-session deadline."""
     if not math.isfinite(remaining_timeout_seconds) or remaining_timeout_seconds <= 0:
         raise ValueError("Report completion requires a positive finite remaining timeout")
-    deadline = time.monotonic() + remaining_timeout_seconds
+    deadline = active_time(time.monotonic()) + remaining_timeout_seconds
     response = _status_response(context, deadline)
     result = response.get("result")
     if not isinstance(result, dict):

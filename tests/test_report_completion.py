@@ -529,3 +529,28 @@ def test_response_byte_limit_is_preserved(tmp_path: Path, monkeypatch: pytest.Mo
     with pytest.raises(RuntimeError, match="byte limit"):
         report_completion_prompt(context, 30.0)
     assert not context.report_path.exists()
+
+
+
+def test_report_query_socket_timeout_is_independent_of_active_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    from sessions import report_completion
+
+    context = _context(tmp_path)
+    path = tmp_path / "runtime-clock.json"
+    path.write_text(json.dumps({
+        "schema_version": 1, "wait_seconds": 0, "paused_since": time.monotonic(),
+    }))
+    monkeypatch.setenv("ATREX_SESSION_CLOCK_PATH", str(path))
+    timeouts = []
+
+    def query(_context: ReportContext, timeout: float) -> dict[str, Any]:
+        timeouts.append(timeout)
+        return {"result": {"status": "missing"}}
+
+    monkeypatch.setattr(report_completion, "_post_once", query)
+    assert report_completion_prompt(context, 0.01) is not None
+    assert timeouts == [72 * 3600]

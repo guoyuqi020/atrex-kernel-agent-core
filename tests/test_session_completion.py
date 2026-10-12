@@ -1121,3 +1121,40 @@ def test_output_limit_classification_cannot_restart_a_cancelled_process(
         context, _config(), "optimize", completion_check=unexpected,
     ) == exit_status
     assert len(runtime.requests) == 1
+
+
+@pytest.mark.parametrize("output_limited", [False, True])
+def test_runtime_wait_does_not_spend_completion_or_output_recovery_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output_limited: bool,
+) -> None:
+    context, runtime, _clock = _setup(tmp_path, monkeypatch, [
+        _Outcome(elapsed=3605, exit_status=1 if output_limited else 0,
+                 failure_kind="output_limit" if output_limited else None),
+        _Outcome(elapsed=7),
+    ])
+    path = tmp_path / "runtime-clock.json"
+    path.write_text(json.dumps({"schema_version": 1, "wait_seconds": 0, "paused_since": None}))
+    monkeypatch.setenv("ATREX_SESSION_CLOCK_PATH", str(path))
+    original_run = runtime.run
+
+    def run(request: AgentRunRequest) -> AgentRunResult:
+        result = original_run(request)
+        path.write_text(json.dumps({
+            "schema_version": 1, "wait_seconds": 3600, "paused_since": None,
+        }))
+        return result
+
+    monkeypatch.setattr(runtime, "run", run)
+    checks: list[float] = []
+
+    def check(remaining: float) -> str | None:
+        checks.append(remaining)
+        return "Submit the report." if len(checks) == 1 else None
+
+    status = execute_agent_session(
+        context, _config(), "Optimize the kernel.", system_prompt="tools",
+        on_success=None, completion_check=check,
+    )
+    assert status == 0
+    assert checks == [50, 43]
+    assert [request.timeout_s for request in runtime.requests] == [55, 50]

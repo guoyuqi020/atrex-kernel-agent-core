@@ -75,7 +75,11 @@ def test_complex_local_schemas_track_validator_top_level_fields() -> None:
     assert bootstrap_experiment is not None
     assert report is not None
     assert bootstrap_report is not None
-    assert set(experiment["required"]) == _EXPERIMENT_FIELDS
+    assert set(experiment["required"]) == _EXPERIMENT_FIELDS - {
+        "hypothesis",
+        "evidence",
+        "analysis",
+    }
     assert set(experiment["properties"]) == _EXPERIMENT_FIELDS | {"knowledge_used"}
     assert set(report["required"]) == _REPORT_FIELDS
     assert set(report["properties"]) == _REPORT_FIELDS
@@ -84,7 +88,7 @@ def test_complex_local_schemas_track_validator_top_level_fields() -> None:
     assert experiment["properties"]["action"]["enum"] == [
         "keep_after",
         "restore_before",
-        "abandon_direction",
+        "discard",
         "adopt",
     ]
     subject = experiment["properties"]["before"]["oneOf"][0]
@@ -238,7 +242,7 @@ def test_direction_schema_and_recovery_describe_all_closure_requirements() -> No
     schema = tool_request_schema("update-direction")
     recovery = tool_recovery("update-direction")
     assert schema is not None and recovery is not None
-    assert "complete, abandon, block, and defer each require" in schema["oneOf"][1]["description"]
+    assert "analysis is optional" in schema["oneOf"][1]["description"]
     assert "hypothesis_status" in schema["oneOf"][1]["description"]
     assert "Before complete, abandon, block, or defer" in recovery[1]["instruction"]
     assert "unresolved with empty support" in recovery[1]["instruction"]

@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from session_clock import active_time
+
 from . import common
 
 _MAX_FILES = 64
@@ -18,7 +20,7 @@ _MAX_RECEIPTS = 8
 
 
 def _remaining(deadline: float) -> None:
-    if time.monotonic() >= deadline:
+    if active_time(time.monotonic()) >= deadline:
         raise TimeoutError("Output-limit recovery exhausted the session deadline")
 
 

@@ -68,20 +68,12 @@ def test_adopt_schema_exposes_action_and_requires_trial_reference_fields(
 
 
 @pytest.mark.parametrize("allow_baseline", [False, True])
-def test_report_schema_requires_findings_only_for_candidate_ready(allow_baseline: bool) -> None:
+def test_report_schema_allows_empty_findings_for_all_statuses(allow_baseline: bool) -> None:
     schema = tool_request_schema("attempt-report", allow_baseline=allow_baseline)
 
     assert schema is not None
     assert "minItems" not in schema["properties"]["findings"]
-    assert schema["allOf"] == [
-        {
-            "if": {
-                "properties": {"status": {"const": "candidate_ready"}},
-                "required": ["status"],
-            },
-            "then": {"properties": {"findings": {"minItems": 1}}},
-        }
-    ]
+    assert "allOf" not in schema
 
 
 def test_historical_adopt_survives_http_and_journal_snapshot_into_candidate_report(
@@ -228,7 +220,6 @@ def test_blocked_bootstrap_can_publish_without_experiments(tmp_path: Path) -> No
     [
         ("experiments", "Experiment"),
         ("direction_events", "Direction event"),
-        ("findings", "findings"),
     ],
 )
 def test_candidate_ready_still_requires_each_kind_of_evidence(

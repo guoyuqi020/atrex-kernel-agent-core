@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
+from session_clock import SESSION_CLOCK_ENV
 from session_transcript import encode_records, provider_line_record, record_provider_line
 
 from .adapter import (
@@ -405,9 +406,14 @@ class CliAgentRuntime:
         environment = build_session_environment(self.id)
         environment["IS_SANDBOX"] = "1"
         if self.id == "claude":
-            # A scoped PreToolUse hook gives Runtime CLI calls the Session allowance.
+            # Runtime waits do not spend active Session time. Give their foreground
+            # Bash calls the 72-hour HTTP allowance rather than the remaining Agent budget.
             # Other Bash calls keep their usual default, and background subagents remain available.
-            bash_timeout_ms = min(max(request.timeout_s * 1000, 120_000), 2_147_483_647)
+            tool_timeout_s = (
+                max(request.timeout_s, 72 * 3600)
+                if environment.get(SESSION_CLOCK_ENV) else request.timeout_s
+            )
+            bash_timeout_ms = min(max(tool_timeout_s * 1000, 120_000), 2_147_483_647)
             environment["BASH_MAX_TIMEOUT_MS"] = str(bash_timeout_ms)
             environment["ATREX_RUNTIME_TOOL_BASH_TIMEOUT_MS"] = str(bash_timeout_ms)
         claude_observer = (

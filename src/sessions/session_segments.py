@@ -13,6 +13,7 @@ from typing import Any
 
 import backends
 from agent_config import AgentConfig
+from session_clock import active_time
 from session_transcript import encode_records
 
 from . import common
@@ -244,7 +245,7 @@ def execute_report_completion(
 ) -> int:
     """Preserve all completed evidence while spending only the remaining session allowance."""
     runtime = backends.build_agent_runtime(config.agent_backend)
-    deadline = time.monotonic() + max(1, int(context.timeout_seconds) - 5)
+    deadline = active_time(time.monotonic()) + max(1, int(context.timeout_seconds) - 5)
     segments: list[_Segment] = []
     completion: dict[str, Any] = {
         "state": "checking",
@@ -267,7 +268,7 @@ def execute_report_completion(
             checking_completion = False
             usage = _aggregate_usage(context, segments)
             remaining_budget = context.usage_budget - usage["consumed"]
-            remaining_timeout = int(deadline - time.monotonic())
+            remaining_timeout = int(deadline - active_time(time.monotonic()))
             if remaining_budget <= 0 or remaining_timeout < 1:
                 exit_status = 125 if remaining_budget <= 0 else 124
                 completion["state"] = "failed"
@@ -354,7 +355,7 @@ def execute_report_completion(
             completion["state"] = "checking"
             _publish_trace(context, segments, completion, None, recovery)
             checking_completion = True
-            remaining_check = deadline - time.monotonic()
+            remaining_check = deadline - active_time(time.monotonic())
             if remaining_check <= 0:
                 completion["state"] = "failed"
                 exit_status = 124
@@ -365,7 +366,7 @@ def execute_report_completion(
                 completion["state"] = "failed"
                 exit_status = 124
                 return 124
-            if time.monotonic() >= deadline:
+            if active_time(time.monotonic()) >= deadline:
                 completion["state"] = "failed"
                 exit_status = 124
                 return 124

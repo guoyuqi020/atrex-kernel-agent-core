@@ -827,7 +827,11 @@ def test_cli_local_validation_adds_schema_and_recovery(
             ),
         }
     ]
-    assert set(response["request_schema"]["required"]) == runtime_tools._EXPERIMENT_FIELDS
+    assert set(response["request_schema"]["required"]) == runtime_tools._EXPERIMENT_FIELDS - {
+        "hypothesis",
+        "evidence",
+        "analysis",
+    }
     assert response["recovery"][0] == {
         "tool": "list-directions",
         "request": {"file": "scratch/directions-index.json"},
@@ -2101,7 +2105,9 @@ def test_a_slow_operation_is_collected_on_reconnect(monkeypatch: pytest.MonkeyPa
     ],
 )
 def test_only_gateway_requests_use_the_long_http_timeout(
-    monkeypatch: pytest.MonkeyPatch, path: str, expected_timeout: int,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    expected_timeout: int,
 ) -> None:
     observed = []
 
@@ -2120,9 +2126,7 @@ def test_only_gateway_requests_use_the_long_http_timeout(
         return Response()
 
     monkeypatch.setattr(runtime_tools.urllib.request, "urlopen", urlopen)
-    assert runtime_tools._post("http://runtime.invalid", "cap", path, {}) == {
-        "status": "completed"
-    }
+    assert runtime_tools._post("http://runtime.invalid", "cap", path, {}) == {"status": "completed"}
     assert observed == [expected_timeout]
 
 
