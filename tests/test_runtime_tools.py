@@ -2095,3 +2095,96 @@ def test_compact_report_rejects_duplicate_analysis_before_any_submission(tmp_pat
         attempt_report(context, request)
     assert not context.report_path.exists()
     assert not _REGISTERED_REPORTS
+
+
+@pytest.mark.parametrize("experiments", [False, True])
+@pytest.mark.parametrize("action", [None, "propose", "start", "complete", "abandon", "block", "defer"])
+def test_cli_direction_recovery_uses_original_action_and_missing_field(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    action: str | None, experiments: bool,
+) -> None:
+    modules = ("directions", "experiments") if experiments else ("directions",)
+    monkeypatch.setattr(runtime_tools, "_tool_modules", lambda: modules)
+    monkeypatch.setattr(runtime_tools, "_context", lambda _command: object())
+    original = {"action": action} if action else {"direction_id": "direction_" + "a" * 32}
+    field = ("action" if action is None else "name" if action == "propose"
+             else "direction_id" if action == "start" else "hypothesis_status")
+    issue = {"path": f"request.{field}", "code": "missing", "message": "Field required"}
+    monkeypatch.setattr(runtime_tools, "_request_object", lambda *_args: original)
+
+    def reject(context, received):
+        assert received == original
+        raise RuntimeServiceError(400, {
+            "error": "invalid_request", "detail": f"request.{field}: Field required",
+            "issues": [issue],
+        })
+
+    monkeypatch.setattr(runtime_tools, "update_direction", reject)
+    assert runtime_tools.main(["update-direction", "--request", "scratch/request.json"]) == 2
+    response = json.loads(capsys.readouterr().out)
+    assert response["issues"] == [issue]
+    instructions = " ".join(item.get("instruction", "") for item in response["recovery"])
+    assert f"Supply the missing required fields: request.{field}." in instructions
+    if action is None:
+        assert "Set action to a string matching your intent" in instructions
+        assert "Close the Direction" not in instructions
+    elif action == "propose":
+        assert 'Retry action="propose"' in instructions
+        assert "outcome evidence to a proposal" in instructions
+        assert "Close the Direction" not in instructions
+    elif action == "start":
+        assert 'Retry action="start"' in instructions
+        assert "Starting requires no hypothesis_status" in instructions
+        assert "Do not close the Direction to repair a start request" in instructions
+    else:
+        assert f'Retry action="{action}"' in instructions
+        assert "unresolved for unmeasured" in instructions
+        assert ("Include supporting_experiment_ids" if experiments else
+                "omit supporting_experiment_ids") in instructions
+    assert response["request_schema"]["oneOf"][1]["required"] == ["action", "direction_id"]
+
+
+@pytest.mark.parametrize("action", [None, 42, ["start"], "unknown"])
+def test_cli_invalid_direction_action_does_not_infer_closure(action) -> None:
+    detail = "request.action: Input should be a valid string"
+    response = runtime_tools._augment_agent_error(
+        "update-direction", {"detail": detail, "issues": [{
+            "path": "request.action", "code": "string_type", "message": detail,
+        }]}, detail=detail, request={"action": action},
+    )
+    instruction = response["recovery"][0]["instruction"]
+    assert "Set action to a string matching your intent" in instruction
+    assert "Close the Direction" not in instruction
+
+
+def test_cli_keeps_server_direction_conflict_recovery() -> None:
+    recovery = [{"instruction": "Continue the already-owned Direction."}]
+    payload = {"detail": "ownership conflict", "recovery": recovery,
+               "issues": [{"path": "request.direction_id", "code": "conflict",
+                           "message": "ownership conflict"}]}
+    response = runtime_tools._augment_agent_error(
+        "update-direction", payload, detail=payload["detail"], request={"action": "start"},
+    )
+    assert response["recovery"] == recovery
+
+
+@pytest.mark.parametrize("action", ["discard", "adopt"])
+def test_missing_experiment_fields_reach_runtime_before_null_evidence_checks(
+    monkeypatch: pytest.MonkeyPatch, action: str,
+) -> None:
+    original = {"action": action, "name": "proposal"}
+    def reject(_context, command, received):
+        assert command == "record-experiment" and received == original
+        raise RuntimeServiceError(400, {"issues": [
+            {"path": "request.before", "code": "missing", "message": "Field required"},
+            {"path": "request.after", "code": "missing", "message": "Field required"},
+        ]})
+    monkeypatch.setattr(runtime_tools, "runtime_journal", reject)
+    with pytest.raises(RuntimeServiceError) as raised:
+        record_experiment(object(), original)
+    response = runtime_tools._augment_agent_error(
+        "record-experiment", raised.value.payload, detail="Field required", request=original,
+    )
+    assert response["recovery"][0]["instruction"] == (
+        "Supply the missing required fields: request.before, request.after."
+    )

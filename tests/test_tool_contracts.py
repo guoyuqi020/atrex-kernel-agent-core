@@ -226,7 +226,8 @@ def test_attempt_report_recovery_explains_how_to_close_open_directions() -> None
 
 
 def test_direction_limit_recovery_says_not_to_retry_start() -> None:
-    recovery = tool_recovery("update-direction")
+    recovery = tool_recovery("update-direction", request={"action": "start"},
+                             detail="Attempt Direction advancement limit exceeded")
 
     assert recovery is not None
     instruction = recovery[-1]["instruction"]
@@ -237,12 +238,12 @@ def test_direction_limit_recovery_says_not_to_retry_start() -> None:
 
 def test_direction_schema_and_recovery_describe_all_closure_requirements() -> None:
     schema = tool_request_schema("update-direction")
-    recovery = tool_recovery("update-direction")
+    recovery = tool_recovery("update-direction", request={"action": "complete"})
     assert schema is not None and recovery is not None
     assert "analysis is optional" in schema["oneOf"][1]["description"]
     assert "hypothesis_status" in schema["oneOf"][1]["description"]
-    assert "Before complete, abandon, block, or defer" in recovery[1]["instruction"]
-    assert "unresolved with empty support" in recovery[1]["instruction"]
+    assert 'Retry action="complete"' in recovery[0]["instruction"]
+    assert "unresolved for unmeasured" in recovery[0]["instruction"]
 
 
 def test_tool_schemas_drop_disabled_cross_module_links() -> None:
@@ -257,7 +258,8 @@ def test_tool_schemas_drop_disabled_cross_module_links() -> None:
 
 
 def test_direction_concurrency_recovery_says_to_close_the_active_direction() -> None:
-    recovery = tool_recovery("update-direction")
+    recovery = tool_recovery("update-direction", request={"action": "start"},
+                             detail="Only one Direction may be in progress at a time")
 
     assert recovery is not None
     instruction = next(

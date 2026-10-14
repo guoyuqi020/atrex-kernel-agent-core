@@ -482,43 +482,6 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
             )
         }
     ],
-    "update-direction": [
-        {
-            "tool": "list-directions",
-            "request": {"file": "scratch/directions-index.json"},
-        },
-        {
-            "instruction": (
-                "Before complete, abandon, block, or defer, declare hypothesis_status. "
-                "Use unresolved with empty support for untested ideas or blockers. Select IDs "
-                "from load-direction associated_experiment_ids only when relevant, or cite exact "
-                "Kernel/Result bindings directly with supporting_results. Judged conclusions need "
-                "scope and completed evidence; lifecycle closure is not hypothesis refutation"
-            )
-        },
-        {
-            "instruction": (
-                "When direction_concurrency_conflict is returned, continue the existing "
-                "in_progress(self) Direction or close it with complete, abandon, defer, or block. "
-                "Retry start only after this Attempt has no in_progress(self) Direction; "
-                "do not close other Attempts' work"
-            )
-        },
-        {
-            "instruction": (
-                "When direction_trajectory_conflict is returned, another Pool Trajectory "
-                "already advanced that Direction ID in this Epoch. Propose a new Direction "
-                "with relationship=reimplementation and the inherited ID as its parent"
-            )
-        },
-        {
-            "instruction": (
-                "When direction_advancement_limit_exceeded is returned, the requested Direction "
-                "was not started. Leave its status unchanged for a future Attempt; do not retry "
-                "start in the current Attempt"
-            )
-        },
-    ],
     "load-direction": [
         {
             "tool": "list-directions",
@@ -599,11 +562,70 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
 }
 
 
+def _direction_recovery(
+    request: dict[str, Any] | None, detail: str, *, experiments_enabled: bool,
+) -> list[dict[str, Any]]:
+    # State-specific guidance is meaningful only for the error actually returned.
+    issue = local_validation_issue(detail)
+    if issue["code"] == "direction_advancement_limit_exceeded":
+        return [{"instruction": (
+            "When direction_advancement_limit_exceeded is returned, the requested Direction "
+            "was not started. Leave its status unchanged for a future Attempt; do not retry "
+            "start in the current Attempt"
+        )}]
+    if issue["code"] == "direction_concurrency_conflict":
+        return [
+            {"tool": "list-directions", "request": {"file": "scratch/directions-index.json"}},
+            {"instruction": (
+                "When direction_concurrency_conflict is returned, continue the existing "
+                "in_progress(self) Direction or close it with complete, abandon, defer, or block. "
+                "Retry start only after this Attempt has no in_progress(self) Direction; "
+                "do not close other Attempts' work"
+            )},
+        ]
+    action = (request or {}).get("action")
+    if action == "propose":
+        instruction = (
+            'Retry action="propose" with name, hypothesis, rationale, plan, '
+            "success_criteria and stop_conditions. Runtime assigns the Direction ID. "
+            "Do not add closure fields or outcome evidence to a proposal."
+        )
+    elif action == "start":
+        instruction = (
+            'Retry action="start" with the exact visible direction_id. Use list-directions '
+            "or load-direction if the ID is unknown. Starting requires no hypothesis_status "
+            "or outcome evidence; omit supporting_experiment_ids, supporting_results, scope "
+            "and claim_kind. Do not close the Direction to repair a start request."
+        )
+    elif isinstance(action, str) and action in {"complete", "abandon", "block", "defer"}:
+        instruction = (
+            f'Retry action="{action}" for the same Direction owned by this Attempt with '
+            "direction_id and hypothesis_status. Use unresolved for unmeasured or inconclusive "
+            "work; analysis is optional and adds only new route-level findings. "
+            "Supported/refuted requires scope and qualifying completed Result evidence. "
+            + ("Include supporting_experiment_ids (an empty list is allowed); use only relevant "
+               "visible Experiment IDs or exact Kernel/Result bindings in supporting_results."
+               if experiments_enabled else
+               "The Experiment module is disabled: omit supporting_experiment_ids; cite exact "
+               "Kernel/Result bindings in supporting_results when judging the hypothesis.")
+        )
+    else:
+        instruction = (
+            "Set action to a string matching your intent: propose for a new Direction, start "
+            "to begin an existing Direction, or complete/abandon/block/defer for a closure. "
+            "A direction_id alone does not select an action. Supply the fields required for "
+            "that action in request_schema and retry; do not change lifecycle state just to "
+            "repair a missing or invalid action."
+        )
+    return [{"instruction": instruction}]
+
+
 def tool_recovery(
     command: str,
     *,
     operation: str | None = None,
     detail: str = "",
+    request: dict[str, Any] | None = None,
     directions_enabled: bool = True,
     experiments_enabled: bool = True,
 ) -> list[dict[str, Any]] | None:
@@ -618,18 +640,8 @@ def tool_recovery(
                 )
             }
         ]
-    if command == "update-direction" and not experiments_enabled:
-        return [
-            {
-                "instruction": (
-                    "Close the Direction with hypothesis_status and optional new route-level "
-                    "analysis; "
-                    "omit supporting_experiment_ids. Use unresolved if unmeasured; for a judged "
-                    "conclusion provide scope and supporting_results with exact "
-                    "Kernel/Result bindings."
-                )
-            }
-        ]
+    if command == "update-direction":
+        return _direction_recovery(request, detail, experiments_enabled=experiments_enabled)
     if command == "attempt-report" and (not directions_enabled or not experiments_enabled):
         return [
             {

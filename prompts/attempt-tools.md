@@ -338,7 +338,10 @@ Direction with the appropriate ancestry and fresh rationale; do not treat an old
 as an obligation to explore it. The normal workflow is to choose, propose, and test your own
 hypothesis from the public contract, profiling, and durable Journal evidence.
 
-Start with `action="start"` and `direction_id`; analysis is optional.
+Start with `action="start"` and `direction_id`; analysis is optional. A Direction ID alone does not select an action.
+If a request is rejected, `issues` names each missing or invalid field (for example
+`request.action`); repair the fields for your intended action and retry. Do not close a
+Direction merely to repair a malformed start request.
 Close with `complete`, `abandon`, `block`, or `defer`, additionally supplying
 `hypothesis_status` and a unique `supporting_experiment_ids` array (0–32 IDs):
 

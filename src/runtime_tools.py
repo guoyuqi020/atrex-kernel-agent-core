@@ -1218,6 +1218,13 @@ def _validate_experiment_comparison(
 
 
 def record_experiment(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    schema = tool_request_schema(
+        "record-experiment", directions_enabled="directions" in _tool_modules(),
+    )
+    # Missing keys are not explicit null evidence. Let Runtime identify every missing
+    # required field before local comparison/adoption checks interpret the values.
+    if schema is not None and set(schema["required"]) - request.keys():
+        return runtime_journal(context, "record-experiment", request)
     _object_array(
         request.get("knowledge_used", []),
         "Experiment knowledge_used",
@@ -1666,6 +1673,7 @@ def _augment_agent_error(
     detail: str,
     context: RuntimeToolContext | None = None,
     operation: str | None = None,
+    request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Add local repair contracts without replacing more authoritative service guidance."""
     if command == "kernel-artifact-read" and isinstance(response.get("issues"), list):
@@ -1712,10 +1720,20 @@ def _augment_agent_error(
             command,
             operation=operation,
             detail=detail,
+            request=request,
             directions_enabled="directions" in _tool_modules(),
             experiments_enabled="experiments" in _tool_modules(),
         )
         if recovery is not None:
+            if command in {"update-direction", "record-experiment"}:
+                missing = [
+                    item["path"] for item in response.get("issues", [])
+                    if isinstance(item, dict) and item.get("code") == "missing"
+                    and isinstance(item.get("path"), str)
+                ]
+                if missing:
+                    recovery = [{"instruction": "Supply the missing required fields: "
+                                 + ", ".join(missing) + "."}, *recovery]
             response["recovery"] = recovery
     return response
 
@@ -1738,6 +1756,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     context: RuntimeToolContext | None = None
     operation: str | None = None
+    request: dict[str, Any] | None = None
     try:
         if args.command == "runtime-contract":
             result = runtime_contract(
@@ -1809,6 +1828,7 @@ def main(argv: list[str] | None = None) -> int:
                 detail=str(response.get("detail", "invalid request")),
                 context=context,
                 operation=operation,
+                request=request,
             )
         print(json.dumps(response, ensure_ascii=False, allow_nan=False, sort_keys=True))
         return 2
@@ -1827,6 +1847,7 @@ def main(argv: list[str] | None = None) -> int:
                 detail=str(error),
                 context=context,
                 operation=operation,
+                request=request,
             )
         print(json.dumps(response, ensure_ascii=False, allow_nan=False, sort_keys=True))
         return 2
