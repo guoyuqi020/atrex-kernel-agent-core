@@ -239,7 +239,9 @@ def _direction_schema(*, experiments_enabled: bool = True) -> dict[str, Any]:
     ]
     update["description"] = (
         "Closures require hypothesis_status; analysis is optional and only adds new "
-        "route-level conclusions. "
+        "route-level conclusions, untested alternatives or next steps; reference selected "
+        "Experiment IDs instead of repeating their local analyses. A failed implementation "
+        "does not refute all variants of the mechanism. "
         "Use unresolved and empty support when unmeasured or inconclusive; stopping work does "
         "not refute its hypothesis. For supported/refuted, provide scope and completed Result "
         "evidence relevant to the proposal hypothesis, directly through supporting_results "
@@ -315,8 +317,9 @@ def _experiment_schema(*, allow_baseline: bool, directions_enabled: bool = True)
             "analysis": {
                 **_text(),
                 "description": (
-                    "Optional new interpretation, not repeated measurements; "
-                    "omit if the cause is unknown."
+                    "Optional new local interpretation of this tested implementation, not repeated "
+                    "measurements or a copy of the Direction hypothesis; distinguish measured "
+                    "outcomes from untested causes and omit if the cause is unknown."
                 ),
             },
             "action": {"enum": actions},
@@ -368,96 +371,24 @@ def _experiment_schema(*, allow_baseline: bool, directions_enabled: bool = True)
 def _attempt_report_schema(
     *, allow_baseline: bool, experiments_enabled: bool = True
 ) -> dict[str, Any]:
-    result_binding = _object(
-        {
-            "operation": {"const": "profile"},
-            "kernel_artifact_digest": _digest(),
-            "result_artifact_digest": _digest(),
-        }
-    )
-    profile = _object(
-        {
-            "tool_used": _text(),
-            "profiler": _text(),
-            "profile_level": _text(),
-            "bottleneck_type": _text(),
-            "evidence_summary": _text(),
-            "evidence_chain": _text(),
-            "supporting_results": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 32,
-                "items": result_binding,
-            },
-        }
-    )
     schema = _object(
         {
             "status": {
-                "enum": (
-                    ["candidate_ready", "blocked"]
-                    if allow_baseline
-                    else ["candidate_ready", "pivot", "blocked"]
-                )
+                "enum": (["candidate_ready", "blocked"] if allow_baseline
+                         else ["candidate_ready", "pivot", "blocked"])
             },
-            "hypothesis": _text(),
-            "diagnosis": _object({"bottleneck": _text(), "evidence": _text()}),
-            "approach": _object(
-                {
-                    "summary": _text(),
-                    "steps": {"type": "array", "minItems": 1, "items": _text()},
-                    "expected_impact": _text(),
-                    "risks": {"type": "array", "items": _text()},
-                }
-            ),
             "final_candidate": {"oneOf": [_object({"change_summary": _text()}), {"type": "null"}]},
-            "evidence_summary": _object({"correctness": _text(), "performance": _text()}),
-            "profile_evidence": {"oneOf": [profile, {"type": "null"}]},
-            "analysis": _text(),
-            "knowledge_used": {
-                "type": "array",
-                "items": _object(
-                    {"record_id": _text(), "finding": _text(), "application": _text()}
-                ),
-            },
-            "findings": {
-                "type": "array",
-                "items": _object(
-                    {
-                        "category": _text(),
-                        "observation": _text(),
-                        "root_cause": {"oneOf": [_text(), {"type": "null"}], "default": None},
-                        "claim": {"oneOf": [_text(), {"type": "null"}]},
-                        "claim_kind": _claim_kind(),
-                        "assessment": {
-                            "enum": ["unresolved", "supported", "refuted"],
-                            "default": "unresolved",
-                        },
-                        "scope": {"oneOf": [_text(), {"type": "null"}]},
-                        "supporting_results": _claim_results(),
-                        "resolution": _text(),
-                        "lesson": _text(),
-                        "supporting_experiment_ids": {
-                            "type": "array",
-                            "maxItems": 32,
-                            "uniqueItems": True,
-                            "items": _identifier("experiment_"),
-                        },
-                    },
-                    required=("category", "observation", "resolution", "lesson"),
-                ),
-            },
             "contributing_result_artifact_digests": {
-                "type": "array",
-                "maxItems": 64,
-                "items": _digest(),
+                "type": "array", "maxItems": 64, "items": _digest(),
             },
             "blocker": {"oneOf": [_text(), {"type": "null"}]},
-        }
+        },
     )
-    if not experiments_enabled:
-        finding = schema["properties"]["findings"]["items"]
-        finding["properties"].pop("supporting_experiment_ids")
+    schema["description"] = (
+        "Terminal handoff only: status, final_candidate, contributing_result_artifact_digests "
+        "and blocker. Runtime attaches Journals and generates measured outcomes. Store analysis "
+        "in an enabled Experiment or Direction, never repeat it in the report."
+    )
     return schema
 
 
@@ -805,7 +736,7 @@ _PATH_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (re.compile(r"hypothesis_status", re.I), "hypothesis_status"),
     (re.compile(r"profile_evidence\.supporting_results"), "profile_evidence.supporting_results"),
-    (re.compile(r"supporting_experiment_ids", re.I), "findings.supporting_experiment_ids"),
+    (re.compile(r"supporting_experiment_ids", re.I), "supporting_experiment_ids"),
     (re.compile(r"final_candidate", re.I), "final_candidate"),
     (re.compile(r"cannot leave any Direction in progress", re.I), "direction_events"),
     (re.compile(r"Only one Direction may be in progress", re.I), "direction_id"),

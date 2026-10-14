@@ -47,11 +47,10 @@ def test_runtime_summary_and_null_prose_survive_report_handoff(tmp_path: Path) -
     for event in state["direction_events"]:
         event["analysis"] = None
     request = helpers._report(str(receipt["experiment_id"]))
-    request["findings"] = []
     published = runtime_tools.attempt_report(context, request)
     assert published["report_status"] == "candidate_ready"
     value = json.loads(context.report_path.read_text())
-    assert value["findings"] == []
+    assert "findings" not in value
     assert value["experiments"][0]["measurement_summary"] == summary
     assert value["experiments"][0]["hypothesis"] is None
     assert all(event["analysis"] is None for event in value["direction_events"])
@@ -70,7 +69,7 @@ def test_prompt_explains_minimal_writing_and_only_enabled_tools(modules: frozens
     template = (Path(__file__).parents[1] / "prompts/attempt-tools.md").read_text()
     prompt = modular_tool_instructions(template, "cuda", modules)
     assert "Candidate_ready requires at least one real Finding" not in prompt
-    assert "Findings may be empty" in prompt
+    assert "compact handoff" in prompt
     if "experiments" in modules:
         assert "measurement_summary" in prompt
         assert "Analysis is optional" in prompt

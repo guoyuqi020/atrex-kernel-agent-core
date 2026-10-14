@@ -23,6 +23,7 @@ from contexts.attempt import RuntimeAttemptContext
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
 from session_clock import SESSION_CLOCK_ENV, active_time
 
+from .dev_only_prompts import dev_only_enabled
 from .tool_module_prompts import active_modules
 
 ReportContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
@@ -233,6 +234,12 @@ def _missing_prompt(context: ReportContext, backup: str | None) -> str:
                 "qualify, and a failed current full Evaluate cannot be overridden. "
             )
         )
+        if dev_only_enabled():
+            reuse_note = (
+                "This is the Dev-only arm: candidate_ready does not require an Agent Evaluate. "
+                "Nominate the current source from existing evidence with honest limitations; "
+                "Runtime privately validates it after handoff. Do not invent official results. "
+            )
         preserved = (
             f"The unaccepted local report was backed up at `{backup}`. "
             if backup is not None
@@ -244,7 +251,7 @@ def _missing_prompt(context: ReportContext, backup: str | None) -> str:
             "the candidate or start new measurements. "
             f"Public task context: {_public_context(context)}. {_trace_hint(context)} "
             f"{preserved}Use the live runtime-contract and existing evidence; {journal_note}. "
-            f"{reuse_note}Keep the required findings and enabled Direction bookkeeping. "
+            f"{reuse_note}Complete enabled Journal bookkeeping; submit only the compact handoff fields. "
             "Never invent evidence. If candidate_ready is unsupported, use blocked"
             + ("" if isinstance(context, RuntimeLineageBootstrapContext) else " or pivot")
             + ". Submit attempt-report and finish only after its Runtime receipt."
@@ -279,13 +286,13 @@ def _missing_prompt(context: ReportContext, backup: str | None) -> str:
         "do not invent trials, measurements, successful checks, or supporting evidence. "
         "Complete only the Journal bookkeeping needed to describe the work already done. "
         "Runtime supplies measurement_summary; evidence and analysis need not repeat it. "
-        "Findings may be empty for every report status; do not manufacture lessons.\n"
+        "No analysis or Findings belong in attempt-report; keep interpretations in enabled Journals.\n"
         "If the exact final Kernel reuses matching successful historical full-Evaluate evidence, "
         "record an adopt decision with the real before/after Trials and let Runtime validate it. "
         "Do not wait for authoritative ABBA: it runs after Report handoff and creates no Agent "
         "Trial. Agent ABBA cannot replace ordinary full-Evaluate evidence.\n"
         f"{fallback} Explain any remaining uncertainty or blocker.\n"
-        f"A {empty_status} report may have zero Experiments and empty findings, "
+        f"A {empty_status} report may have zero Experiments, "
         "including after closing an unmeasured Direction; do not invent either. "
         "Close only in_progress(self) Directions, leaving others' work open. "
         "For unmeasured or inconclusive work, close with hypothesis_status=unresolved "

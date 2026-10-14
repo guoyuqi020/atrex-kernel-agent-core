@@ -46,10 +46,10 @@ def test_modular_prompt_lists_only_enabled_journal_tools(modules: frozenset[str]
     assert "input_path" in prompt
     assert "latency_prediction" in prompt
     assert "result-artifact-read" in prompt
-    assert "root_cause=null" in prompt
-    assert "supporting_results" in prompt
-    assert "downgrades to unresolved" in prompt
-    assert "not verified conclusions" in prompt
+    assert "compact handoff" in prompt
+    assert "Untested causal claims remain unresolved" in prompt
+    assert "A failed variant does not refute its entire direction" in prompt
+    assert "Do not submit analysis" in prompt
     assert ('scratch/directions-index.json' in prompt) == ("directions" in modules)
     assert ("in_progress(self)" in prompt) == ("directions" in modules)
     assert ("in_progress(other)" in prompt) == ("directions" in modules)
@@ -371,7 +371,7 @@ def test_evaluate_prompt_explains_overrides_and_full_contract_requirement() -> N
     assert 'register `action: "adopt"`' in text
     assert "Only `adopt` permits a historical Trial as `after`" in text
     assert "not an Agent Result Artifact" in text
-    assert "`candidate_ready` requires the enabled modules' nomination journals" in text
+    assert "Enabled nomination Journal requirements still apply" in text
     assert "input_scope" in text
     assert "input_py" in text and "shapes" in text
     assert "no further fields" not in text
@@ -448,7 +448,7 @@ def test_bootstrap_prompt_matches_special_attempt_protocol() -> None:
     assert "Use the seed, included Skills, and public contract." in baseline
     assert "Do not use `pivot` during Bootstrap" in baseline
     assert "complete private Bootstrap Gate independently" in baseline
-    assert "Set `profile_evidence` to `null` unless profiling was actually" in baseline
+    assert "Use the compact attempt-report handoff" in baseline
     assert "Use the shared tool contract below" in baseline
     assert "provenance and decisions" not in baseline
     assert "Example exploratory evaluation request" in tools

@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import os
 
-from runtime_contract import load_live_contract, wiki_enabled
+from runtime_contract import command_enabled, load_live_contract, wiki_enabled
+
+from .dev_only_prompts import dev_only_enabled, dev_only_tools, dev_only_workflow
 
 _DEFAULT = frozenset({"directions", "experiments"})
 _RUNTIME_TOOL = "agent/optimizer/src/runtime_tools.py"
@@ -67,6 +69,8 @@ def wiki_tool_instructions() -> str:
 
 def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) -> str:
     """Retain the shared Gateway contract and render only the enabled Journal tools."""
+    if dev_only_enabled():
+        return dev_only_tools(dsl)
     anchor = "`record-experiment` sends each validated Experiment to Runtime immediately."
     if anchor not in template:
         raise ValueError("Session tool Prompt is missing its Journal boundary")
@@ -140,6 +144,28 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         "result-artifact-read",
         "kernel-pareto-frontier",
     ]
+    if not command_enabled("result-artifact-read"):
+        commands.remove("result-artifact-read")
+        common = "\n".join(
+            line for line in common.splitlines()
+            if f"{_RUNTIME_TOOL} result-artifact-read " not in line
+        )
+        common = common.replace(
+            "Read the retained comparison with `result-artifact-read`;",
+            "Use the comparison returned by this tool call;",
+        ).replace(
+            '`kernel-artifact-read`, `{"result_artifact_digest":"sha256:<digest>"}` for\n'
+            "`result-artifact-read`. These reads never contact Agate.",
+            "`kernel-artifact-read`. Source reads never contact Agate.",
+        ).replace(
+            "Use `result-artifact-read` for the exact Evaluate, Profile, or other observation you need.\n"
+            "It returns",
+            "Result Artifact reads are disabled. Retain measurements from the original tool "
+            "response in your conversation or own notes. Exact duplicate submissions with visible "
+            "completed evidence return the cached result without a GPU run; this is recovery, "
+            "not a history browsing tool. Historical reports, conversations, source reads, and other queries "
+            "remain available. The original Gateway response returns",
+        )
     if wiki_enabled():
         commands.append("wiki-query")
     if "directions" in modules:
@@ -209,25 +235,6 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         if "experiments" in modules
         else "Experiment tools are unavailable; do not create or cite Experiment IDs."
     )
-    findings = (
-        "Findings may be empty even for candidate_ready. Add only new cross-experiment or cross-direction conclusions, not copies of Journal analyses. Each Finding names one claim, its claim_kind (observation, implementation_outcome, or "
-        "causal_hypothesis), assessment (unresolved, supported, or refuted), and scope. "
-        "Use root_cause=null when unknown; no causal explanation is required. Missing historical "
-        "assessment means unresolved. Bind direct supporting_results as "
-        '[{"kernel_artifact_digest":"sha256:<kernel>","result_artifact_digests":["sha256:<result>"]}], '
-        "available in every module combination. Observations may cite completed Check/Dev/Profile/Evaluate; "
-        "implementation outcomes need Dev or full Evaluate; causal hypotheses need Dev/Profile/full Evaluate. "
-        "Check-only or correctness-only evidence cannot establish performance or causal judgments. "
-        "Missing claim, scope, or suitable evidence downgrades to unresolved with assessment_notes; "
-        "invalid references are errors. Runtime verifies bindings and operation eligibility, not truth. "
-        "Reuse existing visible Results; do not launch duplicate GPU work for bookkeeping. "
-        "Free-text analysis, diagnosis, and lessons remain interpretations, not verified conclusions. "
-        + (
-            "Optional supporting_experiment_ids may organize evidence from this Attempt's Journal."
-            if "experiments" in modules
-            else "Omit supporting_experiment_ids because Experiments are disabled."
-        )
-    )
     journal_reads = (
         "Journal writes are durable across recovery. Read indexes to select records; known IDs can be loaded directly. "
         "Use returned Artifact digests to retrieve exact observations and source. Do not reload prose "
@@ -240,14 +247,19 @@ def modular_tool_instructions(template: str, dsl: str, modules: frozenset[str]) 
         f"The enabled CLI commands are {available}. Do not call commands absent from the live contract. "
         f"{directions}\n\n{experiments}\n\n"
         f"{journal_reads}"
-        "Keep `scratch/attempt-report-draft.json` current with diagnosis, approach, exact candidate, "
-        "correctness/performance evidence, analysis, profile evidence, knowledge use, findings, "
-        "contributing Result Artifact digests, and any blocker. "
+        "Keep scratch/attempt-report-draft.json as a compact handoff with exactly status, "
+        "final_candidate, contributing_result_artifact_digests and blocker. "
         "candidate_ready requires final_candidate and blocker=null; pivot requires both null; "
         "blocked requires final_candidate=null and a nonempty blocker. Bootstrap does not allow pivot. "
-        "Profile evidence must cite real Runtime Profile Result and Kernel Artifact digests; use null "
-        "when none exists. Knowledge and contributing digests must cite actually used material. "
-        f"{findings} "
+        "Do not submit analysis, hypothesis, diagnosis, approach, evidence_summary, profile_evidence, "
+        "knowledge_used or findings in the Report. Runtime generates measured correctness and "
+        "performance summaries. The candidate change_summary describes source state, not a causal lesson. "
+        "Keep local interpretations in an enabled Experiment; put only new route-level synthesis "
+        "in an enabled Direction and reference Experiments instead of repeating their explanations. "
+        "When both modules are disabled no experience analysis is required; your own notes are allowed. "
+        "A failed variant does not refute its entire direction; scope conclusions to tested "
+        "implementations and conditions. Untested causal claims remain unresolved. "
+        "Contributing digests identify historical Results you actually drew on, not nomination evidence. "
         "Query the live `attempt-report` schema for exact fields and submit once after all enabled "
         "Journal bookkeeping and in-flight Gateway calls finish. The CLI attaches authoritative "
         "Journal snapshots and enabled module names. On validation error, repair `issues` using "
@@ -269,6 +281,8 @@ def _replace_section(template: str, start: str, end: str | None, body: str) -> s
 
 def modular_workflow(template: str, *, bootstrap: bool, modules: frozenset[str]) -> str:
     """Preserve the versioned phase Prompt's common engineering guidance."""
+    if not bootstrap and dev_only_enabled():
+        return dev_only_workflow()
     if bootstrap:
         return _modular_baseline(template, modules)
     return _modular_attempt(template, modules)
@@ -337,7 +351,7 @@ def _modular_attempt(template: str, modules: frozenset[str]) -> str:
         "another edit. Runtime generates measurement_summary; omit repeated evidence and add analysis only for new interpretations. Cite exact "
         "Result Artifact digests. Negative results are first-class evidence. "
         if "experiments" in modules
-        else "Preserve factual measurements and decisions in the Report draft. "
+        else "Preserve factual measurements and decisions in your own notes. "
     )
     recording += (
         "Close every started Direction before handoff with `hypothesis_status` "
@@ -349,7 +363,7 @@ def _modular_attempt(template: str, modules: frozenset[str]) -> str:
     )
     recording += (
         "Keep the structured Report draft current. Do not fabricate evidence to finish. "
-        "Submit with `attempt-report`; all report statuses allow empty Findings when there is no new conclusion."
+        "Submit the compact handoff with `attempt-report`; do not duplicate Journal analysis."
     )
     template = _replace_section(template, headings[6], headings[7], recording)
     helper = _section(template, headings[7], "## Terminal behavior").split(
@@ -363,7 +377,7 @@ def _modular_attempt(template: str, modules: frozenset[str]) -> str:
     template = _replace_section(template, headings[7], "## Terminal behavior", helper)
     terminal = (
         "Stop only with a mature evaluated candidate, an exhausted or reverted hypothesis, or a "
-        "genuine external blocker. Follow the exact status, enabled Journal closure, Finding, and "
+        "genuine external blocker. Follow the exact status, enabled Journal closure and "
         "Report schema in the Session-tool contract. Never invent correctness, performance, profiler "
         "output, or knowledge use merely to terminate; an evidence-backed pivot is valid."
     )
@@ -400,7 +414,7 @@ def _modular_kda_attempt(template: str, modules: frozenset[str]) -> str:
             "- After every decisive measured decision, call `record-experiment` before another edit. "
             "Cite exact Result Artifact digests; Runtime generates measurement_summary. Add only new optional analysis and retain negative results.\n"
             if "experiments" in modules
-            else "- Preserve decisive measured decisions and negative results in the Report draft.\n"
+            else "- Preserve decisive measured decisions and negative results in your own notes.\n"
         ),
     )
     execution = execution.split("- Treat `prompts/` and `skills/`", 1)[0] + (
@@ -477,7 +491,7 @@ def _modular_baseline(template: str, modules: frozenset[str]) -> str:
             else "Omit `direction_id`. "
         )
         if "experiments" in modules
-        else "Preserve measured repair evidence in the Report draft. "
+        else "Preserve measured repair evidence in your own notes. "
     )
     validation += "\n\nBefore nomination," + _section(
         template, "Before nomination,", "## Terminal contract"
@@ -494,9 +508,9 @@ def _modular_baseline(template: str, modules: frozenset[str]) -> str:
             else ""
         )
         + "Do not fabricate evidence to satisfy a schema. Use the shared Report fields with Bootstrap "
-        "semantics: `diagnosis` names the bring-up or correctness issue, `approach` explains construction "
-        "or repair, and `expected_impact` states the expected correctness or compatibility effect. "
-        "Set `profile_evidence` to null unless profiling was actually needed. An accepted "
+        "semantics: nominate the exact constructed source with a compact change_summary; "
+        "keep bring-up analysis in enabled Journals or your own notes. "
+        "An accepted "
         "`candidate_ready` Report nominates a candidate for the private Bootstrap Gate; it does not "
         "itself register the baseline."
     )
@@ -505,7 +519,7 @@ def _modular_baseline(template: str, modules: frozenset[str]) -> str:
 
 def modular_evidence_prompt(prompt: str, modules: frozenset[str]) -> str:
     """Keep trusted workspace/history facts while replacing coupled Journal instructions."""
-    if modules == _DEFAULT:
+    if dev_only_enabled() or modules == _DEFAULT:
         return prompt.rstrip()
     prefix = prompt.split("## Direction ancestry", 1)[0]
     prefix = prefix.replace(

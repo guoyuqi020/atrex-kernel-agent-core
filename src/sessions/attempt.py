@@ -103,6 +103,10 @@ def render_system_prompt(context: RuntimeAttemptContext, config: AgentConfig) ->
 
 
 def run() -> int:
+    from runtime_contract import raw_enabled
+    if raw_enabled():
+        from .raw import run as run_raw
+        return run_raw()
     context = RuntimeAttemptContext.from_environment()
     config = AgentConfig.load(context.repository, workspace=context.workspace)
     return execute_agent_session(

@@ -2,6 +2,7 @@
 
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -32,10 +33,26 @@ def test_backend_can_wait_longer_than_active_budget_but_still_limits_agent_work(
     path.write_text(json.dumps({
         "schema_version": 1, "wait_seconds": 0, "paused_since": time.monotonic(),
     }))
-    result = run_bounded(
-        [sys.executable, "-c", "import time; time.sleep(1.3); print('finished')"],
-        tmp_path, timeout=1, env=env,
-    )
+    started = time.monotonic()
+
+    def finish_request() -> None:
+        time.sleep(1.3)
+        replacement = path.with_suffix(".new")
+        replacement.write_text(json.dumps({
+            "schema_version": 1, "wait_seconds": time.monotonic() - started,
+            "paused_since": None,
+        }))
+        replacement.replace(path)
+
+    worker = threading.Thread(target=finish_request)
+    worker.start()
+    try:
+        result = run_bounded(
+            [sys.executable, "-c", "print('finished')"], tmp_path, timeout=1, env=env,
+        )
+    finally:
+        worker.join(timeout=5)
+    assert time.monotonic() - started >= 1.3
     assert not result.timed_out and result.returncode == 0
     path.write_text(json.dumps({"schema_version": 1, "wait_seconds": 0, "paused_since": None}))
     result = run_bounded(

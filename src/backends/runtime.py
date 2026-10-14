@@ -408,7 +408,8 @@ class CliAgentRuntime:
         if self.id == "claude":
             # Runtime waits do not spend active Session time. Give their foreground
             # Bash calls the 72-hour HTTP allowance rather than the remaining Agent budget.
-            # Other Bash calls keep their usual default, and background subagents remain available.
+            # run_bounded additionally pauses the Provider tree while its independent
+            # HTTP worker owns a Runtime request; shell timeouts cannot release it.
             tool_timeout_s = (
                 max(request.timeout_s, 72 * 3600)
                 if environment.get(SESSION_CLOCK_ENV) else request.timeout_s

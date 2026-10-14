@@ -655,49 +655,7 @@ def _completed_test_experiment(context: Any) -> tuple[str, dict[str, Any]]:
 def _report(experiment_id: str) -> dict[str, object]:
     return {
         "status": "candidate_ready",
-        "hypothesis": "one transaction replaces two",
-        "diagnosis": {
-            "bottleneck": "load issue rate",
-            "evidence": "survey localized load issue pressure",
-        },
-        "approach": {
-            "summary": "vectorize the load",
-            "steps": ["replace scalar loads"],
-            "expected_impact": "reduce memory transactions",
-            "risks": ["alignment must be checked"],
-        },
         "final_candidate": {"change_summary": "used a vector load"},
-        "evidence_summary": {
-            "correctness": "evaluate result is correct",
-            "performance": "evaluate result is faster",
-        },
-        "profile_evidence": {
-            "tool_used": "gateway-execute/profile",
-            "profiler": "ncu",
-            "profile_level": "survey",
-            "bottleneck_type": "memory_bound",
-            "evidence_summary": "survey result localized the bottleneck",
-            "evidence_chain": "survey counters support the diagnosed bottleneck",
-            "supporting_results": [
-                {
-                    "operation": "profile",
-                    "kernel_artifact_digest": "sha256:" + "d" * 64,
-                    "result_artifact_digest": "sha256:" + "f" * 64,
-                }
-            ],
-        },
-        "analysis": "candidate is correct and faster",
-        "knowledge_used": [],
-        "findings": [
-            {
-                "category": "correctness",
-                "observation": "vector loads require alignment",
-                "root_cause": "unaligned accesses are unsafe",
-                "resolution": "added an alignment guard",
-                "lesson": "alignment must be checked",
-                "supporting_experiment_ids": [experiment_id],
-            }
-        ],
         "contributing_result_artifact_digests": ["sha256:" + "f" * 64],
         "blocker": None,
     }
@@ -950,10 +908,10 @@ def test_attempt_report_validates_and_atomically_publishes_once(tmp_path: Path) 
         "report_status": "candidate_ready",
         "file": "scratch/attempt-report.json",
         "experiment_count": 1,
-        "finding_count": 1,
+        "direction_count": 1,
     }
     report = json.loads(context.report_path.read_text(encoding="utf-8"))
-    assert report["schema_version"] == 12
+    assert report["schema_version"] == 13
     assert report["experiments"][0]["experiment_id"] == receipt["experiment_id"]
     with pytest.raises(FileExistsError, match="already exists"):
         attempt_report(context, _report(receipt["experiment_id"]))
@@ -965,7 +923,6 @@ def test_attempt_report_without_journal_modules(
     context = _context(tmp_path)
     monkeypatch.setattr(runtime_tools, "_tool_modules", lambda: frozenset())
     request = _report("experiment_" + "0" * 32)
-    request["findings"][0].pop("supporting_experiment_ids")
 
     receipt = attempt_report(context, request)
 
@@ -974,7 +931,7 @@ def test_attempt_report_without_journal_modules(
     assert report["tool_modules"] == []
     assert report["experiments"] == []
     assert report["direction_events"] == []
-    assert report["findings"][0]["supporting_experiment_ids"] == []
+    assert "findings" not in report
 
 
 def test_attempt_report_receipt_withholds_the_report_and_its_identities(tmp_path: Path) -> None:
@@ -1426,15 +1383,13 @@ def test_attempt_report_rejects_invalid_lists_before_publication(tmp_path: Path)
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
     report = _report(receipt["experiment_id"])
-    report["approach"]["steps"] = []  # type: ignore[index]
+    report["contributing_result_artifact_digests"] = "not-an-array"
 
-    with pytest.raises(ValueError, match=r"approach\.steps must not be empty"):
+    with pytest.raises(ValueError, match="contributing_result_artifact_digests must be an array"):
         attempt_report(context, report)
     assert not context.report_path.exists()
 
-    approach = report["approach"]
-    assert isinstance(approach, dict)
-    approach["steps"] = ["apply the measured optimization"]
+    report["contributing_result_artifact_digests"] = []
     published = attempt_report(context, report)
     assert published["report_status"] == "candidate_ready"
     assert context.report_path.is_file()
@@ -1479,71 +1434,10 @@ def test_attempt_report_normalizes_contributing_result_artifact_digests(
     assert report == original
 
 
-def test_attempt_report_rejects_incomplete_profile_evidence(tmp_path: Path) -> None:
-    context = _context(tmp_path)
-    _direction_id, receipt = _completed_test_experiment(context)
-    report = _report(receipt["experiment_id"])
-    profile = report["profile_evidence"]
-    assert isinstance(profile, dict)
-    profile.pop("evidence_chain")
-
-    with pytest.raises(ValueError, match="profile_evidence fields must be exactly"):
-        attempt_report(context, report)
-    assert not context.report_path.exists()
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("kernel_artifact_digest", "sha256:" + "1" * 64),
-        ("result_artifact_digest", "sha256:" + "1" * 64),
-        ("result_artifact_digest", "sha256:" + "1" * 64),
-    ],
-)
-def test_attempt_report_rejects_profile_not_observed_by_runtime(
-    tmp_path: Path,
-    field: str,
-    value: str,
-) -> None:
-    context = _context(tmp_path)
-    _direction_id, receipt = _completed_test_experiment(context)
-    report = _report(receipt["experiment_id"])
-    profile = report["profile_evidence"]
-    assert isinstance(profile, dict)
-    results = profile["supporting_results"]
-    assert isinstance(results, list)
-    results[0][field] = value
-
-    with pytest.raises(ValueError, match="does not match a visible Runtime-recorded Profile"):
-        attempt_report(context, report)
-    assert not context.report_path.exists()
 
 
-def test_attempt_report_can_cite_a_profile_without_any_experiment_reference(tmp_path: Path) -> None:
-    context = _context(tmp_path)
-    _direction_id, receipt = _completed_test_experiment(context)
-    prior_journal = deepcopy(_fake_state(context))
-    # A visible historical or newly measured Profile need not be in this Journal.
-    _FAKE_PROFILES[str(context.workspace)] = [
-        {
-            "kernel_artifact_digest": "sha256:" + "2" * 64,
-            "result_artifact_digest": "sha256:" + "4" * 64,
-        }
-    ]
-    report = _report(str(receipt["experiment_id"]))
-    profile = report["profile_evidence"]
-    assert isinstance(profile, dict)
-    profile["supporting_results"] = [
-        {
-            "operation": "profile",
-            "kernel_artifact_digest": "sha256:" + "2" * 64,
-            "result_artifact_digest": "sha256:" + "4" * 64,
-        }
-    ]
-
-    assert attempt_report(context, report)["report_status"] == "candidate_ready"
-    assert _fake_state(context) == prior_journal
-    assert _REGISTERED_REPORTS[-1]["profile_evidence"] == profile
 
 
 def test_blocked_report_can_cite_profile_without_creating_a_journal(tmp_path: Path) -> None:
@@ -1553,7 +1447,6 @@ def test_blocked_report_can_cite_profile_without_creating_a_journal(tmp_path: Pa
         status="blocked",
         final_candidate=None,
         blocker="cannot repair the candidate",
-        findings=[],
         contributing_result_artifact_digests=[],
     )
 
@@ -1562,17 +1455,6 @@ def test_blocked_report_can_cite_profile_without_creating_a_journal(tmp_path: Pa
     assert _REGISTERED_REPORTS[-1]["direction_events"] == []
 
 
-def test_attempt_report_rejects_finding_from_another_experiment(tmp_path: Path) -> None:
-    context = _context(tmp_path)
-    _direction_id, receipt = _completed_test_experiment(context)
-    report = _report(receipt["experiment_id"])
-    findings = report["findings"]
-    assert isinstance(findings, list)
-    findings[0]["supporting_experiment_ids"] = ["experiment_" + "9" * 32]
-
-    with pytest.raises(ValueError, match="outside this journal"):
-        attempt_report(context, report)
-    assert not context.report_path.exists()
 
 
 def test_attempt_report_rejects_legacy_top_level_decision(tmp_path: Path) -> None:
@@ -1724,19 +1606,20 @@ def test_gateway_execute_hides_wire_schema_version(
             "result_artifact_digest": "sha256:" + "e" * 64,
             "job_id": None,
             "evaluation": None,
-            "result": {"env": [{"name": "L20N"}]},
+            "result": {"gpu": "L20N", "env": {"arch": "sm_89"}, "capabilities": {"profile": True}},
         }
 
     monkeypatch.setattr(runtime_tools, "_post", fake_post)
 
     response = gateway_execute(context, {"operation": "env"})
 
-    assert response == {"env": [{"name": "L20N"}]}
+    assert response == {"gpu": "L20N", "env": {"arch": "sm_89"}, "capabilities": {"profile": True}}
     path, request = sent[0]
     assert path == "/v1/operations"
     assert isinstance(request, dict)
     assert request["schema_version"] == 2
     assert isinstance(request["idempotency_key"], str)
+    assert set(request) == {"operation", "schema_version", "attempt_id", "idempotency_key"}
     with pytest.raises(ValueError, match="Runtime-owned fields"):
         gateway_execute(
             context,
@@ -1753,7 +1636,7 @@ def test_gateway_execute_returns_read_only_service_result_directly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _context(tmp_path)
-    result = {"env": [{"name": "L20N"}]}
+    result = {"gpu": "L20N", "env": {"arch": "sm_89"}, "capabilities": {"profile": True}}
 
     def fake_post(_url: str, _capability: str, _path: str, _value: object) -> dict[str, Any]:
         return {
@@ -2140,47 +2023,6 @@ def test_an_unreachable_runtime_still_fails_fast(monkeypatch: pytest.MonkeyPatch
         runtime_tools._post("http://runtime.invalid", "cap", "/v1/operations", {})
 
 
-@pytest.mark.parametrize("experiments_enabled", [False, True])
-@pytest.mark.parametrize("root_cause_mode", ["null", "omitted"])
-def test_attempt_report_allows_unknown_cause_and_direct_claim_evidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    experiments_enabled: bool,
-    root_cause_mode: str,
-) -> None:
-    context = _context(tmp_path)
-    if experiments_enabled:
-        _, receipt = _completed_test_experiment(context)
-        request = _report(receipt["experiment_id"])
-    else:
-        monkeypatch.setattr(runtime_tools, "_tool_modules", lambda: frozenset())
-        request = _report("experiment_" + "0" * 32)
-    findings = request["findings"]
-    assert isinstance(findings, list)
-    finding = findings[0]
-    assert isinstance(finding, dict)
-    finding.pop("supporting_experiment_ids")
-    finding["root_cause"] = None
-    if root_cause_mode == "omitted":
-        finding.pop("root_cause")
-    finding.update(
-        claim="The measured implementation completed correctly",
-        claim_kind="observation",
-        assessment="unresolved",
-        scope="this exact Kernel and input",
-        supporting_results=[
-            {
-                "kernel_artifact_digest": "sha256:" + "a" * 64,
-                "result_artifact_digests": ["sha256:" + "b" * 64],
-            }
-        ],
-    )
-    receipt = attempt_report(context, request)
-    assert receipt["status"] == "published"
-    saved = json.loads(context.report_path.read_text())["findings"][0]
-    assert saved["root_cause"] is None
-    assert saved["supporting_experiment_ids"] == []
-    assert saved["supporting_results"] == finding["supporting_results"]
 
 
 def test_report_receipt_persists_effective_assessment_without_echoing_report(
@@ -2191,15 +2033,11 @@ def test_report_receipt_persists_effective_assessment_without_echoing_report(
     context.working_kernel = context.workspace / "work/kernel"
     _, experiment = _completed_test_experiment(context)
     request = _report(experiment["experiment_id"])
-    findings = request["findings"]
-    assert isinstance(findings, list)
-    findings[0]["assessment"] = "refuted"
-    notes = [{"path": "findings.0", "reason": "No tested scope; judgment remains unresolved"}]
+    notes = [{"path": "direction_events", "reason": "No tested scope; judgment remains unresolved"}]
 
     def post(_url: str, _capability: str, _route: str, value: dict[str, Any]) -> dict[str, Any]:
         accepted = deepcopy(value["report"])
-        accepted["findings"][0]["assessment"] = "unresolved"
-        accepted["findings"][0]["assessment_notes"] = ["No tested scope"]
+        accepted["direction_events"][-1]["hypothesis_status"] = "unresolved"
         return {"result": {"status": "registered", "report": accepted, "assessment_notes": notes}}
 
     monkeypatch.setattr(runtime_tools, "_register_attempt_report", real_register_report)
@@ -2207,8 +2045,7 @@ def test_report_receipt_persists_effective_assessment_without_echoing_report(
     monkeypatch.setattr(runtime_tools, "_candidate", lambda _path: {})
     receipt = attempt_report(context, request)
     saved = json.loads(context.report_path.read_text())
-    assert saved["findings"][0]["assessment"] == "unresolved"
-    assert saved["findings"][0]["assessment_notes"] == ["No tested scope"]
+    assert saved["direction_events"][-1]["hypothesis_status"] == "unresolved"
     assert receipt["assessment_notes"] == notes
     assert "report" not in receipt
 
@@ -2233,3 +2070,28 @@ def test_report_receipt_rejects_wrong_accepted_report(
         real_register_report(
             context, {"attempt_id": context.attempt_id, "status": "candidate_ready"}
         )
+
+
+@pytest.mark.parametrize("extra", [{"gpu": "NVIDIA L20D"}, {"capabilities": True}, {"force": True}])
+def test_gateway_execute_env_rejects_agent_parameters_locally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: dict[str, Any],
+) -> None:
+    context = _context(tmp_path)
+
+    def unexpected_post(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Invalid env parameters must not reach Runtime HTTP")
+
+    monkeypatch.setattr(runtime_tools, "_post", unexpected_post)
+    with pytest.raises(ValueError, match="env accepts only"):
+        gateway_execute(context, {"operation": "env", **extra})
+
+
+@pytest.mark.parametrize("field", ["hypothesis", "diagnosis", "approach", "analysis", "findings", "evidence_summary", "profile_evidence", "knowledge_used"])
+def test_compact_report_rejects_duplicate_analysis_before_any_submission(tmp_path: Path, field: str) -> None:
+    context = _context(tmp_path)
+    request = _report("unused")
+    request[field] = None
+    with pytest.raises(ValueError, match="fields must be exactly"):
+        attempt_report(context, request)
+    assert not context.report_path.exists()
+    assert not _REGISTERED_REPORTS

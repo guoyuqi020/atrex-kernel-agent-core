@@ -110,10 +110,7 @@ def test_complex_local_schemas_track_validator_top_level_fields() -> None:
         "candidate_ready",
         "blocked",
     ]
-    profile_result = bootstrap_report["properties"]["profile_evidence"]["oneOf"][0]["properties"][
-        "supporting_results"
-    ]["items"]
-    assert profile_result["properties"]["operation"] == {"const": "profile"}
+    assert "profile_evidence" not in bootstrap_report["properties"]
 
 
 def test_simple_read_contracts_are_exact_and_bounded() -> None:
@@ -256,8 +253,7 @@ def test_tool_schemas_drop_disabled_cross_module_links() -> None:
     assert "supporting_experiment_ids" not in direction["oneOf"][1]["properties"]
     assert "direction_id" not in experiment["properties"]
     assert "direction_id" not in experiment["required"]
-    finding = report["properties"]["findings"]["items"]
-    assert "supporting_experiment_ids" not in finding["properties"]
+    assert "findings" not in report["properties"]
 
 
 def test_direction_concurrency_recovery_says_to_close_the_active_direction() -> None:
@@ -286,12 +282,7 @@ def test_claim_schema_support_is_independent_of_experiment_module(
 ) -> None:
     schema = tool_request_schema("attempt-report", experiments_enabled=experiments_enabled)
     assert schema is not None
-    finding = schema["properties"]["findings"]["items"]
-    assert finding["properties"]["assessment"]["default"] == "unresolved"
-    assert finding["properties"]["root_cause"]["oneOf"][-1] == {"type": "null"}
-    assert "root_cause" not in finding["required"]
-    assert "supporting_results" in finding["properties"]
-    assert "supporting_experiment_ids" not in finding["required"]
+    assert "findings" not in schema["properties"]
     direction = tool_request_schema("update-direction", experiments_enabled=experiments_enabled)
     assert direction is not None
     update = direction["oneOf"][1]

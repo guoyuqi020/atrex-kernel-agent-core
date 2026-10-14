@@ -22,7 +22,10 @@ from uuid import uuid4
 
 from contexts.attempt import RuntimeAttemptContext
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
-from runtime_contract import load_live_contract, project_contract, wiki_enabled
+from runtime_contract import (
+    command_enabled, dev_only_enabled, load_live_contract, project_contract, wiki_enabled,
+)
+from runtime_request_barrier import RuntimeServiceError as RuntimeServiceError
 from tool_contracts import local_validation_issue, tool_recovery, tool_request_schema
 
 _CANDIDATE_OPERATIONS = {
@@ -104,23 +107,18 @@ _EXPERIMENT_SUBJECT_FIELDS = {
 }
 _REPORT_FIELDS = {
     "status",
-    "hypothesis",
-    "diagnosis",
-    "approach",
     "final_candidate",
-    "evidence_summary",
-    "profile_evidence",
-    "analysis",
-    "knowledge_used",
-    "findings",
     "contributing_result_artifact_digests",
     "blocker",
 }
+
 RuntimeToolContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
 
 
 def _available_attempt_commands() -> tuple[str, ...]:
-    return _ATTEMPT_COMMANDS + (("wiki-query",) if wiki_enabled() else ())
+    return tuple(command for command in _ATTEMPT_COMMANDS if command_enabled(command)) + (
+        ("wiki-query",) if wiki_enabled() else ()
+    )
 
 
 def _tool_modules() -> frozenset[str]:
@@ -150,15 +148,6 @@ _GATEWAY_HTTP_TIMEOUT_SECONDS = 72 * 60 * 60
 # Runtime-local queries keep a bounded retry budget. Gateway commands wait for
 # their final result, subject to the owning Session/process lifetime.
 _MAX_TIMEOUT_RECONNECTS = 6
-
-
-class RuntimeServiceError(RuntimeError):
-    """Structured non-success response returned by a trusted Runtime service."""
-
-    def __init__(self, status_code: int, payload: dict[str, Any]) -> None:
-        self.status_code = status_code
-        self.payload = payload
-        super().__init__(str(payload.get("detail", payload.get("error", "Runtime service error"))))
 
 
 def _read_object(
@@ -269,6 +258,17 @@ def _atomic_bytes(path: Path, payload: bytes) -> None:
 
 
 def _post(url: str, capability: str, path: str, value: object) -> dict[str, Any]:
+    from runtime_request_barrier import REQUEST_SOCKET_ENV, supervised_post
+
+    if socket_path := os.environ.get(REQUEST_SOCKET_ENV):
+        return supervised_post(socket_path, url, capability, path, value)
+    if os.environ.get("ATREX_SESSION_CLOCK_PATH"):
+        raise RuntimeError("Runtime-bound CLI requires its live request supervisor")
+    return _post_direct(url, capability, path, value)
+
+
+def _post_direct(url: str, capability: str, path: str, value: object) -> dict[str, Any]:
+    """HTTP implementation also used by the independent request supervisor."""
     payload = json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
     request = urllib.request.Request(
         url.rstrip("/") + path,
@@ -563,6 +563,8 @@ def gateway_execute(context: RuntimeToolContext, request: dict[str, Any]) -> dic
     operation = request.get("operation")
     if not isinstance(operation, str) or not operation:
         raise ValueError("Gateway request requires operation")
+    if dev_only_enabled() and operation != "dev":
+        raise ValueError("This Dev-only Session allows only operation=dev")
     if operation in _RUNTIME_QUERY_OPERATIONS:
         command = next(
             name
@@ -574,6 +576,11 @@ def gateway_execute(context: RuntimeToolContext, request: dict[str, Any]) -> dic
         )
     if operation not in _GATEWAY_EXECUTE_OPERATIONS:
         raise ValueError(f"unsupported gateway-execute operation: {operation}")
+    if operation == "env" and set(request) != {"operation"}:
+        raise ValueError(
+            'env accepts only {"operation":"env"}; Runtime selects the task GPU '
+            "and returns both environment and capabilities. Do not set gpu, capabilities, or force."
+        )
     value = {"schema_version": 2, "attempt_id": context.attempt_id, **request}
     if operation == "evaluate":
         prediction = value.get("latency_prediction")
@@ -1399,7 +1406,13 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     status = request.get("status")
     if not isinstance(status, str) or status not in {"candidate_ready", "pivot", "blocked"}:
         raise ValueError("Attempt report status is invalid")
-    snapshot = runtime_journal(context, "_journal-snapshot", {})
+    # This arm has no Journal or Profile queries. Report assembly must not make
+    # an implicit disabled call, nor recover historical measurements through it.
+    snapshot = (
+        {"direction_events": [], "experiments": [], "directions": [], "citable_profile_results": []}
+        if dev_only_enabled()
+        else runtime_journal(context, "_journal-snapshot", {})
+    )
     if set(snapshot) != {
         "direction_events",
         "experiments",
@@ -1486,116 +1499,6 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                 "Bootstrap blocked report may omit baseline only when no Experiment has "
                 "non-diagnostic candidate evidence; abandon_direction diagnostics are allowed"
             )
-    _text(request.get("hypothesis"), "Attempt report hypothesis")
-    _text(request.get("analysis"), "Attempt report analysis")
-    diagnosis = _exact_object(
-        request.get("diagnosis"),
-        "Attempt report diagnosis",
-        {"bottleneck", "evidence"},
-    )
-    for field in diagnosis:
-        _text(diagnosis[field], f"Attempt report diagnosis.{field}")
-    approach = _exact_object(
-        request.get("approach"),
-        "Attempt report approach",
-        {"summary", "steps", "expected_impact", "risks"},
-    )
-    _text(approach.get("summary"), "Attempt report approach.summary")
-    _text(approach.get("expected_impact"), "Attempt report approach.expected_impact")
-    _text_array(approach.get("steps"), "Attempt report approach.steps", required=True)
-    _text_array(approach.get("risks"), "Attempt report approach.risks")
-    evidence_summary = _exact_object(
-        request.get("evidence_summary"),
-        "Attempt report evidence_summary",
-        {"correctness", "performance"},
-    )
-    for field in evidence_summary:
-        _text(evidence_summary[field], f"Attempt report evidence_summary.{field}")
-    profile_evidence = request.get("profile_evidence")
-    if profile_evidence is not None:
-        profile_value = _exact_object(
-            profile_evidence,
-            "Attempt report profile_evidence",
-            {
-                "tool_used",
-                "profiler",
-                "profile_level",
-                "bottleneck_type",
-                "evidence_summary",
-                "evidence_chain",
-                "supporting_results",
-            },
-        )
-        for field in (
-            "tool_used",
-            "profiler",
-            "profile_level",
-            "bottleneck_type",
-            "evidence_summary",
-            "evidence_chain",
-        ):
-            _text(profile_value[field], f"Attempt report profile_evidence.{field}")
-        supporting_results = profile_value["supporting_results"]
-        if not isinstance(supporting_results, list) or not supporting_results:
-            raise ValueError("Attempt report profile_evidence.supporting_results must be non-empty")
-        if len(supporting_results) > 32:
-            raise ValueError("Attempt report profile_evidence supports at most 32 results")
-        profile_bindings: set[tuple[str, str]] = set()
-        for citable in citable_profile_results:
-            identity = _exact_object(
-                citable,
-                "Runtime citable Profile result",
-                {
-                    "kernel_artifact_digest",
-                    "result_artifact_digest",
-                },
-            )
-            profile_bindings.add(
-                (
-                    str(identity["kernel_artifact_digest"]),
-                    str(identity["result_artifact_digest"]),
-                )
-            )
-        seen_results: set[str] = set()
-        has_profile = False
-        for index, item in enumerate(supporting_results):
-            reference = _exact_object(
-                item,
-                f"Attempt report profile_evidence.supporting_results[{index}]",
-                {
-                    "operation",
-                    "kernel_artifact_digest",
-                    "result_artifact_digest",
-                },
-            )
-            operation = reference["operation"]
-            if operation != "profile":
-                raise ValueError("Profile supporting result operation must be profile")
-            has_profile = True
-            subject = _experiment_subject(
-                {
-                    "kernel_artifact_digest": reference["kernel_artifact_digest"],
-                    "result_artifact_digests": [reference["result_artifact_digest"]],
-                },
-                f"Attempt report profile_evidence.supporting_results[{index}]",
-            )
-            assert subject is not None
-            binding = (
-                subject["kernel_artifact_digest"],
-                subject["result_artifact_digests"][0],
-            )
-            if binding not in profile_bindings:
-                raise ValueError(
-                    "Profile supporting result does not match a visible Runtime-recorded "
-                    f"Profile observation: {binding[1]}. Use the exact kernel_artifact_digest "
-                    "and result_artifact_digest returned by Runtime; "
-                    "an Experiment reference is not required."
-                )
-            if binding[1] in seen_results:
-                raise ValueError("Profile supporting Gateway results must be unique")
-            seen_results.add(binding[1])
-        if not has_profile:
-            raise ValueError("Profile evidence requires at least one profile result")
     candidate = request.get("final_candidate")
     blocker = request.get("blocker")
     if status == "candidate_ready":
@@ -1616,75 +1519,6 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         if candidate is not None:
             raise ValueError("blocked cannot nominate final_candidate")
         _text(blocker, "Attempt report blocker")
-    _object_array(
-        request.get("knowledge_used"),
-        "Attempt report knowledge_used",
-        {"record_id", "finding", "application"},
-    )
-    findings = request.get("findings")
-    if not isinstance(findings, list):
-        raise ValueError("Attempt report findings must be an array")
-    journal_experiment_ids = {experiment["experiment_id"] for experiment in experiments}
-    for index, item in enumerate(findings):
-        label = f"Attempt report findings[{index}]"
-        required_fields = {"category", "observation", "resolution", "lesson"}
-        optional_fields = {
-            "root_cause",
-            "claim",
-            "claim_kind",
-            "assessment",
-            "scope",
-            "supporting_results",
-        } | ({"supporting_experiment_ids"} if "experiments" in modules else set())
-        if (
-            not isinstance(item, dict)
-            or not required_fields <= set(item)
-            or set(item) - required_fields - optional_fields
-        ):
-            raise ValueError(f"{label} has missing or unknown fields")
-        finding = item
-        for field in required_fields:
-            _text(finding[field], f"{label}.{field}")
-        for field in ("root_cause", "claim", "scope"):
-            if finding.get(field) is not None:
-                _text(finding[field], f"{label}.{field}")
-        claim_kind = finding.get("claim_kind", "causal_hypothesis")
-        if not isinstance(claim_kind, str) or claim_kind not in {
-            "observation",
-            "implementation_outcome",
-            "causal_hypothesis",
-        }:
-            raise ValueError(f"{label}.claim_kind is invalid")
-        assessment = finding.get("assessment", "unresolved")
-        if not isinstance(assessment, str) or assessment not in {
-            "unresolved",
-            "supported",
-            "refuted",
-        }:
-            raise ValueError(f"{label}.assessment is invalid")
-        references = finding.get("supporting_results", [])
-        if not isinstance(references, list) or len(references) > 32:
-            raise ValueError(f"{label}.supporting_results must be an array of at most 32 subjects")
-        for subject_index, reference in enumerate(references):
-            if reference is None:
-                raise ValueError(f"{label}.supporting_results entries cannot be null")
-            _experiment_subject(reference, f"{label}.supporting_results[{subject_index}]")
-        supporting_ids = _text_array(
-            finding.get("supporting_experiment_ids", []),
-            f"{label}.supporting_experiment_ids",
-        )
-        finding.setdefault("root_cause", None)
-        finding.setdefault("supporting_experiment_ids", [])
-        if len(supporting_ids) > 32:
-            raise ValueError("Attempt finding supports at most 32 Experiments")
-        if len(set(supporting_ids)) != len(supporting_ids):
-            raise ValueError("Attempt finding supporting Experiment IDs must be unique")
-        unknown_experiment_ids = sorted(set(supporting_ids) - journal_experiment_ids)
-        if unknown_experiment_ids:
-            raise ValueError(
-                "Attempt finding references Experiments outside this journal: "
-                f"{unknown_experiment_ids}"
-            )
     contributing = _text_array(
         request.get("contributing_result_artifact_digests"),
         "Attempt report contributing_result_artifact_digests",
@@ -1700,7 +1534,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                 "must be a Result Artifact digest"
             )
     report = {
-        "schema_version": 12,
+        "schema_version": 13,
         "attempt_id": context.attempt_id,
         **request,
         "tool_modules": sorted(modules),
@@ -1728,7 +1562,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         "report_status": report["status"],
         "file": context.report_path.relative_to(context.workspace).as_posix(),
         "experiment_count": len(experiments),
-        "finding_count": len(report["findings"]),
+        "direction_count": len({event["direction_id"] for event in direction_events}),
         **(
             {"assessment_notes": registration["assessment_notes"]}
             if registration.get("assessment_notes")
@@ -1853,6 +1687,17 @@ def _augment_agent_error(
                 else item
                 for item in issues
             ]
+    if dev_only_enabled() and command == "gateway-execute":
+        _, contract = project_contract(
+            command="gateway-execute", operation="dev", allow_baseline=False
+        )
+        response["request_schema"] = contract["tools"]["gateway-execute"]
+        response["recovery"] = [{
+            "instruction": "This Session exposes only Dev. Use operation=dev and the live "
+            "Dev request schema; submit the final candidate with attempt-report. Runtime "
+            "validates it privately after handoff."
+        }]
+        return response
     schema = tool_request_schema(
         command,
         allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
@@ -1876,6 +1721,10 @@ def _augment_agent_error(
 
 
 def main(argv: list[str] | None = None) -> int:
+    from runtime_contract import raw_enabled
+    if raw_enabled():
+        print(json.dumps({"error": "runtime_tools_disabled", "detail": "Raw Sessions use Agate directly"}))
+        return 2
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     available_commands = _available_attempt_commands()

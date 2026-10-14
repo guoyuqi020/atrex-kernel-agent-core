@@ -9,11 +9,12 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
-from session_clock import active_time
+from runtime_request_barrier import REQUEST_SOCKET_ENV, RuntimeRequestBarrier
+from session_clock import SESSION_CLOCK_ENV, active_time, runtime_waiting
 from session_transcript import record_provider_line
 
 DEPENDENCY_GUARD_POLL_SECONDS = 0.25
@@ -322,7 +323,12 @@ def _process_exited(proc: subprocess.Popen[str]) -> bool:
         return True
     try:
         waitid = getattr(os, "waitid")
-        return waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        status = waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        # Darwin can report CLD_STOPPED even with WEXITED alone. A suspended
+        # Provider is still alive and must not trigger process-scope cleanup.
+        return status is not None and status.si_code in {
+            os.CLD_EXITED, os.CLD_KILLED, os.CLD_DUMPED,
+        }
     except ChildProcessError:
         return True
 
@@ -343,8 +349,19 @@ def _linux_processes() -> dict[int, _ProcessState] | None:
     if not (root / "self/stat").is_file():
         return None
     result: dict[int, _ProcessState] = {}
+    pid_mapping: dict[int, int] = {}
     try:
         paths = tuple(root.iterdir())
+        # Production bwrap may reuse an outer /proc mount. Kernel signals use
+        # our PID namespace, not the numbers in that mount's stat files.
+        own_status = (root / "self/status").read_text()
+        own_pids = next(
+            (line.split()[1:] for line in own_status.splitlines() if line.startswith("NSpid:")),
+            [],
+        )
+        namespace_depth = len(own_pids) - 1 if own_pids else 0
+    except FileNotFoundError:
+        namespace_depth = 0  # Legacy procfs/test fixtures without namespace fields.
     except OSError:
         return None
     for path in paths:
@@ -352,15 +369,33 @@ def _linux_processes() -> dict[int, _ProcessState] | None:
             continue
         try:
             fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
-            pid = int(path.name)
+            outer_pid = int(path.name)
+            pid, group, session = outer_pid, int(fields[2]), int(fields[3])
+            if namespace_depth:
+                namespaces = {
+                    parts[0].rstrip(":"): [int(value) for value in parts[1:]]
+                    for line in (path / "status").read_text().splitlines()
+                    if (parts := line.split()) and parts[0] in {"NSpid:", "NSpgid:", "NSsid:"}
+                }
+                if len(namespaces.get("NSpid", [])) <= namespace_depth:
+                    continue  # Not a process in our namespace; never signal it.
+                pid = namespaces["NSpid"][namespace_depth]
+                group = namespaces["NSpgid"][namespace_depth]
+                session = namespaces["NSsid"][namespace_depth]
+                pid_mapping[outer_pid] = pid
             result[pid] = _ProcessState(
-                pid, int(fields[1]), int(fields[2]), int(fields[3]), fields[19], fields[0] == "Z"
+                pid, int(fields[1]), group, session, fields[19], fields[0] == "Z"
             )
         except (FileNotFoundError, ProcessLookupError):
             continue
-        except (OSError, ValueError, IndexError):
+        except (OSError, ValueError, IndexError, KeyError):
             # An unreadable process may belong to this session; fail closed for recovery.
             return None
+    if namespace_depth:
+        result = {
+            pid: replace(process, parent_pid=pid_mapping.get(process.parent_pid, 0))
+            for pid, process in result.items()
+        }
     return result
 
 
@@ -396,11 +431,16 @@ class _ProcessScope:
 
     def signal(self, sig: signal.Signals) -> None:
         # The unreaped root reserves this PID/PGID even without Linux procfs.
-        for group in self.live_groups() | {self.root_pid}:
+        groups = self.live_groups() | {self.root_pid}
+        if sig == signal.SIGSTOP and Path("/proc/self/stat").is_file() and not self.complete:
+            raise RuntimeError("Cannot verify the Agent process tree for Runtime suspension")
+        for group in groups:
             try:
                 signal_process_groups({group}, sig)
             except PermissionError:
                 self.complete = False
+                if sig == signal.SIGSTOP:
+                    raise RuntimeError("Cannot suspend the Agent process tree") from None
 
     def stop(self) -> bool:
         """Terminate remaining owned work before a replacement provider may start."""
@@ -439,6 +479,23 @@ def run_bounded(
     observer: ProcessObserver | None = None,
 ) -> ProcessResult:
     """Run a guarded command with live output observation and an active-time budget."""
+    environment = dict(os.environ if env is None else env)
+    barrier = RuntimeRequestBarrier() if environment.get(SESSION_CLOCK_ENV) else None
+    # Never inherit a previous Provider launch's socket into a new launch.
+    environment.pop(REQUEST_SOCKET_ENV, None)
+    if barrier is not None:
+        environment[REQUEST_SOCKET_ENV] = barrier.path
+    try:
+        return _run_bounded(command, cwd, timeout, environment, observer, barrier)
+    finally:
+        if barrier is not None:
+            barrier.close()
+
+
+def _run_bounded(
+    command: list[str], cwd: Path, timeout: int | None, env: dict[str, str],
+    observer: ProcessObserver | None, barrier: RuntimeRequestBarrier | None,
+) -> ProcessResult:
     deadline = None if timeout is None else active_time(time.monotonic(), environment=env) + timeout
     proc = subprocess.Popen(
         command,
@@ -529,12 +586,18 @@ def run_bounded(
     try:
         while not _process_exited(proc):
             scope.live_groups()
+            waiting = barrier is not None and barrier.poll(
+                scope.signal, runtime_waiting=runtime_waiting(environment=env),
+            )
             if observer is not None and observer.poll():
                 observation_stop.set()
             if observation_stop.is_set() or dependency_violations:
                 scope.signal(signal.SIGKILL)
                 break
-            if deadline is not None and active_time(time.monotonic(), environment=env) >= deadline:
+            if (
+                not waiting and deadline is not None
+                and active_time(time.monotonic(), environment=env) >= deadline
+            ):
                 timed_out = True
                 scope.signal(signal.SIGKILL)
                 break

@@ -184,7 +184,7 @@ def test_missing_report_scopes_historical_reuse_to_enabled_modules(
     if "experiments" not in modules:
         assert "without an Experiment or duplicate Evaluate" in prompt
         assert "a failed current full Evaluate cannot be overridden" in prompt
-        assert "Keep the required findings and enabled Direction bookkeeping" in prompt
+        assert "Complete enabled Journal bookkeeping; submit only the compact handoff fields" in prompt
 
 
 @pytest.mark.parametrize("local_bytes", [b'{"status":"blocked"}\n', b"unaccepted malformed draft"])

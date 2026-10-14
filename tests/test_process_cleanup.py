@@ -137,6 +137,46 @@ def test_proc_stat_keeps_start_time_and_ignores_spaces_in_comm(
     }
 
 
+def test_outer_procfs_ids_are_translated_before_signalling_subagents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    (proc / "self/stat").write_text("present")
+    (proc / "self/status").write_text("NSpid:\t4000\t2\n")
+    # Outside namespace; main Agent; detached subagent; child in a deeper namespace.
+    for outer, parent, ns_pid, ns_group, ns_session in (
+        (100, 1, "100", "100", "100"),
+        (4100, 4000, "4100 3", "4100 3", "4100 3"),
+        (4200, 4100, "4200 4", "4200 4", "4200 4"),
+        (4300, 4200, "4300 5 1", "4200 4 0", "4200 4 0"),
+    ):
+        path = proc / str(outer)
+        path.mkdir()
+        fields = ["S", str(parent), str(outer), str(outer), *(["0"] * 15), str(outer * 2)]
+        (path / "stat").write_text(f"{outer} (agent) " + " ".join(fields))
+        (path / "status").write_text(
+            f"NSpid: {ns_pid}\nNSpgid: {ns_group}\nNSsid: {ns_session}\n"
+        )
+    real_path = Path
+    monkeypatch.setattr(
+        process, "Path", lambda path: proc if path == "/proc" else real_path(path),
+    )
+    assert process._linux_processes() == {
+        3: _state(3, parent=0, group=3, session=3, started="8200"),
+        4: _state(4, parent=3, group=4, session=4, started="8400"),
+        5: _state(5, parent=4, group=4, session=4, started="8600"),
+    }
+    signals: list[tuple[set[int], signal.Signals]] = []
+    monkeypatch.setattr(
+        process, "signal_process_groups", lambda groups, sig: signals.append((groups, sig)),
+    )
+    scope = process._ProcessScope(3)
+    scope.signal(signal.SIGSTOP)
+    assert {group for groups, _sig in signals for group in groups} == {3, 4}
+    assert all(sig == signal.SIGSTOP for _groups, sig in signals)
+
+
 def test_observer_exception_cleans_background_children(tmp_path: Path) -> None:
     marker = tmp_path / "exception-orphan-write"
     child = (

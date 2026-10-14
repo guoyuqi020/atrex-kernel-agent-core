@@ -121,14 +121,14 @@ before another edit. Runtime supplies measurement_summary; analysis is optional 
 exact source/Trial/Result identities supplied by the tools, and record the action actually taken.
 Negative results are first-class evidence.
 
-Follow the Session-tool contracts for Direction state, Experiment linkage, incremental Report
-construction, retry behavior, and terminal validation; do not reconstruct the Journal from memory
-at the end. `blocked` or `pivot` may have zero Experiments and empty Findings. Before handoff, close
+Follow the Session-tool contracts for Direction state, Experiment linkage, compact Report
+handoff, retry behavior, and terminal validation; do not reconstruct the Journal from memory
+at the end. `blocked` or `pivot` may have zero Experiments . Before handoff, close
 started Directions with an honest stopping reason and `hypothesis_status`; unmeasured or inconclusive
 work can close `unresolved` with empty support, even without a Gateway call. Select relevant
 Experiment IDs or direct `supporting_results` only when evidence exists. No diagnostic call or
 fabricated record is required to finish. Lifecycle is not a verdict:
-untested reasoning stays unresolved. Preserve this distinction in Findings, memory, and Skills;
+untested reasoning stays unresolved. Preserve this distinction in Journal records, memory, and Skills;
 never promote incidental interpretations in unrelated Experiments into established constraints.
 
 ### 8. Preserve reusable execution helpers
