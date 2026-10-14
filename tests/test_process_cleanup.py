@@ -147,9 +147,19 @@ def test_outer_procfs_ids_are_translated_before_signalling_subagents(
     # Outside namespace; main Agent; detached subagent; child in a deeper namespace.
     for outer, parent, ns_pid, ns_group, ns_session in (
         (100, 1, "100", "100", "100"),
+        (3900, 100, "3900 1", "3900 1", "3900 1"),
+        (4000, 3900, "4000 2", "4000 2", "4000 2"),
         (4100, 4000, "4100 3", "4100 3", "4100 3"),
         (4200, 4100, "4200 4", "4200 4", "4200 4"),
         (4300, 4200, "4300 5 1", "4200 4 0", "4200 4 0"),
+        # Trusted HTTP worker is a sibling of the Provider, in the supervisor group.
+        (4400, 4000, "4400 6", "4000 2", "4000 2"),
+        # Another bwrap instance has the SAME local PIDs and namespace depth.
+        # Its child must not overwrite our HTTP worker with a Provider-owned identity.
+        (4900, 100, "4900 1", "4900 1", "4900 1"),
+        (5000, 4900, "5000 2", "5000 2", "5000 2"),
+        (5100, 5000, "5100 3", "5100 3", "5100 3"),
+        (5400, 5100, "5400 6", "5100 3", "5100 3"),
     ):
         path = proc / str(outer)
         path.mkdir()
@@ -163,9 +173,12 @@ def test_outer_procfs_ids_are_translated_before_signalling_subagents(
         process, "Path", lambda path: proc if path == "/proc" else real_path(path),
     )
     assert process._linux_processes() == {
-        3: _state(3, parent=0, group=3, session=3, started="8200"),
+        1: _state(1, parent=0, group=1, session=1, started="7800"),
+        2: _state(2, parent=1, group=2, session=2, started="8000"),
+        3: _state(3, parent=2, group=3, session=3, started="8200"),
         4: _state(4, parent=3, group=4, session=4, started="8400"),
         5: _state(5, parent=4, group=4, session=4, started="8600"),
+        6: _state(6, parent=2, group=2, session=2, started="8800"),
     }
     signals: list[tuple[set[int], signal.Signals]] = []
     monkeypatch.setattr(

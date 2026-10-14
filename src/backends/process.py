@@ -348,6 +348,8 @@ def _linux_processes() -> dict[int, _ProcessState] | None:
     root = Path("/proc")
     if not (root / "self/stat").is_file():
         return None
+    # Keep outer identities until membership is established. NSpid depth alone
+    # does not distinguish sibling bwrap namespaces with overlapping local PIDs.
     result: dict[int, _ProcessState] = {}
     pid_mapping: dict[int, int] = {}
     try:
@@ -383,7 +385,7 @@ def _linux_processes() -> dict[int, _ProcessState] | None:
                 group = namespaces["NSpgid"][namespace_depth]
                 session = namespaces["NSsid"][namespace_depth]
                 pid_mapping[outer_pid] = pid
-            result[pid] = _ProcessState(
+            result[outer_pid] = _ProcessState(
                 pid, int(fields[1]), group, session, fields[19], fields[0] == "Z"
             )
         except (FileNotFoundError, ProcessLookupError):
@@ -392,9 +394,29 @@ def _linux_processes() -> dict[int, _ProcessState] | None:
             # An unreadable process may belong to this session; fail closed for recovery.
             return None
     if namespace_depth:
+        # Walk OUR ancestry to PID 1 in our namespace, then include its tree.
+        # This also retains children in deeper namespaces without admitting peers.
+        ancestor = int(own_pids[0])
+        visited: set[int] = set()
+        while ancestor in result and ancestor not in visited:
+            visited.add(ancestor)
+            if result[ancestor].pid == 1:
+                break
+            ancestor = result[ancestor].parent_pid
+        else:
+            return None  # Cannot prove namespace ownership; never guess local PIDs.
+        members = {ancestor}
+        while True:
+            children = {
+                outer for outer, process in result.items() if process.parent_pid in members
+            }
+            if children <= members:
+                break
+            members.update(children)
+        pid_mapping = {outer: pid_mapping[outer] for outer in members}
         result = {
-            pid: replace(process, parent_pid=pid_mapping.get(process.parent_pid, 0))
-            for pid, process in result.items()
+            process.pid: replace(process, parent_pid=pid_mapping.get(process.parent_pid, 0))
+            for outer, process in result.items() if outer in members
         }
     return result
 
