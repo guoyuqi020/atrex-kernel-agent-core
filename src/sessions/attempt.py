@@ -12,6 +12,7 @@ from contexts.attempt import RuntimeAttemptContext
 from .common import execute_agent_session, guarded_main
 from .operator_contract import public_operator_contract
 from .report_completion import report_completion_prompt
+from .source_completion import SourceCompletionCheck, source_boundary_prompt
 from .tool_module_prompts import (
     active_modules,
     modular_evidence_prompt,
@@ -99,7 +100,8 @@ def render_prompt(context: RuntimeAttemptContext, config: AgentConfig) -> str:
 
 def render_system_prompt(context: RuntimeAttemptContext, config: AgentConfig) -> str:
     """Carry the Session-tool contract where context compaction cannot drop it."""
-    return _tool_instructions(config, str(context.manifest["dsl"]))
+    return (_tool_instructions(config, str(context.manifest["dsl"]))
+            + "\n\n" + source_boundary_prompt(context.workspace))
 
 
 def run() -> int:
@@ -114,8 +116,9 @@ def run() -> int:
         config,
         render_prompt(context, config),
         system_prompt=render_system_prompt(context, config),
-        completion_check=lambda remaining_timeout_seconds: report_completion_prompt(
-            context, remaining_timeout_seconds
+        completion_check=SourceCompletionCheck(
+            context.workspace,
+            lambda remaining_timeout_seconds: report_completion_prompt(context, remaining_timeout_seconds),
         ),
     )
 

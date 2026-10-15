@@ -12,6 +12,7 @@ from agent_config import AgentConfig
 from contexts.common import correctness_policy_value, json_object_file
 from .common import execute_agent_session
 from .operator_contract import public_operator_contract
+from .source_completion import SourceCompletionCheck, source_boundary_prompt
 
 
 @dataclass(frozen=True)
@@ -83,4 +84,8 @@ def run() -> int:
                "hardware_target": task["hardware_target"],
                "correctness_policy": correctness_policy_value(json.loads(os.environ["ATREX_CORRECTNESS_POLICY_JSON"]))}
     prompt = public_operator_contract(problem) + "\n\nTask context:\n" + json.dumps(trusted, ensure_ascii=False)
-    return execute_agent_session(context, config, prompt, system_prompt=SYSTEM_PROMPT)
+    return execute_agent_session(
+        context, config, prompt,
+        system_prompt=SYSTEM_PROMPT + "\n\n" + source_boundary_prompt(context.workspace),
+        completion_check=SourceCompletionCheck(context.workspace),
+    )

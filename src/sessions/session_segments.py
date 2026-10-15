@@ -409,7 +409,8 @@ def execute_report_completion(
                 # Do not turn exhausted output recovery into exit 127, which the
                 # outer Runtime treats as permission to start optimization again.
                 exit_status = result.exit_status or (
-                    1 if recovery["state"] == "exhausted" else 127
+                    1 if recovery["state"] == "exhausted"
+                    else getattr(completion_check, "exhausted_exit_status", 127)
                 )
                 return exit_status
             purpose = "report_completion"
