@@ -567,6 +567,29 @@ def _direction_recovery(
 ) -> list[dict[str, Any]]:
     # State-specific guidance is meaningful only for the error actually returned.
     issue = local_validation_issue(detail)
+    if issue["path"] == "supporting_experiment_ids":
+        recovery: list[dict[str, Any]] = []
+        if experiments_enabled:
+            recovery.append(
+                {
+                    "tool": "list-experiments",
+                    "request": {"file": "scratch/experiments-index.json"},
+                }
+            )
+        recovery.append(
+            {
+                "instruction": (
+                    "Use only visible Experiment IDs listed in the Direction's "
+                    "associated_experiment_ids. Keep only Experiments that support this "
+                    "specific closure assessment; use unresolved with empty support when the "
+                    "evidence is inconclusive."
+                    if experiments_enabled
+                    else "The Experiment module is disabled; omit supporting_experiment_ids "
+                    "and cite exact visible Kernel/Result bindings in supporting_results."
+                )
+            }
+        )
+        return recovery
     if issue["code"] == "direction_advancement_limit_exceeded":
         return [{"instruction": (
             "When direction_advancement_limit_exceeded is returned, the requested Direction "

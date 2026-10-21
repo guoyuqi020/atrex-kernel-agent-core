@@ -30,18 +30,12 @@ def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _terminal_report(status: str) -> dict[str, Any]:
-    report = helpers._report("experiment_" + "1" * 32)
-    report.update(
-        {
-            "status": status,
-            "final_candidate": None,
-            "profile_evidence": None,
-            "findings": [],
-            "contributing_result_artifact_digests": [],
-            "blocker": "No usable evaluation could be obtained" if status == "blocked" else None,
-        }
-    )
-    return report
+    return {
+        "status": status,
+        "final_candidate": None,
+        "contributing_result_artifact_digests": [],
+        "blocker": "No usable evaluation could be obtained" if status == "blocked" else None,
+    }
 
 
 @pytest.mark.parametrize("allow_baseline", [False, True])
@@ -68,11 +62,17 @@ def test_adopt_schema_exposes_action_and_requires_trial_reference_fields(
 
 
 @pytest.mark.parametrize("allow_baseline", [False, True])
-def test_report_schema_allows_empty_findings_for_all_statuses(allow_baseline: bool) -> None:
+def test_report_schema_is_a_compact_terminal_handoff(allow_baseline: bool) -> None:
     schema = tool_request_schema("attempt-report", allow_baseline=allow_baseline)
 
     assert schema is not None
-    assert "minItems" not in schema["properties"]["findings"]
+    assert set(schema["properties"]) == {
+        "status",
+        "final_candidate",
+        "contributing_result_artifact_digests",
+        "blocker",
+    }
+    assert set(schema["required"]) == set(schema["properties"])
     assert "allOf" not in schema
 
 
@@ -147,7 +147,7 @@ def test_historical_adopt_survives_http_and_journal_snapshot_into_candidate_repo
     assert report["experiments"][0]["action"] == "adopt"
     assert report["experiments"][0]["after"] == helpers._materialized_subject(experiment["after"])
     assert report["experiments"][0]["experiment_id"] == receipt["experiment_id"]
-    assert report["findings"][0]["supporting_experiment_ids"] == [receipt["experiment_id"]]
+    assert "findings" not in report
     assert [report] == helpers._REGISTERED_REPORTS
 
 
@@ -191,7 +191,7 @@ def test_adopt_rejects_both_trial_references_null(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("status", ["blocked", "pivot"])
-def test_terminal_report_can_publish_without_experiments_findings_or_direction_events(
+def test_terminal_report_can_publish_without_experiments_or_direction_events(
     tmp_path: Path,
     status: str,
 ) -> None:
@@ -200,9 +200,10 @@ def test_terminal_report_can_publish_without_experiments_findings_or_direction_e
     published = runtime_tools.attempt_report(context, _terminal_report(status))
 
     assert published["report_status"] == status
-    assert published["experiment_count"] == published["finding_count"] == 0
+    assert published["experiment_count"] == published["direction_count"] == 0
     report = json.loads(context.report_path.read_text())
-    assert report["experiments"] == report["findings"] == report["direction_events"] == []
+    assert report["experiments"] == report["direction_events"] == []
+    assert "findings" not in report
     assert [report] == helpers._REGISTERED_REPORTS
 
 
@@ -212,7 +213,7 @@ def test_blocked_bootstrap_can_publish_without_experiments(tmp_path: Path) -> No
     published = runtime_tools.attempt_report(context, _terminal_report("blocked"))
 
     assert published["report_status"] == "blocked"
-    assert published["experiment_count"] == published["finding_count"] == 0
+    assert published["experiment_count"] == published["direction_count"] == 0
 
 
 @pytest.mark.parametrize(
@@ -230,10 +231,7 @@ def test_candidate_ready_still_requires_each_kind_of_evidence(
     context = helpers._context(tmp_path)
     _, receipt = helpers._completed_test_experiment(context)
     report = helpers._report(str(receipt["experiment_id"]))
-    if missing == "findings":
-        report["findings"] = []
-    else:
-        helpers._fake_state(context)[missing].clear()
+    helpers._fake_state(context)[missing].clear()
 
     with pytest.raises(ValueError, match=message):
         runtime_tools.attempt_report(context, report)
