@@ -34,11 +34,35 @@ def test_modular_prompt_lists_only_enabled_journal_tools(modules: frozenset[str]
     template = (CORE_ROOT / "prompts/attempt-tools.md").read_text()
     prompt = modular_tool_instructions(template, "triton", modules)
     assert ("runtime_tools.py update-direction --request" in prompt) == ("directions" in modules)
+    assert ("runtime_tools.py find-kernel-directions --request" in prompt) == (
+        "directions" in modules
+    )
     assert ("runtime_tools.py record-experiment --request" in prompt) == ("experiments" in modules)
+    assert ("runtime_tools.py find-kernel-experiments --request" in prompt) == (
+        "experiments" in modules
+    )
+    assert "runtime_tools.py kernel-pareto-frontier --request" in prompt
     assert "runtime_tools.py attempt-report --request" in prompt
     assert "input_path" in prompt
     assert "latency_prediction" in prompt
     assert "result-artifact-read" in prompt
+    assert "compact handoff" in prompt
+    assert "Untested causal claims remain unresolved" in prompt
+    assert "A failed variant does not refute its entire direction" in prompt
+    assert "Do not submit analysis" in prompt
+    assert ('scratch/directions-index.json' in prompt) == ("directions" in modules)
+    assert ("in_progress(self)" in prompt) == ("directions" in modules)
+    assert ("in_progress(other)" in prompt) == ("directions" in modules)
+    assert ('scratch/experiments-index.json' in prompt) == ("experiments" in modules)
+    assert ('{"direction_id":"direction_<id>"}' in prompt) == ("directions" in modules)
+    assert ('{"experiment_id":"experiment_<id>"}' in prompt) == ("experiments" in modules)
+    assert ("Runtime automatically validates and reuses" in prompt) == (
+        "experiments" not in modules
+    )
+    if "experiments" not in modules:
+        assert "no Experiment or duplicate Evaluate is required" in prompt
+        assert "cannot override a failed current full Evaluate" in prompt
+        assert "cannot be adopted" not in prompt
     for bootstrap, name, common in (
         (False, "episode.md", "For multi-shape tasks"),
         (True, "framework_baseline.md", "Give every `Model` constructor parameter a default"),
@@ -47,10 +71,19 @@ def test_modular_prompt_lists_only_enabled_journal_tools(modules: frozenset[str]
             (CORE_ROOT / "prompts" / name).read_text(), bootstrap=bootstrap, modules=modules
         )
         assert common in phase
+        if not bootstrap:
+            assert "the next concrete edit or focused probe" in phase
+            assert "Once a step is actionable, write the change or run the focused probe" in phase
+            assert "smallest end-to-end implementation" in phase
+            assert "do not restart the entire design without new evidence" in phase
         if "directions" not in modules:
             assert "propose and start" not in phase
         if "experiments" not in modules:
             assert "record-experiment" not in phase
+            if not bootstrap:
+                assert "Runtime automatically validates and reuses" in phase
+                assert "cannot be adopted" not in phase
+                assert "measured in this Attempt" not in phase
     evidence = modular_evidence_prompt(
         "Workspace facts\n\n## Direction ancestry\n\nOld coupled instructions", modules
     )
@@ -72,12 +105,18 @@ def test_projected_contract_exposes_only_enabled_modules(
         "gateway-execute",
         "kernel-artifact-read",
         "result-artifact-read",
+        "kernel-pareto-frontier",
         "attempt-report",
     }
     if "directions" in modules:
-        enabled.update({"update-direction", "list-directions", "load-direction"})
+        enabled.update({
+            "update-direction", "list-directions", "load-direction", "find-kernel-directions",
+        })
     if "experiments" in modules:
-        enabled.update({"record-experiment", "list-experiments", "load-experiment"})
+        enabled.update({
+            "record-experiment", "list-experiments", "load-experiment",
+            "find-kernel-experiments",
+        })
     assert enabled.issubset(set(_LOCAL_COMMANDS) | {"runtime-contract", "gateway-execute"})
     values = {
         "tools": {
@@ -97,6 +136,24 @@ def test_projected_contract_exposes_only_enabled_modules(
     if "directions" not in modules:
         with pytest.raises(ValueError, match="unknown Runtime tool"):
             project_contract(command="update-direction", allow_baseline=False)
+
+
+@pytest.mark.parametrize("modules", [frozenset(), frozenset({"directions"})])
+def test_legacy_evidence_prompt_permits_automatic_historical_reuse(
+    modules: frozenset[str],
+) -> None:
+    template = (
+        "Workspace facts\n\n## Direction ancestry\n\nJournal instructions"
+        "\n\n## Trust and measurement reuse\n\nTrust facts.\n\n"
+        "To select an unchanged Kernel use the old coupled path.\n\n"
+        "Agent-requested ABBA is exploratory.\n\n"
+        "`complete`, `abandon` are Journal closures."
+    )
+    prompt = modular_evidence_prompt(template, modules)
+    assert "Runtime automatically validates and reuses" in prompt
+    assert "no Experiment or duplicate Evaluate is required" in prompt
+    assert "cannot override a failed current full Evaluate" in prompt
+    assert "cannot be adopted" not in prompt
 
 
 def test_managed_prompt_paths_read_workspace_state(tmp_path: Path) -> None:
@@ -314,7 +371,7 @@ def test_evaluate_prompt_explains_overrides_and_full_contract_requirement() -> N
     assert 'register `action: "adopt"`' in text
     assert "Only `adopt` permits a historical Trial as `after`" in text
     assert "not an Agent Result Artifact" in text
-    assert "Only `candidate_ready` requires non-empty Experiments" in text
+    assert "Enabled nomination Journal requirements still apply" in text
     assert "input_scope" in text
     assert "input_py" in text and "shapes" in text
     assert "no further fields" not in text
@@ -391,7 +448,7 @@ def test_bootstrap_prompt_matches_special_attempt_protocol() -> None:
     assert "Use the seed, included Skills, and public contract." in baseline
     assert "Do not use `pivot` during Bootstrap" in baseline
     assert "complete private Bootstrap Gate independently" in baseline
-    assert "Set `profile_evidence` to `null` unless profiling was actually" in baseline
+    assert "Use the compact attempt-report handoff" in baseline
     assert "Use the shared tool contract below" in baseline
     assert "provenance and decisions" not in baseline
     assert "Example exploratory evaluation request" in tools

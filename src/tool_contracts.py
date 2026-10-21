@@ -35,6 +35,35 @@ def _subject() -> dict[str, Any]:
     return _object({"result_artifact_digest": _digest()})
 
 
+def _claim_results() -> dict[str, Any]:
+    return {
+        "type": "array",
+        "maxItems": 32,
+        "items": _object(
+            {
+                "kernel_artifact_digest": _digest(),
+                "result_artifact_digests": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 4096,
+                    "uniqueItems": True,
+                    "items": _digest(),
+                },
+            }
+        ),
+        "description": (
+            "Exact visible Kernel/Result bindings; available with any Journal module selection."
+        ),
+    }
+
+
+def _claim_kind() -> dict[str, Any]:
+    return {
+        "enum": ["observation", "implementation_outcome", "causal_hypothesis"],
+        "default": "causal_hypothesis",
+    }
+
+
 def _evaluate_schema() -> dict[str, Any]:
     """Describe Agent inputs, including file helpers resolved before the HTTP request."""
     schema = _object(
@@ -75,10 +104,14 @@ def _evaluate_schema() -> dict[str, Any]:
                             "repeats": {
                                 "type": "integer",
                                 "minimum": 2,
-                                "maximum": 20,
+                                "maximum": 16,
+                                "multipleOf": 2,
                                 "default": 2,
                                 "description": (
-                                    "Observations per side; 2 schedules A, B, B, A. "
+                                    "Even integer observations per side, from 2 to 16; "
+                                    "2 means one A, B, B, A block. "
+                                    "Use native-compatible ABBA schedules; "
+                                    "unsupported values are rejected without Dev fallback. "
                                     "The schedule must fit Runtime's allocation budget."
                                 ),
                             },
@@ -169,15 +202,17 @@ def _direction_schema(*, experiments_enabled: bool = True) -> dict[str, Any]:
             "direction_id": _identifier("direction_"),
             "analysis": _text(),
             "hypothesis_status": {"enum": ["unresolved", "supported", "refuted"]},
+            "claim_kind": _claim_kind(),
+            "scope": {"oneOf": [_text(), {"type": "null"}]},
+            "supporting_results": _claim_results(),
             "supporting_experiment_ids": {
                 "type": "array",
-                "minItems": 1,
                 "maxItems": 32,
                 "uniqueItems": True,
                 "items": _identifier("experiment_"),
             },
         },
-        required=("action", "direction_id", "analysis"),
+        required=("action", "direction_id"),
     )
     if not experiments_enabled:
         update["properties"].pop("supporting_experiment_ids")
@@ -189,6 +224,9 @@ def _direction_schema(*, experiments_enabled: bool = True) -> dict[str, Any]:
                     "anyOf": [
                         {"required": ["hypothesis_status"]},
                         {"required": ["supporting_experiment_ids"]},
+                        {"required": ["supporting_results"]},
+                        {"required": ["scope"]},
+                        {"required": ["claim_kind"]},
                     ]
                 }
             },
@@ -200,14 +238,20 @@ def _direction_schema(*, experiments_enabled: bool = True) -> dict[str, Any]:
         }
     ]
     update["description"] = (
-        "complete, abandon, block, and defer each require hypothesis_status and analysis. "
-        "Unmeasured or inconclusive reasoning "
-        "should remain unresolved. "
+        "Closures require hypothesis_status; analysis is optional and only adds new "
+        "route-level conclusions, untested alternatives or next steps; reference selected "
+        "Experiment IDs instead of repeating their local analyses. A failed implementation "
+        "does not refute all variants of the mechanism. "
+        "Use unresolved and empty support when unmeasured or inconclusive; stopping work does "
+        "not refute its hypothesis. For supported/refuted, provide scope and completed Result "
+        "evidence relevant to the proposal hypothesis, directly through supporting_results "
+        "or through selected Experiments. Runtime checks bindings and operation eligibility, "
+        "not scientific truth; insufficient support downgrades to unresolved "
+        "with assessment_notes. "
         + (
-            "Select supporting_experiment_ids belonging to this Direction; supported/refuted "
-            "requires completed Gateway evidence for every selected Experiment. "
+            "supporting_experiment_ids may be empty; selected IDs must belong to this Direction. "
             if experiments_enabled
-            else "The Experiment module is disabled, so no supporting_experiment_ids are required. "
+            else "The Experiment module is disabled; omit supporting_experiment_ids. "
         )
         + "Propose and start do not require outcome evidence."
     )
@@ -250,25 +294,58 @@ def _direction_schema(*, experiments_enabled: bool = True) -> dict[str, Any]:
 
 def _experiment_schema(*, allow_baseline: bool, directions_enabled: bool = True) -> dict[str, Any]:
     nullable_subject = {"oneOf": [_subject(), {"type": "null"}]}
-    actions = ["keep_after", "restore_before", "abandon_direction", "adopt"]
+    actions = ["keep_after", "restore_before", "discard", "adopt"]
     if allow_baseline:
         actions.append("baseline")
     schema = _object(
         {
             "direction_id": _identifier("direction_"),
             "name": _text(),
-            "hypothesis": _text(),
+            "hypothesis": {
+                **_text(),
+                "description": "Local hypothesis; omit when inherited from Direction.",
+            },
             "change": _text(),
             "before": nullable_subject,
             "after": nullable_subject,
-            "evidence": _text(),
-            "analysis": _text(),
+            "evidence": {
+                **_text(),
+                "description": (
+                    "Optional legacy prose; Runtime generates measurement_summary from Results."
+                ),
+            },
+            "analysis": {
+                **_text(),
+                "description": (
+                    "Optional new local interpretation of this tested implementation, not repeated "
+                    "measurements or a copy of the Direction hypothesis; distinguish measured "
+                    "outcomes from untested causes and omit if the cause is unknown."
+                ),
+            },
             "action": {"enum": actions},
-        }
+        },
+        required=("direction_id", "name", "change", "before", "after", "action"),
     )
+    schema["properties"]["knowledge_used"] = {
+        "type": "array",
+        "default": [],
+        "items": _object(
+            {
+                field: {**_text(), "pattern": r"\S"}
+                for field in ("record_id", "finding", "application")
+            }
+        ),
+        "description": (
+            "Optional knowledge actually used in this Experiment. Cite an exact known Record ID, "
+            "the relevant finding and why it applies, and how you applied it. These declarations "
+            "do not establish current Kernel correctness or performance; use measured Results. "
+            "Historical citations remain valid when Wiki queries are disabled."
+        ),
+    }
     if not directions_enabled:
         schema["properties"].pop("direction_id")
         schema["required"].remove("direction_id")
+        schema["required"].append("hypothesis")
     schema["allOf"] = [
         {
             "anyOf": [
@@ -294,103 +371,30 @@ def _experiment_schema(*, allow_baseline: bool, directions_enabled: bool = True)
 def _attempt_report_schema(
     *, allow_baseline: bool, experiments_enabled: bool = True
 ) -> dict[str, Any]:
-    result_binding = _object(
-        {
-            "operation": {"const": "profile"},
-            "kernel_artifact_digest": _digest(),
-            "result_artifact_digest": _digest(),
-        }
-    )
-    profile = _object(
-        {
-            "tool_used": _text(),
-            "profiler": _text(),
-            "profile_level": _text(),
-            "bottleneck_type": _text(),
-            "evidence_summary": _text(),
-            "evidence_chain": _text(),
-            "supporting_results": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 32,
-                "items": result_binding,
-            },
-        }
-    )
     schema = _object(
         {
             "status": {
-                "enum": (
-                    ["candidate_ready", "blocked"]
-                    if allow_baseline
-                    else ["candidate_ready", "pivot", "blocked"]
-                )
+                "enum": (["candidate_ready", "blocked"] if allow_baseline
+                         else ["candidate_ready", "pivot", "blocked"])
             },
-            "hypothesis": _text(),
-            "diagnosis": _object({"bottleneck": _text(), "evidence": _text()}),
-            "approach": _object(
-                {
-                    "summary": _text(),
-                    "steps": {"type": "array", "minItems": 1, "items": _text()},
-                    "expected_impact": _text(),
-                    "risks": {"type": "array", "items": _text()},
-                }
-            ),
             "final_candidate": {"oneOf": [_object({"change_summary": _text()}), {"type": "null"}]},
-            "evidence_summary": _object({"correctness": _text(), "performance": _text()}),
-            "profile_evidence": {"oneOf": [profile, {"type": "null"}]},
-            "analysis": _text(),
-            "knowledge_used": {
-                "type": "array",
-                "items": _object(
-                    {"record_id": _text(), "finding": _text(), "application": _text()}
-                ),
-            },
-            "findings": {
-                "type": "array",
-                "items": _object(
-                    {
-                        "category": _text(),
-                        "observation": _text(),
-                        "root_cause": _text(),
-                        "resolution": _text(),
-                        "lesson": _text(),
-                        "supporting_experiment_ids": {
-                            "type": "array",
-                            "minItems": 1,
-                            "maxItems": 32,
-                            "uniqueItems": True,
-                            "items": _identifier("experiment_"),
-                        },
-                    }
-                ),
-            },
             "contributing_result_artifact_digests": {
-                "type": "array",
-                "maxItems": 64,
-                "items": _digest(),
+                "type": "array", "maxItems": 64, "items": _digest(),
             },
             "blocker": {"oneOf": [_text(), {"type": "null"}]},
-        }
+        },
     )
-    schema["allOf"] = [
-        {
-            "if": {
-                "properties": {"status": {"const": "candidate_ready"}},
-                "required": ["status"],
-            },
-            "then": {"properties": {"findings": {"minItems": 1}}},
-        }
-    ]
-    if not experiments_enabled:
-        finding = schema["properties"]["findings"]["items"]
-        finding["properties"].pop("supporting_experiment_ids")
-        finding["required"].remove("supporting_experiment_ids")
+    schema["description"] = (
+        "Terminal handoff only: status, final_candidate, contributing_result_artifact_digests "
+        "and blocker. Runtime attaches Journals and generates measured outcomes. Store analysis "
+        "in an enabled Experiment or Direction, never repeat it in the report."
+    )
     return schema
 
 
 _SCRATCH_FILE = _object({"file": {"type": "string", "pattern": r"^scratch/.+"}})
 _SCHEMAS: dict[str, dict[str, Any]] = {
+    "wiki-query": _object({"query": {**_text(), "pattern": r"\S"}}),
     "kernel-artifact-read": _object(
         {
             "kernel_artifact_digest": _digest(),
@@ -400,11 +404,41 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
         required=("kernel_artifact_digest", "file"),
     ),
     "result-artifact-read": _object({"result_artifact_digest": _digest()}),
+    "kernel-pareto-frontier": _object({}),
     "update-direction": _direction_schema(),
-    "list-directions": _SCRATCH_FILE,
-    "load-direction": _object({"direction_id": _identifier("direction_")}),
-    "list-experiments": _SCRATCH_FILE,
-    "load-experiment": _object({"experiment_id": _identifier("experiment_")}),
+    "list-directions": {
+        **_SCRATCH_FILE,
+        "description": (
+            "Find visible hypotheses by ID, name, status, and ancestry. Writes the index to file; "
+            "returns only status/file/count. Read that file, then load selected Directions."
+        ),
+    },
+    "load-direction": {
+        **_object({"direction_id": _identifier("direction_")}),
+        "description": (
+            "Read one visible Direction's hypothesis, rationale, plan, criteria, latest analysis, "
+            "and evidence links. Use an ID from a list/find result or a known visible record. "
+            "Does not start the Direction or return its raw conversation."
+        ),
+    },
+    "list-experiments": {
+        **_SCRATCH_FILE,
+        "description": (
+            "List compact experiment IDs, changes, decisions, knowledge_used and Runtime "
+            "measurement comparisons. Writes the index to file; returns only status/file/count. "
+            "Load selected records for interpretations and exact Artifact bindings."
+        ),
+    },
+    "load-experiment": {
+        **_object({"experiment_id": _identifier("experiment_")}),
+        "description": (
+            "Read one complete visible Experiment, including before/after Kernel and Result "
+            "Artifact bindings. Use result-artifact-read or kernel-artifact-read for the actual "
+            "observation or source. Does not return the full Session transcript."
+        ),
+    },
+    "find-kernel-experiments": _object({"kernel_artifact_digest": _digest()}),
+    "find-kernel-directions": _object({"kernel_artifact_digest": _digest()}),
 }
 
 
@@ -448,35 +482,6 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
             )
         }
     ],
-    "update-direction": [
-        {
-            "tool": "list-directions",
-            "request": {"file": "scratch/directions-index.json"},
-        },
-        {
-            "instruction": (
-                "Before complete, abandon, block, or defer, select supporting_experiment_ids "
-                "from load-direction associated_experiment_ids and declare hypothesis_status. "
-                "Cite only experiments that address this Direction's hypothesis. "
-                "Every Experiment needs at least one real Kernel-bound Gateway Result. "
-                "Use unresolved for diagnostics; lifecycle closure is not hypothesis refutation"
-            )
-        },
-        {
-            "instruction": (
-                "When direction_concurrency_conflict is returned, continue the existing "
-                "in-progress Direction or close it with complete, abandon, defer, or block. "
-                "Retry start only after no other Direction is in progress"
-            )
-        },
-        {
-            "instruction": (
-                "When direction_advancement_limit_exceeded is returned, the requested Direction "
-                "was not started. Leave its status unchanged for a future Attempt; do not retry "
-                "start in the current Attempt"
-            )
-        },
-    ],
     "load-direction": [
         {
             "tool": "list-directions",
@@ -497,7 +502,7 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         },
         {
             "instruction": (
-                "before and after cannot both be null, even for abandon_direction. "
+                "before and after cannot both be null, even for discard. "
                 "Set each non-null before/after subject to one real Kernel-bound "
                 "result_artifact_digest; "
                 "Runtime resolves the Kernel and Result Artifacts. For exact historical source "
@@ -512,6 +517,22 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
             "request": {"file": "scratch/experiments-index.json"},
         }
     ],
+    "find-kernel-experiments": [
+        {
+            "instruction": (
+                "Use the exact kernel_artifact_digest from a Gateway result or a visible "
+                "Experiment; only visible Journal associations are returned"
+            )
+        }
+    ],
+    "find-kernel-directions": [
+        {
+            "instruction": (
+                "Use the exact kernel_artifact_digest from a Gateway result; Direction IDs "
+                "are derived only from visible recorded Experiments citing that Artifact"
+            )
+        }
+    ],
     "attempt-report": [
         {
             "tool": "list-directions",
@@ -523,12 +544,11 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
         },
         {
             "instruction": (
-                "Read both indexes and close every in_progress Direction with update-direction "
-                "before retrying attempt-report. complete, abandon, block, and defer all require "
-                "explicit supporting_experiment_ids and hypothesis_status. "
-                "Every Experiment needs at least one real Kernel-bound Gateway Result; "
-                "then select its Experiment ID and use hypothesis_status=unresolved. "
-                "blocked/pivot may have zero Experiments if no Direction needs closing; "
+                "Read both indexes and close every in_progress(self) Direction "
+                "with update-direction before retrying attempt-report; "
+                "do not close other Attempts' Directions. complete, abandon, block, and defer "
+                "all require hypothesis_status; unresolved permits empty support. "
+                "blocked/pivot may have zero Experiments even after an unmeasured closure; "
                 "never fabricate evidence to end a session"
             )
         },
@@ -542,11 +562,93 @@ _RECOVERY: dict[str, list[dict[str, Any]]] = {
 }
 
 
+def _direction_recovery(
+    request: dict[str, Any] | None, detail: str, *, experiments_enabled: bool,
+) -> list[dict[str, Any]]:
+    # State-specific guidance is meaningful only for the error actually returned.
+    issue = local_validation_issue(detail)
+    if issue["path"] == "supporting_experiment_ids":
+        recovery: list[dict[str, Any]] = []
+        if experiments_enabled:
+            recovery.append(
+                {
+                    "tool": "list-experiments",
+                    "request": {"file": "scratch/experiments-index.json"},
+                }
+            )
+        recovery.append(
+            {
+                "instruction": (
+                    "Use only visible Experiment IDs listed in the Direction's "
+                    "associated_experiment_ids. Keep only Experiments that support this "
+                    "specific closure assessment; use unresolved with empty support when the "
+                    "evidence is inconclusive."
+                    if experiments_enabled
+                    else "The Experiment module is disabled; omit supporting_experiment_ids "
+                    "and cite exact visible Kernel/Result bindings in supporting_results."
+                )
+            }
+        )
+        return recovery
+    if issue["code"] == "direction_advancement_limit_exceeded":
+        return [{"instruction": (
+            "When direction_advancement_limit_exceeded is returned, the requested Direction "
+            "was not started. Leave its status unchanged for a future Attempt; do not retry "
+            "start in the current Attempt"
+        )}]
+    if issue["code"] == "direction_concurrency_conflict":
+        return [
+            {"tool": "list-directions", "request": {"file": "scratch/directions-index.json"}},
+            {"instruction": (
+                "When direction_concurrency_conflict is returned, continue the existing "
+                "in_progress(self) Direction or close it with complete, abandon, defer, or block. "
+                "Retry start only after this Attempt has no in_progress(self) Direction; "
+                "do not close other Attempts' work"
+            )},
+        ]
+    action = (request or {}).get("action")
+    if action == "propose":
+        instruction = (
+            'Retry action="propose" with name, hypothesis, rationale, plan, '
+            "success_criteria and stop_conditions. Runtime assigns the Direction ID. "
+            "Do not add closure fields or outcome evidence to a proposal."
+        )
+    elif action == "start":
+        instruction = (
+            'Retry action="start" with the exact visible direction_id. Use list-directions '
+            "or load-direction if the ID is unknown. Starting requires no hypothesis_status "
+            "or outcome evidence; omit supporting_experiment_ids, supporting_results, scope "
+            "and claim_kind. Do not close the Direction to repair a start request."
+        )
+    elif isinstance(action, str) and action in {"complete", "abandon", "block", "defer"}:
+        instruction = (
+            f'Retry action="{action}" for the same Direction owned by this Attempt with '
+            "direction_id and hypothesis_status. Use unresolved for unmeasured or inconclusive "
+            "work; analysis is optional and adds only new route-level findings. "
+            "Supported/refuted requires scope and qualifying completed Result evidence. "
+            + ("Include supporting_experiment_ids (an empty list is allowed); use only relevant "
+               "visible Experiment IDs or exact Kernel/Result bindings in supporting_results."
+               if experiments_enabled else
+               "The Experiment module is disabled: omit supporting_experiment_ids; cite exact "
+               "Kernel/Result bindings in supporting_results when judging the hypothesis.")
+        )
+    else:
+        instruction = (
+            "Set action to a string matching your intent: propose for a new Direction, start "
+            "to begin an existing Direction, or complete/abandon/block/defer for a closure. "
+            "A direction_id alone does not select an action. Supply the fields required for "
+            "that action in request_schema and retry; do not change lifecycle state just to "
+            "repair a missing or invalid action."
+        )
+    return [{"instruction": instruction}]
+
+
 def tool_recovery(
     command: str,
     *,
     operation: str | None = None,
     detail: str = "",
+    request: dict[str, Any] | None = None,
     directions_enabled: bool = True,
     experiments_enabled: bool = True,
 ) -> list[dict[str, Any]] | None:
@@ -561,15 +663,8 @@ def tool_recovery(
                 )
             }
         ]
-    if command == "update-direction" and not experiments_enabled:
-        return [
-            {
-                "instruction": (
-                    "Close the Direction with analysis and hypothesis_status; "
-                    "omit supporting_experiment_ids."
-                )
-            }
-        ]
+    if command == "update-direction":
+        return _direction_recovery(request, detail, experiments_enabled=experiments_enabled)
     if command == "attempt-report" and (not directions_enabled or not experiments_enabled):
         return [
             {
@@ -637,9 +732,12 @@ def _evaluate_recovery(detail: str) -> list[dict[str, Any]]:
     elif field.startswith("comparison") or field in {"baseline_path", "repeats"}:
         instruction = (
             "Set comparison.method to abba and name a workspace .py file or Kernel "
-            "directory in comparison.baseline_path. Set comparison.repeats from 2 to 20 "
-            "(default 2). ABBA requires full mode (normally omitted); "
-            "use 2 when a larger schedule exceeds Runtime's allocation budget."
+            "directory in comparison.baseline_path. Set comparison.repeats to an even integer "
+            "from 2 to 16 (default 2), not a boolean, float, or string. "
+            "2 means two observations per side in one A, B, B, A block. "
+            "Unsupported native Agate schedules are rejected without Dev fallback. "
+            "ABBA requires full mode (normally omitted); use 2 when a larger schedule "
+            "exceeds Runtime's allocation budget."
         )
     elif field == "mode" and "comparison" in detail:
         instruction = (
@@ -673,7 +771,7 @@ _PATH_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (re.compile(r"hypothesis_status", re.I), "hypothesis_status"),
     (re.compile(r"profile_evidence\.supporting_results"), "profile_evidence.supporting_results"),
-    (re.compile(r"supporting_experiment_ids", re.I), "findings.supporting_experiment_ids"),
+    (re.compile(r"supporting_experiment_ids", re.I), "supporting_experiment_ids"),
     (re.compile(r"final_candidate", re.I), "final_candidate"),
     (re.compile(r"cannot leave any Direction in progress", re.I), "direction_events"),
     (re.compile(r"Only one Direction may be in progress", re.I), "direction_id"),

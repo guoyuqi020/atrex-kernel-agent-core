@@ -21,7 +21,9 @@ from uuid import uuid4
 import runtime_tools
 from contexts.attempt import RuntimeAttemptContext
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
+from session_clock import SESSION_CLOCK_ENV, active_time
 
+from .dev_only_prompts import dev_only_enabled
 from .tool_module_prompts import active_modules
 
 ReportContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
@@ -30,7 +32,7 @@ _MAX_LOCAL_REPORT_BYTES = 4 * 1024 * 1024
 
 
 def _remaining(deadline: float) -> float:
-    remaining = deadline - time.monotonic()
+    remaining = deadline - active_time(time.monotonic())
     if remaining <= 0:
         raise TimeoutError("Report acceptance check exceeded the remaining session deadline")
     return remaining
@@ -89,19 +91,22 @@ def _status_response(context: ReportContext, deadline: float) -> dict[str, Any]:
 
     def query() -> None:
         try:
-            result = _post_once(context, _remaining(deadline))
+            remaining = _remaining(deadline)
+            # Socket wall time must not accidentally enforce the active-time budget.
+            timeout = max(remaining, 72 * 3600) if os.environ.get(SESSION_CLOCK_ENV) else remaining
+            result = _post_once(context, timeout)
         except BaseException as error:
             outcomes.put(error)
         else:
             outcomes.put(result)
 
     threading.Thread(target=query, name="report-acceptance-status", daemon=True).start()
-    try:
-        outcome = outcomes.get(timeout=_remaining(deadline))
-    except queue.Empty as error:
-        raise TimeoutError(
-            "Report acceptance check exceeded the remaining session deadline"
-        ) from error
+    while True:
+        try:
+            outcome = outcomes.get(timeout=min(0.1, _remaining(deadline)))
+            break
+        except queue.Empty:
+            _remaining(deadline)
     _remaining(deadline)
     if isinstance(outcome, BaseException):
         raise outcome
@@ -208,12 +213,33 @@ def _missing_prompt(context: ReportContext, backup: str | None) -> str:
         available = []
         if "directions" in modules:
             available.append(
-                "close any in_progress Direction; no Experiment support is required "
+                "close your in_progress(self) Direction, leaving others' Directions open; "
+                "no Experiment support is required "
                 "when Experiments are disabled"
             )
         if "experiments" in modules:
             available.append("reuse real recorded Experiments and their Result Artifact IDs")
         journal_note = "; ".join(available) if available else "no Journal tools are enabled"
+        reuse_note = (
+            "If the exact final Kernel reuses compatible visible historical "
+            "full-Evaluate evidence, "
+            "record an adopt Experiment with real before/after Result Artifact digests. "
+            if "experiments" in modules
+            else (
+                "For an unchanged final Kernel from visible history, Runtime can automatically "
+                "reuse compatible successful ordinary full Evaluate evidence at candidate_ready "
+                "without an Experiment or duplicate Evaluate. It preserves the original "
+                "measurement identity; custom inputs, correctness-only, Profile and exploratory "
+                "ABBA do not "
+                "qualify, and a failed current full Evaluate cannot be overridden. "
+            )
+        )
+        if dev_only_enabled():
+            reuse_note = (
+                "This is the Dev-only arm: candidate_ready does not require an Agent Evaluate. "
+                "Nominate the current source from existing evidence with honest limitations; "
+                "Runtime privately validates it after handoff. Do not invent official results. "
+            )
         preserved = (
             f"The unaccepted local report was backed up at `{backup}`. "
             if backup is not None
@@ -225,6 +251,7 @@ def _missing_prompt(context: ReportContext, backup: str | None) -> str:
             "the candidate or start new measurements. "
             f"Public task context: {_public_context(context)}. {_trace_hint(context)} "
             f"{preserved}Use the live runtime-contract and existing evidence; {journal_note}. "
+            f"{reuse_note}Complete enabled Journal bookkeeping; submit only the compact handoff fields. "
             "Never invent evidence. If candidate_ready is unsupported, use blocked"
             + ("" if isinstance(context, RuntimeLineageBootstrapContext) else " or pivot")
             + ". Submit attempt-report and finish only after its Runtime receipt."
@@ -257,20 +284,25 @@ def _missing_prompt(context: ReportContext, backup: str | None) -> str:
         "list-experiments, and load-experiment as needed. Reuse already measured results "
         "and their actual identifiers; "
         "do not invent trials, measurements, successful checks, or supporting evidence. "
-        "Complete only the Journal bookkeeping needed to describe the work already done.\n"
+        "Complete only the Journal bookkeeping needed to describe the work already done. "
+        "Runtime supplies measurement_summary; evidence and analysis need not repeat it. "
+        "No analysis or Findings belong in attempt-report; keep interpretations in enabled Journals.\n"
         "If the exact final Kernel reuses matching successful historical full-Evaluate evidence, "
         "record an adopt decision with the real before/after Trials and let Runtime validate it. "
         "Do not wait for authoritative ABBA: it runs after Report handoff and creates no Agent "
         "Trial. Agent ABBA cannot replace ordinary full-Evaluate evidence.\n"
         f"{fallback} Explain any remaining uncertainty or blocker.\n"
-        f"A {empty_status} report may have zero Experiments and empty findings "
-        "if no Direction needs closing; do not invent either. Closing an in_progress Direction "
-        "with block or defer requires an associated Experiment first. Every Experiment must "
+        f"A {empty_status} report may have zero Experiments, "
+        "including after closing an unmeasured Direction; do not invent either. "
+        "Close only in_progress(self) Directions, leaving others' work open. "
+        "For unmeasured or inconclusive work, close with hypothesis_status=unresolved "
+        "and empty supporting_experiment_ids; no associated Experiment is required. "
+        "For supported/refuted conclusions, supply scope and relevant completed Result evidence "
+        "through supporting_results or selected Experiments. Every Experiment must "
         "cite at least one real Kernel-bound Gateway Result already available; both-null "
-        "before/after is forbidden, even for abandon_direction. If no Result exists, explain "
+        "before/after is forbidden, even for discard. If no Result exists, explain "
         "the blocker; do not invent evidence or run new measurements in this recovery session. "
-        "Explicitly supply supporting_experiment_ids and hypothesis_status=unresolved for "
-        "diagnostics that did not test the performance hypothesis. "
+        "Keep hypothesis_status=unresolved for diagnostics that did not test the hypothesis. "
         "This is bookkeeping, not a new measurement.\n"
         f"Submit the terminal report through the real `python {_RUNTIME_TOOL} attempt-report "
         "--request scratch/report-completion-request.json` tool. "
@@ -289,7 +321,7 @@ def report_completion_prompt(
     """Check Runtime acceptance within the remaining logical-session deadline."""
     if not math.isfinite(remaining_timeout_seconds) or remaining_timeout_seconds <= 0:
         raise ValueError("Report completion requires a positive finite remaining timeout")
-    deadline = time.monotonic() + remaining_timeout_seconds
+    deadline = active_time(time.monotonic()) + remaining_timeout_seconds
     response = _status_response(context, deadline)
     result = response.get("result")
     if not isinstance(result, dict):

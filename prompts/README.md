@@ -12,7 +12,8 @@ configuration is updated too. Do not store credentials, temporary requests, or r
 
 ## Contents
 
-- episode.md: Optimizer methodology, including explicit adoption of matching historical evidence;
+- episode.md: Optimizer methodology, including brief executable plans, incremental implementation,
+  continuation from saved work, and explicit adoption of matching historical evidence;
   depends on the shared Session tools and trusted Runtime Journal/evaluation contract.
 - framework_baseline.md: Bootstrap methodology and honest blocked handoff without fabricated
   experiments; depends on the shared Session report schema and Runtime Bootstrap validation.
@@ -20,5 +21,5 @@ configuration is updated too. Do not store credentials, temporary requests, or r
 - attempt-tools.md: CLI instructions and request/report examples shared by Attempts and Bootstrap,
   including the 1 MiB request limit, paired input/Shape file examples, custom-input and
   correctness-only evaluation, exploratory versus authoritative ABBA, historical `adopt` decisions,
-  zero-experiment blocked/pivot reports, and local file-error repair; depends on
+  zero-experiment blocked/pivot reports, operation selection, targeted history recovery, and local file-error repair; depends on
   `src/runtime_tools.py`, `src/tool_contracts.py`, and the trusted Runtime request/report contracts.

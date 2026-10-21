@@ -196,6 +196,12 @@ class AgentBackendAdapter(ABC):
         self, stdout: str
     ) -> tuple[tuple[NormalizedAgentEvent, ...], TokenUsage]: ...
 
+    def classify_terminal_failure(
+        self, stdout: str, session_id: str
+    ) -> tuple[str | None, str | None]:
+        """Classify a final provider failure, never a recoverable intermediate event."""
+        return None, None
+
 
 def _json_events(stdout: str) -> tuple[dict[str, object], ...]:
     events: list[dict[str, object]] = []
@@ -282,6 +288,45 @@ class ClaudeLikeAdapter(AgentBackendAdapter):
 class ClaudeAdapter(ClaudeLikeAdapter):
     id = "claude"
     settings_variable = "ATREX_CLAUDE_SESSION_SETTINGS"
+
+    def classify_terminal_failure(
+        self, stdout: str, session_id: str
+    ) -> tuple[str | None, str | None]:
+        if not session_id:
+            return None, None
+        last_assistant: dict[str, object] | None = None
+        failure: tuple[str | None, str | None] = (None, None)
+        for event in _json_events(stdout):
+            # Subagent errors and other sessions must never restart the root attempt.
+            if (
+                event.get("session_id") != session_id
+                or event.get("parent_tool_use_id") is not None
+            ):
+                continue
+            if event.get("type") == "assistant":
+                last_assistant = event
+                failure = (None, None)
+            elif event.get("type") == "result":
+                # The final root result wins. Claude can report subtype=success while
+                # is_error=true, so subtype alone is not a success signal.
+                failure = (None, None)
+                assistant = last_assistant
+                last_assistant = None
+                if (
+                    event.get("is_error") is not True
+                    or event.get("terminal_reason") != "api_error"
+                    or assistant is None
+                    or assistant.get("is_api_error_message") is not True
+                ):
+                    continue
+                codes = {
+                    assistant.get(key)
+                    for key in ("error", "api_error")
+                    if isinstance(assistant.get(key), str)
+                }
+                if codes == {"max_output_tokens"}:
+                    failure = ("output_limit", "max_output_tokens")
+        return failure
 
     def build_command(
         self,

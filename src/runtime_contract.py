@@ -12,14 +12,18 @@ from tool_contracts import tool_request_schema
 _CONTRACT_ENV = "ATREX_RUNTIME_CONTRACT_PATH"
 _FILES = ("tools.json", "environment.json", "limits.json")
 _LOCAL_COMMANDS = (
+    "wiki-query",
     "kernel-artifact-read",
     "result-artifact-read",
+    "kernel-pareto-frontier",
     "update-direction",
     "list-directions",
     "load-direction",
     "record-experiment",
     "list-experiments",
     "load-experiment",
+    "find-kernel-experiments",
+    "find-kernel-directions",
     "attempt-report",
 )
 
@@ -53,6 +57,34 @@ def load_live_contract() -> tuple[Path, dict[str, Any]]:
         name.removesuffix(".json"): _object_file(root / name, f"Runtime contract {name}")
         for name in _FILES
     }
+
+
+def command_enabled(command: str) -> bool:
+    """Use live bindings when supplied, preserving legacy standalone fixtures."""
+    if not os.environ.get(_CONTRACT_ENV):
+        return True
+    _, live = load_live_contract()
+    bindings = live["tools"].get("bindings", {})
+    return isinstance(bindings, dict) and command in bindings
+
+
+def wiki_enabled() -> bool:
+    """Require explicit service enablement and the trusted query binding."""
+    if not os.environ.get(_CONTRACT_ENV):
+        return False
+    _, live = load_live_contract()
+    services = live["environment"].get("services", {})
+    bindings = live["tools"].get("bindings", {})
+    if not isinstance(services, dict) or services.get("wiki") is not True:
+        return False
+    if not isinstance(bindings, dict):
+        return False
+    binding = bindings.get("wiki-query")
+    return (
+        isinstance(binding, dict)
+        and binding.get("kind") == "runtime-query"
+        and binding.get("operation") == "wiki_query"
+    )
 
 
 def project_contract(
@@ -100,6 +132,8 @@ def project_contract(
     for name in _LOCAL_COMMANDS:
         if name not in bindings:
             continue
+        if name == "wiki-query" and not wiki_enabled():
+            raise ValueError("GPU Wiki binding requires an enabled Wiki service")
         schema = tool_request_schema(
             name,
             allow_baseline=allow_baseline,
@@ -143,3 +177,19 @@ def project_contract(
         "environment": live["environment"],
         "limits": live["limits"],
     }
+
+
+def dev_only_enabled() -> bool:
+    """Read the frozen tool profile without inferring it from missing tools."""
+    if not os.environ.get("ATREX_RUNTIME_CONTRACT_PATH"):
+        return False
+    _, contract = load_live_contract()
+    return contract["environment"].get("dev_only", False) is True
+
+
+def raw_enabled() -> bool:
+    """Read the frozen Raw mode from the trusted live contract."""
+    if not os.environ.get(_CONTRACT_ENV):
+        return False
+    _, contract = load_live_contract()
+    return contract["environment"].get("raw", False) is True

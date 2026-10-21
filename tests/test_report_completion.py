@@ -145,11 +145,14 @@ def test_missing_queries_runtime_with_fresh_authenticated_keys_and_report_only_p
         "successful Runtime receipt",
         "status: published",
         "pivot or blocked",
+        "including after closing an unmeasured Direction",
+        "empty supporting_experiment_ids; no associated Experiment is required",
         "public-matmul",
         "public-gpu",
         "triton",
     ):
         assert text in first
+    assert "requires an associated Experiment first" not in first
     for private in (
         _ATTEMPT_ID,
         "987654321",
@@ -160,6 +163,28 @@ def test_missing_queries_runtime_with_fresh_authenticated_keys_and_report_only_p
     ):
         assert private not in first
     assert not context.report_path.exists()
+
+
+@pytest.mark.parametrize(
+    "modules",
+    [frozenset(), frozenset({"directions"}), frozenset({"experiments"})],
+)
+def test_missing_report_scopes_historical_reuse_to_enabled_modules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, modules: frozenset[str]
+) -> None:
+    completion = importlib.import_module("sessions.report_completion")
+    monkeypatch.setattr(completion, "active_modules", lambda: modules)
+    context = _context(tmp_path)
+    _http(monkeypatch, {"result": {"status": "missing"}})
+    prompt = report_completion_prompt(context, 30.0)
+    assert prompt is not None
+    assert "do not edit the candidate or start new measurements" in prompt
+    assert ("record an adopt Experiment" in prompt) == ("experiments" in modules)
+    assert ("Runtime can automatically reuse" in prompt) == ("experiments" not in modules)
+    if "experiments" not in modules:
+        assert "without an Experiment or duplicate Evaluate" in prompt
+        assert "a failed current full Evaluate cannot be overridden" in prompt
+        assert "Complete enabled Journal bookkeeping; submit only the compact handoff fields" in prompt
 
 
 @pytest.mark.parametrize("local_bytes", [b'{"status":"blocked"}\n', b"unaccepted malformed draft"])
@@ -504,3 +529,28 @@ def test_response_byte_limit_is_preserved(tmp_path: Path, monkeypatch: pytest.Mo
     with pytest.raises(RuntimeError, match="byte limit"):
         report_completion_prompt(context, 30.0)
     assert not context.report_path.exists()
+
+
+
+def test_report_query_socket_timeout_is_independent_of_active_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    from sessions import report_completion
+
+    context = _context(tmp_path)
+    path = tmp_path / "runtime-clock.json"
+    path.write_text(json.dumps({
+        "schema_version": 1, "wait_seconds": 0, "paused_since": time.monotonic(),
+    }))
+    monkeypatch.setenv("ATREX_SESSION_CLOCK_PATH", str(path))
+    timeouts = []
+
+    def query(_context: ReportContext, timeout: float) -> dict[str, Any]:
+        timeouts.append(timeout)
+        return {"result": {"status": "missing"}}
+
+    monkeypatch.setattr(report_completion, "_post_once", query)
+    assert report_completion_prompt(context, 0.01) is not None
+    assert timeouts == [72 * 3600]

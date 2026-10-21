@@ -13,6 +13,7 @@ import os
 import stat
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -21,7 +22,10 @@ from uuid import uuid4
 
 from contexts.attempt import RuntimeAttemptContext
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
-from runtime_contract import load_live_contract, project_contract
+from runtime_contract import (
+    command_enabled, dev_only_enabled, load_live_contract, project_contract, wiki_enabled,
+)
+from runtime_request_barrier import RuntimeServiceError as RuntimeServiceError
 from tool_contracts import local_validation_issue, tool_recovery, tool_request_schema
 
 _CANDIDATE_OPERATIONS = {
@@ -37,6 +41,7 @@ _GATEWAY_EXECUTE_OPERATIONS = _CANDIDATE_OPERATIONS | {
 _PUBLIC_RUNTIME_QUERY_COMMANDS = {
     "kernel-artifact-read": "kernel_artifact_read",
     "result-artifact-read": "result_artifact_read",
+    "kernel-pareto-frontier": "kernel_pareto_frontier",
 }
 _RUNTIME_QUERY_COMMANDS = dict(_PUBLIC_RUNTIME_QUERY_COMMANDS)
 _RUNTIME_QUERY_OPERATIONS = frozenset(_RUNTIME_QUERY_COMMANDS.values())
@@ -47,6 +52,8 @@ _RUNTIME_JOURNAL_COMMANDS = {
     "record-experiment": "experiment_record",
     "list-experiments": "experiments_list",
     "load-experiment": "experiment_load",
+    "find-kernel-experiments": "kernel_experiments_find",
+    "find-kernel-directions": "kernel_directions_find",
     "_journal-snapshot": "journal_snapshot",
 }
 _ATTEMPT_COMMANDS = (
@@ -58,6 +65,8 @@ _ATTEMPT_COMMANDS = (
     "record-experiment",
     "list-experiments",
     "load-experiment",
+    "find-kernel-experiments",
+    "find-kernel-directions",
     "attempt-report",
 )
 _RESERVED_REQUEST_FIELDS = {
@@ -98,19 +107,18 @@ _EXPERIMENT_SUBJECT_FIELDS = {
 }
 _REPORT_FIELDS = {
     "status",
-    "hypothesis",
-    "diagnosis",
-    "approach",
     "final_candidate",
-    "evidence_summary",
-    "profile_evidence",
-    "analysis",
-    "knowledge_used",
-    "findings",
     "contributing_result_artifact_digests",
     "blocker",
 }
+
 RuntimeToolContext = RuntimeAttemptContext | RuntimeLineageBootstrapContext
+
+
+def _available_attempt_commands() -> tuple[str, ...]:
+    return tuple(command for command in _ATTEMPT_COMMANDS if command_enabled(command)) + (
+        ("wiki-query",) if wiki_enabled() else ()
+    )
 
 
 def _tool_modules() -> frozenset[str]:
@@ -136,18 +144,10 @@ _MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _MAX_ERROR_RESPONSE_BYTES = 64 * 1024
 _HTTP_TIMEOUT_SECONDS = 600
-# Seven ten-minute reads outlast Runtime's own Agate wait, so a slow operation is
-# collected on a later reconnect instead of being abandoned half-finished.
+_GATEWAY_HTTP_TIMEOUT_SECONDS = 72 * 60 * 60
+# Runtime-local queries keep a bounded retry budget. Gateway commands wait for
+# their final result, subject to the owning Session/process lifetime.
 _MAX_TIMEOUT_RECONNECTS = 6
-
-
-class RuntimeServiceError(RuntimeError):
-    """Structured non-success response returned by a trusted Runtime service."""
-
-    def __init__(self, status_code: int, payload: dict[str, Any]) -> None:
-        self.status_code = status_code
-        self.payload = payload
-        super().__init__(str(payload.get("detail", payload.get("error", "Runtime service error"))))
 
 
 def _read_object(
@@ -258,6 +258,17 @@ def _atomic_bytes(path: Path, payload: bytes) -> None:
 
 
 def _post(url: str, capability: str, path: str, value: object) -> dict[str, Any]:
+    from runtime_request_barrier import REQUEST_SOCKET_ENV, supervised_post
+
+    if socket_path := os.environ.get(REQUEST_SOCKET_ENV):
+        return supervised_post(socket_path, url, capability, path, value)
+    if os.environ.get("ATREX_SESSION_CLOCK_PATH"):
+        raise RuntimeError("Runtime-bound CLI requires its live request supervisor")
+    return _post_direct(url, capability, path, value)
+
+
+def _post_direct(url: str, capability: str, path: str, value: object) -> dict[str, Any]:
+    """HTTP implementation also used by the independent request supervisor."""
     payload = json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
     request = urllib.request.Request(
         url.rstrip("/") + path,
@@ -292,8 +303,13 @@ def _post(url: str, capability: str, path: str, value: object) -> dict[str, Any]
 
 
 def _exchange(request: urllib.request.Request) -> dict[str, Any]:
+    timeout = (
+        _GATEWAY_HTTP_TIMEOUT_SECONDS
+        if urllib.parse.urlsplit(request.full_url).path.endswith("/v1/operations")
+        else _HTTP_TIMEOUT_SECONDS
+    )
     try:
-        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read(_MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as error:
         body = error.read(_MAX_ERROR_RESPONSE_BYTES + 1)
@@ -547,6 +563,8 @@ def gateway_execute(context: RuntimeToolContext, request: dict[str, Any]) -> dic
     operation = request.get("operation")
     if not isinstance(operation, str) or not operation:
         raise ValueError("Gateway request requires operation")
+    if dev_only_enabled() and operation != "dev":
+        raise ValueError("This Dev-only Session allows only operation=dev")
     if operation in _RUNTIME_QUERY_OPERATIONS:
         command = next(
             name
@@ -558,6 +576,11 @@ def gateway_execute(context: RuntimeToolContext, request: dict[str, Any]) -> dic
         )
     if operation not in _GATEWAY_EXECUTE_OPERATIONS:
         raise ValueError(f"unsupported gateway-execute operation: {operation}")
+    if operation == "env" and set(request) != {"operation"}:
+        raise ValueError(
+            'env accepts only {"operation":"env"}; Runtime selects the task GPU '
+            "and returns both environment and capabilities. Do not set gpu, capabilities, or force."
+        )
     value = {"schema_version": 2, "attempt_id": context.attempt_id, **request}
     if operation == "evaluate":
         prediction = value.get("latency_prediction")
@@ -605,8 +628,18 @@ def _evaluate_candidates(context: RuntimeToolContext, value: dict[str, Any]) -> 
                 "evaluate comparison has unknown fields; use method, baseline_path, and repeats"
             )
         repeats = comparison.get("repeats", 2)
-        if isinstance(repeats, bool) or not isinstance(repeats, int) or not 2 <= repeats <= 20:
-            raise ValueError("evaluate comparison.repeats must be an integer from 2 to 20")
+        if (
+            isinstance(repeats, bool)
+            or not isinstance(repeats, int)
+            or not 2 <= repeats <= 16
+            or repeats % 2
+        ):
+            raise ValueError(
+                "evaluate comparison.repeats must be an even integer from 2 to 16: "
+                f"2, 4, 6, 8, 10, 12, 14, 16; got {repeats!r}. "
+                "Unsupported native Agate ABBA schedules have no Dev fallback; "
+                "2 means one A, B, B, A block"
+            )
         if value.get("mode", "full") != "full":
             raise ValueError("evaluate mode must be full when comparison is supplied")
         wire_comparison = dict(comparison)
@@ -785,6 +818,27 @@ def _dev_files(context: RuntimeToolContext, value: dict[str, Any]) -> list[dict[
     return files
 
 
+def wiki_query(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    """Query the optional trusted Wiki proxy without changing its knowledge content."""
+    if not wiki_enabled():
+        raise RuntimeError("GPU Wiki is disabled for this Session")
+    if not context.wiki_url or not context.wiki_capability:
+        raise RuntimeError("GPU Wiki capability is unavailable for this Session")
+    unknown = set(request) - {"query"}
+    if unknown:
+        raise ValueError(f"unknown Wiki request fields: {sorted(unknown)}")
+    query = request.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("Wiki request requires a non-empty query")
+    value = {"schema_version": 1, "attempt_id": context.attempt_id, "query": query}
+    value["idempotency_key"] = _idempotency_key("wiki", value)
+    response = _post(context.wiki_url, context.wiki_capability, "/v1/wiki/query", value)
+    content = response.get("content")
+    if not isinstance(content, dict):
+        raise RuntimeError("Runtime Wiki response has no Agent-readable content object")
+    return content
+
+
 def runtime_query(
     context: RuntimeToolContext,
     command: str,
@@ -883,6 +937,9 @@ def runtime_journal(
     elif command == "load-experiment":
         value["experiment_id"] = request.get("experiment_id")
         value["idempotency_key"] = f"core-journal-read-{uuid4().hex}"
+    elif command in {"find-kernel-experiments", "find-kernel-directions"}:
+        value["kernel_artifact_digest"] = request.get("kernel_artifact_digest")
+        value["idempotency_key"] = f"core-journal-read-{uuid4().hex}"
     else:
         value["idempotency_key"] = f"core-journal-read-{uuid4().hex}"
     response = _post(
@@ -949,7 +1006,13 @@ def _validate_direction_events(
         "derived_from_experiment_ids",
         "supersedes_direction_id",
     }
-    optional_fields = relationship_fields | {"hypothesis_status"}
+    optional_fields = relationship_fields | {
+        "hypothesis_status",
+        "claim_kind",
+        "scope",
+        "supporting_results",
+        "assessment_notes",
+    }
     for event in events:
         if not isinstance(event, dict) or set(event) - optional_fields != _direction_event_fields():
             raise ValueError(f"{label} contains a malformed event")
@@ -1047,14 +1110,8 @@ def _validate_direction_events(
                 or event.get("plan") != []
             ):
                 raise ValueError("Direction update cannot redefine its proposal")
-            _text(event.get("analysis"), "Direction analysis")
-            if (
-                action in {"complete", "abandon", "block", "defer"}
-                and not supporting
-                and experiments_enabled
-                and (hypothesis_status is not None or action in {"complete", "abandon"})
-            ):
-                raise ValueError(f"Direction {action} requires supporting Experiments")
+            if event.get("analysis") is not None:
+                _text(event["analysis"], "Direction analysis")
         validated.append(event)
     return validated
 
@@ -1161,6 +1218,18 @@ def _validate_experiment_comparison(
 
 
 def record_experiment(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    schema = tool_request_schema(
+        "record-experiment", directions_enabled="directions" in _tool_modules(),
+    )
+    # Missing keys are not explicit null evidence. Let Runtime identify every missing
+    # required field before local comparison/adoption checks interpret the values.
+    if schema is not None and set(schema["required"]) - request.keys():
+        return runtime_journal(context, "record-experiment", request)
+    _object_array(
+        request.get("knowledge_used", []),
+        "Experiment knowledge_used",
+        {"record_id", "finding", "application"},
+    )
     if request.get("before") is None and request.get("after") is None:
         raise ValueError(
             "Experiment requires at least one Gateway Result: before and after cannot both be null"
@@ -1231,7 +1300,10 @@ def _validate_experiment_entries(
     expected_fields = _EXPERIMENT_FIELDS | {"experiment_id", "sequence", "recorded_at"}
     validated: list[dict[str, Any]] = []
     for sequence, experiment in enumerate(experiments, start=1):
-        if not isinstance(experiment, dict) or set(experiment) != expected_fields:
+        if (
+            not isinstance(experiment, dict)
+            or set(experiment) - {"knowledge_used", "measurement_summary"} != expected_fields
+        ):
             raise ValueError(f"{label} contains a malformed entry")
         if experiment.get("sequence") != sequence:
             raise ValueError(f"{label} sequence must be contiguous")
@@ -1248,8 +1320,11 @@ def _validate_experiment_entries(
             datetime.fromisoformat(str(experiment["recorded_at"]).replace("Z", "+00:00"))
         except ValueError as error:
             raise ValueError("Experiment recorded_at must be ISO-8601") from error
-        for field in _EXPERIMENT_FIELDS - {"action", "before", "after", "direction_id"}:
+        for field in ("name", "change"):
             _text(experiment.get(field), f"Experiment {field}")
+        for field in ("hypothesis", "evidence", "analysis"):
+            if experiment.get(field) is not None:
+                _text(experiment[field], f"Experiment {field}")
         if directions_enabled:
             _validate_direction_id(experiment.get("direction_id"))
         elif experiment.get("direction_id") is not None:
@@ -1257,6 +1332,7 @@ def _validate_experiment_entries(
         allowed_actions = {
             "keep_after",
             "restore_before",
+            "discard",
             "abandon_direction",
             "adopt",
         }
@@ -1265,8 +1341,20 @@ def _validate_experiment_entries(
         if experiment.get("action") not in allowed_actions:
             raise ValueError("Experiment action is invalid")
         _validate_experiment_comparison(experiment, allow_baseline=allow_baseline)
-        validated.append(experiment)
+        validated.append(_experiment_knowledge(experiment))
     return validated
+
+
+def _experiment_knowledge(experiment: object) -> dict[str, Any]:
+    """Normalize historical omissions without modifying request or frozen record objects."""
+    if not isinstance(experiment, dict):
+        raise ValueError("Runtime returned an invalid Experiment record")
+    knowledge = _object_array(
+        experiment.get("knowledge_used", []),
+        "Experiment knowledge_used",
+        {"record_id", "finding", "application"},
+    )
+    return {**experiment, "knowledge_used": knowledge}
 
 
 def list_experiments(
@@ -1285,6 +1373,7 @@ def list_experiments(
     experiments = value.get("experiments")
     if set(value) != {"experiments"} or not isinstance(experiments, list):
         raise ValueError("Runtime returned an invalid Experiment index")
+    value = {"experiments": [_experiment_knowledge(experiment) for experiment in experiments]}
     _atomic_json(destination, value)
     return {
         "status": "completed",
@@ -1300,7 +1389,21 @@ def load_experiment(
     """Return one exact visible historical or current Experiment record."""
     if set(request) != {"experiment_id"}:
         raise ValueError("load-experiment request requires exactly experiment_id")
-    return runtime_journal(context, "load-experiment", request)
+    return _experiment_knowledge(runtime_journal(context, "load-experiment", request))
+
+
+def find_kernel_experiments(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    """Find visible Experiment IDs citing one Kernel Artifact."""
+    if set(request) != {"kernel_artifact_digest"}:
+        raise ValueError("find-kernel-experiments requires exactly kernel_artifact_digest")
+    return runtime_journal(context, "find-kernel-experiments", request)
+
+
+def find_kernel_directions(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
+    """Find visible Direction IDs linked through Experiments to one Kernel Artifact."""
+    if set(request) != {"kernel_artifact_digest"}:
+        raise ValueError("find-kernel-directions requires exactly kernel_artifact_digest")
+    return runtime_journal(context, "find-kernel-directions", request)
 
 
 def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict[str, Any]:
@@ -1310,7 +1413,13 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
     status = request.get("status")
     if not isinstance(status, str) or status not in {"candidate_ready", "pivot", "blocked"}:
         raise ValueError("Attempt report status is invalid")
-    snapshot = runtime_journal(context, "_journal-snapshot", {})
+    # This arm has no Journal or Profile queries. Report assembly must not make
+    # an implicit disabled call, nor recover historical measurements through it.
+    snapshot = (
+        {"direction_events": [], "experiments": [], "directions": [], "citable_profile_results": []}
+        if dev_only_enabled()
+        else runtime_journal(context, "_journal-snapshot", {})
+    )
     if set(snapshot) != {
         "direction_events",
         "experiments",
@@ -1361,10 +1470,16 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         raise ValueError(
             f"Attempt report Experiment references unknown Directions: {unknown_direction_ids}"
         )
+    # Visible peers own their open Directions; handoff closes only this Attempt's work.
+    latest_direction_actions = {
+        str(event["direction_id"]): str(event["action"])
+        for event in direction_events
+        if event["action"] not in {"propose", "suggest"}
+    }
     in_progress_direction_ids = sorted(
         direction_id
-        for direction_id, direction in directions.items()
-        if direction["status"] == "in_progress"
+        for direction_id, action in latest_direction_actions.items()
+        if action == "start"
     )
     if in_progress_direction_ids:
         raise ValueError(
@@ -1383,7 +1498,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         has_identity_bearing_experiment = any(
             experiment[side] is not None
             for experiment in experiments
-            if experiment["action"] != "abandon_direction"
+            if experiment["action"] not in {"abandon_direction", "discard"}
             for side in ("before", "after")
         )
         if status == "blocked" and baseline_count == 0 and has_identity_bearing_experiment:
@@ -1391,116 +1506,6 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                 "Bootstrap blocked report may omit baseline only when no Experiment has "
                 "non-diagnostic candidate evidence; abandon_direction diagnostics are allowed"
             )
-    _text(request.get("hypothesis"), "Attempt report hypothesis")
-    _text(request.get("analysis"), "Attempt report analysis")
-    diagnosis = _exact_object(
-        request.get("diagnosis"),
-        "Attempt report diagnosis",
-        {"bottleneck", "evidence"},
-    )
-    for field in diagnosis:
-        _text(diagnosis[field], f"Attempt report diagnosis.{field}")
-    approach = _exact_object(
-        request.get("approach"),
-        "Attempt report approach",
-        {"summary", "steps", "expected_impact", "risks"},
-    )
-    _text(approach.get("summary"), "Attempt report approach.summary")
-    _text(approach.get("expected_impact"), "Attempt report approach.expected_impact")
-    _text_array(approach.get("steps"), "Attempt report approach.steps", required=True)
-    _text_array(approach.get("risks"), "Attempt report approach.risks")
-    evidence_summary = _exact_object(
-        request.get("evidence_summary"),
-        "Attempt report evidence_summary",
-        {"correctness", "performance"},
-    )
-    for field in evidence_summary:
-        _text(evidence_summary[field], f"Attempt report evidence_summary.{field}")
-    profile_evidence = request.get("profile_evidence")
-    if profile_evidence is not None:
-        profile_value = _exact_object(
-            profile_evidence,
-            "Attempt report profile_evidence",
-            {
-                "tool_used",
-                "profiler",
-                "profile_level",
-                "bottleneck_type",
-                "evidence_summary",
-                "evidence_chain",
-                "supporting_results",
-            },
-        )
-        for field in (
-            "tool_used",
-            "profiler",
-            "profile_level",
-            "bottleneck_type",
-            "evidence_summary",
-            "evidence_chain",
-        ):
-            _text(profile_value[field], f"Attempt report profile_evidence.{field}")
-        supporting_results = profile_value["supporting_results"]
-        if not isinstance(supporting_results, list) or not supporting_results:
-            raise ValueError("Attempt report profile_evidence.supporting_results must be non-empty")
-        if len(supporting_results) > 32:
-            raise ValueError("Attempt report profile_evidence supports at most 32 results")
-        profile_bindings: set[tuple[str, str]] = set()
-        for citable in citable_profile_results:
-            identity = _exact_object(
-                citable,
-                "Runtime citable Profile result",
-                {
-                    "kernel_artifact_digest",
-                    "result_artifact_digest",
-                },
-            )
-            profile_bindings.add(
-                (
-                    str(identity["kernel_artifact_digest"]),
-                    str(identity["result_artifact_digest"]),
-                )
-            )
-        seen_results: set[str] = set()
-        has_profile = False
-        for index, item in enumerate(supporting_results):
-            reference = _exact_object(
-                item,
-                f"Attempt report profile_evidence.supporting_results[{index}]",
-                {
-                    "operation",
-                    "kernel_artifact_digest",
-                    "result_artifact_digest",
-                },
-            )
-            operation = reference["operation"]
-            if operation != "profile":
-                raise ValueError("Profile supporting result operation must be profile")
-            has_profile = True
-            subject = _experiment_subject(
-                {
-                    "kernel_artifact_digest": reference["kernel_artifact_digest"],
-                    "result_artifact_digests": [reference["result_artifact_digest"]],
-                },
-                f"Attempt report profile_evidence.supporting_results[{index}]",
-            )
-            assert subject is not None
-            binding = (
-                subject["kernel_artifact_digest"],
-                subject["result_artifact_digests"][0],
-            )
-            if binding not in profile_bindings:
-                raise ValueError(
-                    "Profile supporting result does not match a visible Runtime-recorded "
-                    f"Profile observation: {binding[1]}. Use the exact kernel_artifact_digest "
-                    "and result_artifact_digest returned by Runtime; "
-                    "an Experiment reference is not required."
-                )
-            if binding[1] in seen_results:
-                raise ValueError("Profile supporting Gateway results must be unique")
-            seen_results.add(binding[1])
-        if not has_profile:
-            raise ValueError("Profile evidence requires at least one profile result")
     candidate = request.get("final_candidate")
     blocker = request.get("blocker")
     if status == "candidate_ready":
@@ -1521,49 +1526,6 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
         if candidate is not None:
             raise ValueError("blocked cannot nominate final_candidate")
         _text(blocker, "Attempt report blocker")
-    _object_array(
-        request.get("knowledge_used"),
-        "Attempt report knowledge_used",
-        {"record_id", "finding", "application"},
-    )
-    findings = request.get("findings")
-    if not isinstance(findings, list):
-        raise ValueError("Attempt report findings must be an array")
-    if status == "candidate_ready" and not findings:
-        raise ValueError("candidate_ready Attempt report findings must be a non-empty array")
-    journal_experiment_ids = {experiment["experiment_id"] for experiment in experiments}
-    for index, item in enumerate(findings):
-        finding = _exact_object(
-            item,
-            f"Attempt report findings[{index}]",
-            {
-                "category",
-                "observation",
-                "root_cause",
-                "resolution",
-                "lesson",
-            }
-            | ({"supporting_experiment_ids"} if "experiments" in modules else set()),
-        )
-        for field in ("category", "observation", "root_cause", "resolution", "lesson"):
-            _text(finding[field], f"Attempt report findings[{index}].{field}")
-        supporting_ids = _text_array(
-            finding["supporting_experiment_ids"] if "experiments" in modules else [],
-            f"Attempt report findings[{index}].supporting_experiment_ids",
-            required="experiments" in modules,
-        )
-        if "experiments" not in modules:
-            finding["supporting_experiment_ids"] = []
-        if len(supporting_ids) > 32:
-            raise ValueError("Attempt finding supports at most 32 Experiments")
-        if len(set(supporting_ids)) != len(supporting_ids):
-            raise ValueError("Attempt finding supporting Experiment IDs must be unique")
-        unknown_experiment_ids = sorted(set(supporting_ids) - journal_experiment_ids)
-        if unknown_experiment_ids:
-            raise ValueError(
-                "Attempt finding references Experiments outside this journal: "
-                f"{unknown_experiment_ids}"
-            )
     contributing = _text_array(
         request.get("contributing_result_artifact_digests"),
         "Attempt report contributing_result_artifact_digests",
@@ -1579,7 +1541,7 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
                 "must be a Result Artifact digest"
             )
     report = {
-        "schema_version": 12,
+        "schema_version": 13,
         "attempt_id": context.attempt_id,
         **request,
         "tool_modules": sorted(modules),
@@ -1600,18 +1562,23 @@ def attempt_report(context: RuntimeToolContext, request: dict[str, Any]) -> dict
             f"Attempt report exceeds byte limit: actual_bytes={report_bytes}, "
             f"max_bytes={max_report_bytes}; summarize evidence and reference recorded Trials"
         )
-    _register_attempt_report(context, report)
+    registration = _register_attempt_report(context, report) or {}
     _atomic_json(context.report_path, report, exclusive=True)
     return {
         "status": "published",
         "report_status": report["status"],
         "file": context.report_path.relative_to(context.workspace).as_posix(),
         "experiment_count": len(experiments),
-        "finding_count": len(findings),
+        "direction_count": len({event["direction_id"] for event in direction_events}),
+        **(
+            {"assessment_notes": registration["assessment_notes"]}
+            if registration.get("assessment_notes")
+            else {}
+        ),
     }
 
 
-def _register_attempt_report(context: RuntimeToolContext, report: dict[str, Any]) -> None:
+def _register_attempt_report(context: RuntimeToolContext, report: dict[str, Any]) -> dict[str, Any]:
     """Let Runtime seal the exact candidate and accept or refuse this nomination."""
     value: dict[str, Any] = {
         "schema_version": 2,
@@ -1630,6 +1597,21 @@ def _register_attempt_report(context: RuntimeToolContext, report: dict[str, Any]
     result = response.get("result")
     if not isinstance(result, dict) or result.get("status") != "registered":
         raise ValueError("Attempt report registration returned an invalid response")
+    accepted_report = result.get("report")
+    if "report" in result:
+        if (
+            not isinstance(accepted_report, dict)
+            or accepted_report.get("attempt_id") != context.attempt_id
+            or accepted_report.get("status") != report["status"]
+        ):
+            raise ValueError("Attempt report registration returned an invalid accepted report")
+        accepted_report = dict(accepted_report)
+        report.clear()
+        report.update(accepted_report)
+    notes = result.get("assessment_notes", [])
+    if not isinstance(notes, list):
+        raise ValueError("Attempt report registration returned invalid assessment notes")
+    return {"assessment_notes": notes}
 
 
 def _context(command: str) -> RuntimeToolContext:
@@ -1691,6 +1673,7 @@ def _augment_agent_error(
     detail: str,
     context: RuntimeToolContext | None = None,
     operation: str | None = None,
+    request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Add local repair contracts without replacing more authoritative service guidance."""
     if command == "kernel-artifact-read" and isinstance(response.get("issues"), list):
@@ -1712,6 +1695,17 @@ def _augment_agent_error(
                 else item
                 for item in issues
             ]
+    if dev_only_enabled() and command == "gateway-execute":
+        _, contract = project_contract(
+            command="gateway-execute", operation="dev", allow_baseline=False
+        )
+        response["request_schema"] = contract["tools"]["gateway-execute"]
+        response["recovery"] = [{
+            "instruction": "This Session exposes only Dev. Use operation=dev and the live "
+            "Dev request schema; submit the final candidate with attempt-report. Runtime "
+            "validates it privately after handoff."
+        }]
+        return response
     schema = tool_request_schema(
         command,
         allow_baseline=isinstance(context, RuntimeLineageBootstrapContext),
@@ -1726,27 +1720,43 @@ def _augment_agent_error(
             command,
             operation=operation,
             detail=detail,
+            request=request,
             directions_enabled="directions" in _tool_modules(),
             experiments_enabled="experiments" in _tool_modules(),
         )
         if recovery is not None:
+            if command in {"update-direction", "record-experiment"}:
+                missing = [
+                    item["path"] for item in response.get("issues", [])
+                    if isinstance(item, dict) and item.get("code") == "missing"
+                    and isinstance(item.get("path"), str)
+                ]
+                if missing:
+                    recovery = [{"instruction": "Supply the missing required fields: "
+                                 + ", ".join(missing) + "."}, *recovery]
             response["recovery"] = recovery
     return response
 
 
 def main(argv: list[str] | None = None) -> int:
+    from runtime_contract import raw_enabled
+    if raw_enabled():
+        print(json.dumps({"error": "runtime_tools_disabled", "detail": "Raw Sessions use Agate directly"}))
+        return 2
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in _ATTEMPT_COMMANDS:
+    available_commands = _available_attempt_commands()
+    for name in available_commands:
         command = commands.add_parser(name)
         command.add_argument("--request", required=True, type=Path)
     contract = commands.add_parser("runtime-contract")
     contract.add_argument("--output", required=True, type=Path)
-    contract.add_argument("--tool", choices=_ATTEMPT_COMMANDS)
+    contract.add_argument("--tool", choices=available_commands)
     contract.add_argument("--operation")
     args = parser.parse_args(argv)
     context: RuntimeToolContext | None = None
     operation: str | None = None
+    request: dict[str, Any] | None = None
     try:
         if args.command == "runtime-contract":
             result = runtime_contract(
@@ -1759,12 +1769,19 @@ def main(argv: list[str] | None = None) -> int:
         context = _context(args.command)
         modules = _tool_modules()
         if (
-            args.command in {"update-direction", "list-directions", "load-direction"}
+            args.command
+            in {"update-direction", "list-directions", "load-direction", "find-kernel-directions"}
             and "directions" not in modules
         ):
             raise ValueError("Direction tools are disabled for this Session")
         if (
-            args.command in {"record-experiment", "list-experiments", "load-experiment"}
+            args.command
+            in {
+                "record-experiment",
+                "list-experiments",
+                "load-experiment",
+                "find-kernel-experiments",
+            }
             and "experiments" not in modules
         ):
             raise ValueError("Experiment tools are disabled for this Session")
@@ -1775,6 +1792,8 @@ def main(argv: list[str] | None = None) -> int:
             result = gateway_execute(context, request)
         elif args.command in _RUNTIME_QUERY_COMMANDS:
             result = runtime_query(context, args.command, request)
+        elif args.command == "wiki-query":
+            result = wiki_query(context, request)
         elif args.command == "update-direction":
             result = update_direction(context, request)
         elif args.command == "list-directions":
@@ -1787,6 +1806,10 @@ def main(argv: list[str] | None = None) -> int:
             result = list_experiments(context, request)
         elif args.command == "load-experiment":
             result = load_experiment(context, request)
+        elif args.command == "find-kernel-experiments":
+            result = find_kernel_experiments(context, request)
+        elif args.command == "find-kernel-directions":
+            result = find_kernel_directions(context, request)
         elif args.command == "attempt-report":
             result = attempt_report(context, request)
     except RuntimeServiceError as error:
@@ -1805,6 +1828,7 @@ def main(argv: list[str] | None = None) -> int:
                 detail=str(response.get("detail", "invalid request")),
                 context=context,
                 operation=operation,
+                request=request,
             )
         print(json.dumps(response, ensure_ascii=False, allow_nan=False, sort_keys=True))
         return 2
@@ -1823,6 +1847,7 @@ def main(argv: list[str] | None = None) -> int:
                 detail=str(error),
                 context=context,
                 operation=operation,
+                request=request,
             )
         print(json.dumps(response, ensure_ascii=False, allow_nan=False, sort_keys=True))
         return 2

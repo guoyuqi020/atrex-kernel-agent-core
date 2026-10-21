@@ -9,10 +9,12 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
+from runtime_request_barrier import REQUEST_SOCKET_ENV, RuntimeRequestBarrier
+from session_clock import SESSION_CLOCK_ENV, active_time, runtime_waiting
 from session_transcript import record_provider_line
 
 DEPENDENCY_GUARD_POLL_SECONDS = 0.25
@@ -30,6 +32,7 @@ class ProcessResult:
     timed_out: bool
     output_overflow: bool
     policy_diagnostics: tuple[str, ...]
+    process_scope_complete: bool = True
 
 
 class ProcessObserver(Protocol):
@@ -314,12 +317,172 @@ def signal_process_groups(process_groups: set[int], sig: signal.Signals) -> None
             os.killpg(process_group, sig)
 
 
+def _process_exited(proc: subprocess.Popen[str]) -> bool:
+    """Observe exit without reaping: the retained PID reserves the owned root group."""
+    if proc.returncode is not None:
+        return True
+    try:
+        waitid = getattr(os, "waitid")
+        status = waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        # Darwin can report CLD_STOPPED even with WEXITED alone. A suspended
+        # Provider is still alive and must not trigger process-scope cleanup.
+        return status is not None and status.si_code in {
+            os.CLD_EXITED, os.CLD_KILLED, os.CLD_DUMPED,
+        }
+    except ChildProcessError:
+        return True
+
+
+@dataclass(frozen=True)
+class _ProcessState:
+    pid: int
+    parent_pid: int
+    group: int
+    session: int
+    started: str
+    zombie: bool
+
+
+def _linux_processes() -> dict[int, _ProcessState] | None:
+    """Read Linux identities; start time prevents signaling a recycled detached PID."""
+    root = Path("/proc")
+    if not (root / "self/stat").is_file():
+        return None
+    # Keep outer identities until membership is established. NSpid depth alone
+    # does not distinguish sibling bwrap namespaces with overlapping local PIDs.
+    result: dict[int, _ProcessState] = {}
+    pid_mapping: dict[int, int] = {}
+    try:
+        paths = tuple(root.iterdir())
+        # Production bwrap may reuse an outer /proc mount. Kernel signals use
+        # our PID namespace, not the numbers in that mount's stat files.
+        own_status = (root / "self/status").read_text()
+        own_pids = next(
+            (line.split()[1:] for line in own_status.splitlines() if line.startswith("NSpid:")),
+            [],
+        )
+        namespace_depth = len(own_pids) - 1 if own_pids else 0
+    except FileNotFoundError:
+        namespace_depth = 0  # Legacy procfs/test fixtures without namespace fields.
+    except OSError:
+        return None
+    for path in paths:
+        if not path.name.isdecimal():
+            continue
+        try:
+            fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
+            outer_pid = int(path.name)
+            pid, group, session = outer_pid, int(fields[2]), int(fields[3])
+            if namespace_depth:
+                namespaces = {
+                    parts[0].rstrip(":"): [int(value) for value in parts[1:]]
+                    for line in (path / "status").read_text().splitlines()
+                    if (parts := line.split()) and parts[0] in {"NSpid:", "NSpgid:", "NSsid:"}
+                }
+                if len(namespaces.get("NSpid", [])) <= namespace_depth:
+                    continue  # Not a process in our namespace; never signal it.
+                pid = namespaces["NSpid"][namespace_depth]
+                group = namespaces["NSpgid"][namespace_depth]
+                session = namespaces["NSsid"][namespace_depth]
+                pid_mapping[outer_pid] = pid
+            result[outer_pid] = _ProcessState(
+                pid, int(fields[1]), group, session, fields[19], fields[0] == "Z"
+            )
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except (OSError, ValueError, IndexError, KeyError):
+            # An unreadable process may belong to this session; fail closed for recovery.
+            return None
+    if namespace_depth:
+        # Walk OUR ancestry to PID 1 in our namespace, then include its tree.
+        # This also retains children in deeper namespaces without admitting peers.
+        ancestor = int(own_pids[0])
+        visited: set[int] = set()
+        while ancestor in result and ancestor not in visited:
+            visited.add(ancestor)
+            if result[ancestor].pid == 1:
+                break
+            ancestor = result[ancestor].parent_pid
+        else:
+            return None  # Cannot prove namespace ownership; never guess local PIDs.
+        members = {ancestor}
+        while True:
+            children = {
+                outer for outer, process in result.items() if process.parent_pid in members
+            }
+            if children <= members:
+                break
+            members.update(children)
+        pid_mapping = {outer: pid_mapping[outer] for outer in members}
+        result = {
+            process.pid: replace(process, parent_pid=pid_mapping.get(process.parent_pid, 0))
+            for outer, process in result.items() if outer in members
+        }
+    return result
+
+
+class _ProcessScope:
+    """Track owned process identities until their local process groups are quiescent."""
+
+    def __init__(self, root_pid: int) -> None:
+        self.root_pid = root_pid
+        self.identities: dict[int, str] = {}
+        self.complete = True
+
+    def live_groups(self) -> set[int]:
+        processes = _linux_processes()
+        if processes is None:
+            self.complete = False
+            return set()
+        owned = {
+            pid
+            for pid, process in processes.items()
+            if process.session == self.root_pid
+            or self.identities.get(pid) == process.started
+        }
+        while True:
+            children = {
+                pid for pid, process in processes.items() if process.parent_pid in owned
+            }
+            if children <= owned:
+                break
+            owned.update(children)
+        for pid in owned:
+            self.identities[pid] = processes[pid].started
+        return {processes[pid].group for pid in owned if not processes[pid].zombie}
+
+    def signal(self, sig: signal.Signals) -> None:
+        # The unreaped root reserves this PID/PGID even without Linux procfs.
+        groups = self.live_groups() | {self.root_pid}
+        if sig == signal.SIGSTOP and Path("/proc/self/stat").is_file() and not self.complete:
+            raise RuntimeError("Cannot verify the Agent process tree for Runtime suspension")
+        for group in groups:
+            try:
+                signal_process_groups({group}, sig)
+            except PermissionError:
+                self.complete = False
+                if sig == signal.SIGSTOP:
+                    raise RuntimeError("Cannot suspend the Agent process tree") from None
+
+    def stop(self) -> bool:
+        """Terminate remaining owned work before a replacement provider may start."""
+        self.signal(signal.SIGTERM)
+        deadline = time.monotonic() + 1.0
+        while self.live_groups() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.signal(signal.SIGKILL)
+        deadline = time.monotonic() + 1.0
+        while self.live_groups() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return self.complete and not self.live_groups()
+
+
 def dependency_guard(
     proc: subprocess.Popen[str], stop: threading.Event, violations: list[str]
 ) -> None:
-    """Kill a coding session as soon as it starts a forbidden dependency job."""
+    """Notify the runner to kill a session that starts a forbidden dependency job."""
     while not stop.wait(DEPENDENCY_GUARD_POLL_SECONDS):
-        if proc.poll() is not None:
+        if _process_exited(proc):
             return
         for pid, argv in descendant_process_commands(proc.pid):
             reason = dependency_process_violation(argv)
@@ -327,13 +490,6 @@ def dependency_guard(
                 continue
             rendered = " ".join(argv)
             violations.append(f"pid={pid}: {reason}: {rendered[:1000]}")
-            process_groups = descendant_process_groups(proc.pid)
-            signal_process_groups(process_groups, signal.SIGTERM)
-            deadline = time.monotonic() + 1.0
-            while proc.poll() is None and time.monotonic() < deadline:
-                if stop.wait(0.05):
-                    return
-            signal_process_groups(process_groups, signal.SIGKILL)
             return
 
 
@@ -344,7 +500,25 @@ def run_bounded(
     env: dict[str, str] | None = None,
     observer: ProcessObserver | None = None,
 ) -> ProcessResult:
-    """Run a guarded command with live output observation and a wall deadline."""
+    """Run a guarded command with live output observation and an active-time budget."""
+    environment = dict(os.environ if env is None else env)
+    barrier = RuntimeRequestBarrier() if environment.get(SESSION_CLOCK_ENV) else None
+    # Never inherit a previous Provider launch's socket into a new launch.
+    environment.pop(REQUEST_SOCKET_ENV, None)
+    if barrier is not None:
+        environment[REQUEST_SOCKET_ENV] = barrier.path
+    try:
+        return _run_bounded(command, cwd, timeout, environment, observer, barrier)
+    finally:
+        if barrier is not None:
+            barrier.close()
+
+
+def _run_bounded(
+    command: list[str], cwd: Path, timeout: int | None, env: dict[str, str],
+    observer: ProcessObserver | None, barrier: RuntimeRequestBarrier | None,
+) -> ProcessResult:
+    deadline = None if timeout is None else active_time(time.monotonic(), environment=env) + timeout
     proc = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -355,6 +529,8 @@ def run_bounded(
         start_new_session=True,
         env=env,
     )
+    scope = _ProcessScope(proc.pid)
+    scope.live_groups()
     guard_stop = threading.Event()
     dependency_violations: list[str] = []
     guard = threading.Thread(
@@ -429,34 +605,35 @@ def run_bounded(
     )
     stdout_reader.start()
     stderr_reader.start()
-    deadline = None if timeout is None else time.monotonic() + timeout
     try:
-        while proc.poll() is None:
+        while not _process_exited(proc):
+            scope.live_groups()
+            waiting = barrier is not None and barrier.poll(
+                scope.signal, runtime_waiting=runtime_waiting(environment=env),
+            )
             if observer is not None and observer.poll():
                 observation_stop.set()
-            if observation_stop.is_set():
-                signal_process_groups(descendant_process_groups(proc.pid), signal.SIGKILL)
+            if observation_stop.is_set() or dependency_violations:
+                scope.signal(signal.SIGKILL)
                 break
-            if deadline is not None and time.monotonic() >= deadline:
+            if (
+                not waiting and deadline is not None
+                and active_time(time.monotonic(), environment=env) >= deadline
+            ):
                 timed_out = True
-                signal_process_groups(descendant_process_groups(proc.pid), signal.SIGKILL)
+                scope.signal(signal.SIGKILL)
                 break
             time.sleep(0.05)
-        proc.wait()
-    except BaseException:
-        process_groups = descendant_process_groups(proc.pid)
-        signal_process_groups(process_groups, signal.SIGTERM)
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            signal_process_groups(process_groups, signal.SIGKILL)
-            proc.wait()
-        raise
     finally:
         guard_stop.set()
-        guard.join(timeout=1)
+        guard.join(timeout=2)
+        # Cleanup precedes wait(): neither this thread nor the guard has reaped the
+        # root, so its PID cannot have become an unrelated process group.
+        process_scope_complete = scope.stop() and not guard.is_alive()
+        proc.wait()
         stdout_reader.join(timeout=5)
         stderr_reader.join(timeout=5)
+    capture_incomplete = stdout_reader.is_alive() or stderr_reader.is_alive()
     if reader_errors:
         raise RuntimeError(
             f"failed to read Agent process output: {type(reader_errors[0]).__name__}"
@@ -469,6 +646,12 @@ def run_bounded(
         policy_diagnostics.append("Agent stderr exceeded the bounded capture limit")
         if returncode == 0:
             returncode = 126
+    if capture_incomplete:
+        policy_diagnostics.append("Agent output readers remained active after process cleanup")
+        if returncode == 0:
+            returncode = 126
+    if not process_scope_complete and returncode != 0:
+        policy_diagnostics.append("Agent process scope could not be verified quiescent")
     if dependency_violations:
         policy_diagnostics.append(
             "dependency policy violation; terminated coding session:\n"
@@ -481,6 +664,7 @@ def run_bounded(
         stderr=stderr or "",
         returncode=returncode,
         timed_out=timed_out,
-        output_overflow=stderr_limit_exceeded.is_set(),
+        output_overflow=stderr_limit_exceeded.is_set() or capture_incomplete,
         policy_diagnostics=tuple(policy_diagnostics),
+        process_scope_complete=process_scope_complete,
     )

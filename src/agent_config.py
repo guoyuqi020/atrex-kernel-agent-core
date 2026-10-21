@@ -21,6 +21,7 @@ class AgentConfig:
     model: str | None = None
     prompt_fragment_paths: Mapping[str, Path] = field(default_factory=dict)
     report_completion_retries: int = 2
+    output_limit_recovery_retries: int = 2
 
     @classmethod
     def load(
@@ -46,6 +47,7 @@ class AgentConfig:
             "prompt_fragments",
             "prompt_root",
             "report_completion_retries",
+            "output_limit_recovery_retries",
         }
         unknown = set(value) - allowed
         if unknown:
@@ -53,6 +55,9 @@ class AgentConfig:
         report_retries = value.get("report_completion_retries", 2)
         if type(report_retries) is not int or not 0 <= report_retries <= 10:
             raise ValueError("report_completion_retries must be an integer from 0 to 10")
+        output_limit_retries = value.get("output_limit_recovery_retries", 2)
+        if type(output_limit_retries) is not int or not 0 <= output_limit_retries <= 10:
+            raise ValueError("output_limit_recovery_retries must be an integer from 0 to 10")
         prompt_root = value.get("prompt_root", "repository")
         if not isinstance(prompt_root, str) or prompt_root not in {"repository", "workspace"}:
             raise ValueError("prompt_root must be repository or workspace")
@@ -119,6 +124,17 @@ class AgentConfig:
                 raise ValueError(
                     "Runtime report_completion_retries must be an integer from 0 to 10"
                 )
+        if "ATREX_OUTPUT_LIMIT_RECOVERY_RETRIES" in binding:
+            raw_retries = binding["ATREX_OUTPUT_LIMIT_RECOVERY_RETRIES"]
+            if not raw_retries.isascii() or not raw_retries.isdigit():
+                raise ValueError(
+                    "Runtime output_limit_recovery_retries must be an integer from 0 to 10"
+                )
+            output_limit_retries = int(raw_retries)
+            if not 0 <= output_limit_retries <= 10:
+                raise ValueError(
+                    "Runtime output_limit_recovery_retries must be an integer from 0 to 10"
+                )
         binding_keys = {
             "ATREX_AGENT_BACKEND",
             "ATREX_AGENT_MODEL",
@@ -156,6 +172,7 @@ class AgentConfig:
             model=model_value,
             prompt_fragment_paths=prompt_fragment_paths,
             report_completion_retries=report_retries,
+            output_limit_recovery_retries=output_limit_retries,
         )
 
     def prompt_path(self, phase: str) -> Path:

@@ -7,17 +7,21 @@ write one JSON request under `scratch/`, then run exactly one of:
 python3 {{RUNTIME_TOOL}} gateway-execute --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} kernel-artifact-read --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} result-artifact-read --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} kernel-pareto-frontier --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} update-direction --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} list-directions --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} load-direction --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} record-experiment --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} list-experiments --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} load-experiment --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} find-kernel-experiments --request scratch/<request>.json
+python3 {{RUNTIME_TOOL}} find-kernel-directions --request scratch/<request>.json
 python3 {{RUNTIME_TOOL}} attempt-report --request scratch/<request>.json
 ```
 
 The live Session contract, rather than this Prompt, is the source of truth for request schemas,
-defaults, supported operations, environment facts, and enforced limits. Inspect only what you need:
+defaults, supported operations, environment facts, and enforced limits. It exposes request schemas,
+not a response-schema discovery API. Inspect only what you need:
 
 ```text
 python3 {{RUNTIME_TOOL}} runtime-contract --output scratch/runtime-contract.json
@@ -28,6 +32,26 @@ python3 {{RUNTIME_TOOL}} runtime-contract --tool record-experiment --output scra
 Do this before constructing an unfamiliar request and again after a schema error. Never copy a
 contract snapshot into versioned Agent content. Repair named `issues` using the returned
 `request_schema` and `recovery`; do not guess fields, defaults, limits, paths, or environment facts.
+
+Choose the operation from the question you need to answer:
+
+| Need | Minimal `gateway-execute` request | Limitation |
+| --- | --- | --- |
+| Correctness and timing for nomination | `{"operation":"evaluate","latency_prediction":"retained"}` | Replace the prediction with your expectation; ordinary full contract Evaluate is required. |
+| Correctness repair without timing | `{"operation":"evaluate","mode":"correctness_only"}` | No performance result; does not qualify for nomination. |
+| Locate GPU bottlenecks | `{"operation":"profile","level":"survey"}` | Use `sol` for throughput/resource evidence, `deep` for a selected kernel. |
+| Run a custom GPU probe | `{"operation":"dev","command":"python3 probe.py","file_paths":["scratch/probe.py"]}` | Create the script first; diagnostic output does not replace contract Evaluate. |
+| Compilation or sanitizer diagnostics | `{"operation":"check"}` | Optional `sanitize`; inspect diagnostic content as well as outer status. |
+| Inspect generated device code | `{"operation":"disassemble"}` | Optional `fmt`; this is not correctness or timing evidence. |
+| Inspect GPU environment | `{"operation":"env"}` | Returns the task GPU's environment and capabilities; does not measure a Kernel. |
+
+`env` accepts only `operation`. Runtime selects the task's Agate GPU and returns
+`{gpu, env, capabilities}` using cached/default queries. Do not supply `gpu`, `capabilities`, or
+`force`; the task hardware is not an Agent choice.
+
+For history, use the dedicated Artifact and Journal commands below, not a new GPU job. Journal
+and Artifact reads do not consume a GPU allocation, but returned text and delegated analysis still
+consume model context and tokens. Query only what can inform the next decision.
 
 `gateway-execute` uploads the current `work/kernel` tree by default. For `evaluate`,
 `candidate_path` may select Candidate B and `comparison.baseline_path` selects baseline A when
@@ -40,8 +64,8 @@ Every `gateway-execute` request names one operation. Query that operation's live
 using optional controls. Prefer omission over inventing a default.
 
 `profile`, `check`, and `disassemble` additionally accept `env_vars`, `requirements`, and
-`deps_mode=freeze_installed|no_deps` to install dependencies for that Job. `kernel_name` and
-`kernel_regex` are mutually exclusive, and `level: "deep"` requires one of them. `dev` takes its
+`deps_mode=freeze_installed|no_deps` to control dependencies for that Job. For `profile`, `kernel_name`
+and `kernel_regex` are mutually exclusive, and `level: "deep"` requires one of them. `dev` takes its
 extra sources through `file_paths`, a list of workspace-relative paths; each named file is uploaded
 under its basename alone and may not shadow a `work/kernel` path, which is why a multi-line probe
 does not need to be smuggled through `command`. Prefer `file_paths` over a heredoc inside `command`.
@@ -79,7 +103,11 @@ Python file is uploaded as `kernel.py`; a directory preserves its relative file 
 absolute/traversal paths, Runtime control paths, and empty source directories are rejected. The tool uploads
 both sources and computes the request identity from their contents, not the local paths.
 Do not embed `baseline` or `candidate` source payloads in the request.
-Both sides use the same evaluation inputs. The live schema defines the permitted paired schedule.
+Both sides use the same evaluation inputs. `comparison.repeats` is the number of observations
+per side: an even integer from 2 to 16, default 2. The value 2 means one A, B, B, A block;
+4 means two blocks. Booleans, floats, strings, odd values, and values outside this range are
+rejected. ABBA requires a schedule supported by native Agate Eval; unsupported schedules
+never fall back to Dev.
 Each Shape batch runs both sides within one allocation; different Shape batches may use different
 allocations. ABBA requires full correctness and timing; omit `mode` or set it to `"full"`.
 It is always exploratory, does not retain or promote a Kernel or Agent, and does not satisfy the
@@ -94,11 +122,15 @@ same Kernel have different Result identities; replay of the same invocation keep
 A Gateway call blocks until its Job reaches a terminal state, which for `evaluate`, `profile`,
 `check`, and `disassemble` may take a long time. Let the command finish and keep stderr out of the
 JSON on stdout, because appending `2>&1` corrupts the result you then have to parse. Runtime owns Job
-tracking and recovery; do not background the command, start unrelated work while it runs, or build
-polling or retry loops. The same exact Kernel
-task cannot be submitted again in this Lineage. A duplicate error reports
-`previous_result_artifact_digest`; load that Result Artifact instead of changing or resubmitting
-unchanged source. Network retries inside one CLI invocation remain idempotent.
+tracking and recovery; do not wrap the command in `timeout`, background it, start unrelated work,
+or build polling or retry loops. Runtime-bound Sessions pause the Agent and its subagents until
+the request finishes, even if its CLI exits early. Killing the CLI does not cancel the request.
+If the backend moves a tool call to the background, use its wait/output
+facility until that same invocation finishes; do not start other work. Full Evaluate tasks are
+deduplicated by source and operation parameters within the Lineage. When a duplicate error includes
+`previous_result_artifact_digest`, load that Result Artifact. If it is absent, do not invent a digest
+or change source to evade deduplication; follow the returned recovery or report the blocker.
+Network retries inside one CLI invocation remain idempotent.
 
 An expected tool failure prints one JSON Object and exits nonzero. For request mistakes, repair the
 compact `issues` first, then use the operation-specific `request_schema`; an unknown operation
@@ -132,8 +164,9 @@ treat a thin margin as a defect to fix rather than a pass, because the sealing g
 candidate the Agent measured as correct and that rejection lands after the Session has exited.
 
 Kernel-bound operations retain the `kernel_artifact_digest` and `result_artifact_digest` needed for
-provenance. Read the live response contract before parsing optional Profile, Check, Disassembly,
-Dev, or environment fields.
+provenance. Inspect the actual response's outer `status` and nested `result` before using optional
+Profile, Check, Disassembly, Dev, or environment fields. A completed job does not by itself prove
+that compilation, a diagnostic, or correctness succeeded; inspect its errors and diagnostic output.
 
 Example exploratory evaluation request:
 
@@ -222,7 +255,13 @@ not contain `operation`. Examples are
 `{"kernel_artifact_digest":"sha256:<digest>","artifact_file":"kernel.py",`
 `"file":"scratch/recovered/kernel.py"}` for
 `kernel-artifact-read`, `{"result_artifact_digest":"sha256:<digest>"}` for
-`result-artifact-read`. These reads are unmetered and never contact Agate.
+`result-artifact-read`. These reads never contact Agate.
+Call `kernel-pareto-frontier` with `{}` to read the observed per-Shape latency envelope from
+correct full contract Evaluations in visible history. It returns each visible Shape ID's best
+Kernel Artifact digest and latency. Custom, correctness-only, and ABBA results are excluded;
+`best_by_shape[shape_id]` contains `kernel_artifact_digest` and `latency_us`, while
+`winner_kernel_artifact_digests` deduplicates those winners. An empty map means no qualifying
+per-Shape measurement is recorded yet.
 Use `result-artifact-read` for the exact Evaluate, Profile, or other observation you need.
 It returns `kernel_artifact_digest`, `result_artifact_digest`, `operation`, `status`, and `result`;
 the measurement lives under
@@ -241,26 +280,41 @@ it to the logical Attempt before the command returns; the Journal therefore surv
 Session and a new recovery generation. Invoke `list-experiments` with
 `{"file":"scratch/experiments-index.json"}`; it asks Runtime for the authorized live-plus-history
 view, then atomically writes compact
-Experiment ID, name, hypothesis, change, evidence, analysis, and action entries to that
+Experiment ID, name, Direction ID, change, action, and compact Runtime measurement_summary entries to that
 file and returns only status, file, and count. Read the file, then invoke `load-experiment` with
 `{"experiment_id":"experiment_<id>"}` only for selected entries to retrieve their complete
-Agent-visible records; Runtime-internal ordering metadata is omitted. Both commands are Runtime-local, unmetered, and bounded by Runtime-authorized Lineage
+Agent-visible records, including exact before/after Kernel and Result Artifact bindings. The index
+contains measured comparisons, not full Agent interpretations; load selected records when those details are needed. Runtime-internal
+ordering metadata is omitted. Both commands are Runtime-local and bounded by Runtime-authorized Lineage
 history. Bootstrap starts with no earlier journal history; its current live Journal remains visible.
+To reverse-lookup one exact Kernel Artifact, invoke `find-kernel-experiments` or
+`find-kernel-directions` with `{"kernel_artifact_digest":"sha256:<digest>"}`. The former returns
+visible Experiment IDs citing the Artifact as `before` or `after`; the latter returns distinct
+Direction IDs linked through those Experiments. Each tool belongs to its namesake module.
+An empty result means no visible recorded association; it does not prove the Kernel was never
+evaluated. Use `load-experiment` or `load-direction` for selected full records.
 
 `update-direction` likewise persists each proposal or lifecycle event in Runtime before returning.
-Direction Journal reads are Runtime-local and unmetered. Invoke `list-directions` with
+Direction Journal reads are Runtime-local. Invoke `list-directions` with
 `{"file":"scratch/directions-index.json"}`; it atomically writes Direction ID, name, and current
 status and hypothesis_status to that file and returns only status, file, and count. Read the file, then invoke
 `load-direction` with `{"direction_id":"direction_<id>"}` only for selected entries to retrieve
-their complete normalized Directions.
+their complete normalized Directions, including hypothesis, rationale, plan, criteria, and latest
+analysis. Both queries label open status `in_progress(self)` when this Attempt started the
+Direction and `in_progress(other)` when another Attempt owns it, regardless of who proposed it.
+Shared visibility does not transfer ownership; do not close another Attempt's open Direction.
+Other lifecycle statuses are unchanged. The index alone is not enough to assess why a hypothesis
+was supported or refuted.
 Its `associated_experiment_ids` includes all visible Experiments belonging to that Direction.
 Its `supporting_experiment_ids` contains only evidence explicitly selected at the latest closure,
 not every associated Experiment. `hypothesis_status` is the Agent's judgment, separate from
 lifecycle status; missing historical judgments mean `unresolved`, never implicitly refuted.
 
 A Direction is the durable unit of research and exploration for one causal hypothesis, not an
-Experiment container. Before choosing one, inspect only the contract, incumbent, Journal indexes,
-and generic Runtime state. Once chosen, immediately `propose` and `start` it before its research,
+Experiment container. Before choosing one, inspect the contract, incumbent, relevant Journal
+indexes and loaded records, and their existing Artifact evidence. Read selected reports or
+conversation excerpts only to fill a specific gap. These read-only history queries do not require
+starting a new Direction. Once chosen, immediately `propose` and `start` it before its research,
 Dev/Check/Profile/Evaluate, disassembly, tools, or source edits. `TaskCreate`, scratch
 plans, and prose do not register it; do not wait for measurement or `record-experiment`.
 
@@ -284,9 +338,12 @@ Direction with the appropriate ancestry and fresh rationale; do not treat an old
 as an obligation to explore it. The normal workflow is to choose, propose, and test your own
 hypothesis from the public contract, profiling, and durable Journal evidence.
 
-Start with exactly `action="start"`, `direction_id`, and non-empty `analysis`.
+Start with `action="start"` and `direction_id`; analysis is optional. A Direction ID alone does not select an action.
+If a request is rejected, `issues` names each missing or invalid field (for example
+`request.action`); repair the fields for your intended action and retry. Do not close a
+Direction merely to repair a malformed start request.
 Close with `complete`, `abandon`, `block`, or `defer`, additionally supplying
-`hypothesis_status` and a non-empty, unique `supporting_experiment_ids` array (maximum 32):
+`hypothesis_status` and a unique `supporting_experiment_ids` array (0–32 IDs):
 
 ```json
 {
@@ -294,30 +351,32 @@ Close with `complete`, `abandon`, `block`, or `defer`, additionally supplying
   "direction_id": "direction_<id>",
   "analysis": "The investigation stopped before this hypothesis was measured; it remains open.",
   "hypothesis_status": "unresolved",
-  "supporting_experiment_ids": ["experiment_<id>"]
+  "supporting_experiment_ids": []
 }
 ```
 
-Use `unresolved` for untested interpretations, blockers, or insufficient evidence.
-Use `supported` or `refuted` only when the selected Experiments actually tested this Direction's
-hypothesis, with a completed Gateway Result bound to each Experiment's `after`. Matching historical
-results may be reused. Runtime validates ownership and Result bindings, not causal relevance or
-scientific truth. An unrelated measured optimization cannot support a claim buried in its analysis.
-For example, a register tweak does not refute tile splitting; a claim about splitting needs an
-experiment that actually tests splitting. Keep untested mechanisms unresolved instead of inheriting them as facts.
-Abandoning a search is not falsifying its hypothesis. Events append to history; restarting resets
-the current judgment to unresolved without erasing prior events.
+Use `unresolved` for untested interpretations, blockers, or insufficient evidence. All closing
+actions permit empty support in that state, including before any experiment or Gateway call.
+Abandoning a search does not falsify its hypothesis. For `supported` or `refuted`, specify `scope`
+and completed evidence relevant to the proposal's hypothesis: direct `supporting_results` with
+exact Kernel/Result bindings, or relevant `supporting_experiment_ids`. Optional `claim_kind`
+defaults to `causal_hypothesis`; a completed Dev/Profile/full Evaluate can support causal hypotheses; Check and correctness-only cannot. These checks validate provenance, not causation. With the Experiment
+module disabled, omit Experiment IDs and use direct Results. Insufficient scope or suitable evidence
+keeps the judgment unresolved and returns `assessment_notes`; invalid evidence references are errors.
+Runtime validates provenance and operation eligibility, not scientific truth. An unrelated measured
+optimization cannot support a claim buried in its analysis. Events append to history; restarting
+resets the current judgment to unresolved without erasing prior events.
+An unclaimed proposed or inherited Direction may be started with its existing ID. If another
+Trajectory already advanced that ID in this Epoch, Runtime rejects the competing update; propose a derived
+Direction with `relationship="reimplementation"` and that ID as its parent.
 An Attempt may advance at most three inherited or new
-Directions; proposals are unlimited and do not consume this limit. Only one Direction may be
-`in_progress` at a time: do not interleave their research, tools, edits, or measurements. Before
+Directions; proposals are unlimited and do not consume this limit. Only one Direction per
+Attempt may be `in_progress` at a time (other Broadcast Trajectories may have their own): do not interleave their research, tools, edits, or measurements. Before
 starting another, close the current one with `complete`, `abandon`, `defer`, or `block`. None may
-remain `in_progress` at handoff. All four closing actions require at least one Experiment associated
-with that Direction; `propose` and `start` do not. If no measurement was possible, first record the
-actual investigation or blocker using `abandon_direction`, citing at least one real Kernel-bound
-Gateway Result in `before` or `after`, then close with `hypothesis_status="unresolved"` and that
-Experiment's ID. Both sides may not be null. Diagnostic calls can establish a blocker without
-establishing a performance claim. If no Result exists, the closure cannot proceed; report the
-infrastructure failure through normal session failure/recovery, never fabricate evidence.
+remain `in_progress(self)` at handoff; peers' `in_progress(other)` Directions do not block your
+report. If no evidence exists, close with `hypothesis_status="unresolved"`, empty support, and an
+honest stopping reason. Do not fabricate a diagnostic Experiment or launch a GPU job to satisfy
+bookkeeping. A real diagnostic result can document a blocker without proving a performance claim.
 
 If evidence was omitted before closure, `record-experiment` can append it to a visible
 `completed`, `abandoned`, `blocked`, or `deferred` Direction without reopening it. The receipt
@@ -327,21 +386,32 @@ previous closure. A merely `proposed` Direction must still be started first.
 Late recording uses the same Trial visibility, ownership, and evidence checks as ordinary recording.
 Use it to complete the Journal before terminal handoff, not to resume research without `start`.
 
-Each `record-experiment` request must contain exactly these fields:
+Each `record-experiment` request supplies the fields below. `knowledge_used`, `analysis`, and legacy
+`evidence` prose are optional. With Directions enabled, omit `hypothesis` when inherited from the
+Direction; with Directions disabled, omit `direction_id` and supply a local `hypothesis`:
 
 ```json
 {
   "direction_id": "direction_<id>",
   "name": "short experiment name",
-  "hypothesis": "falsifiable expected mechanism",
   "change": "exact candidate change, including a reverted change",
   "before": {"result_artifact_digest": "sha256:<before-trial>"},
   "after": {"result_artifact_digest": "sha256:<after-trial>"},
-  "evidence": "concise before/after measurements and observations",
-  "analysis": "what the evidence means, including whether the hypothesis held",
-  "action": "keep_after"
+  "action": "keep_after",
+  "knowledge_used": [{
+    "record_id": "<actual known Record ID>",
+    "finding": "the cited constraint and why it applies to this experiment",
+    "application": "the concrete implementation or experiment choice it informed"
+  }]
 }
 ```
+
+`knowledge_used` defaults to `[]`; omit it or use `[]` when no knowledge informed this Experiment.
+Each entry has exactly `record_id`, `finding`, and `application`, all nonblank strings. Copy an
+actual known Record ID; never invent one or submit the placeholder above. Historical citations
+remain usable when Wiki queries are disabled; no new query is required to cite existing knowledge.
+These entries declare influences, not proof of current correctness, speedup, or a causal explanation;
+support those claims with the relevant measured Results.
 
 `before` and `after` identify both measured sides using only their Result Artifact digests. Runtime resolves
 and freezes the selected Result Artifact and its exact Kernel Artifact when it records the
@@ -355,124 +425,70 @@ and evaluation contract, and a successful ordinary full Evaluate for that exact 
 The adopted Trial keeps its original ownership; adoption creates a decision, not a new measurement
 or a replacement Trial. It can qualify the exact restored Kernel for `candidate_ready` without
 rerunning Evaluate. A custom-input, correctness-only, or Agent ABBA result does not qualify.
-Every Experiment must bind at least one Kernel-bound Gateway Result. For `abandon_direction`,
+Every Experiment must bind at least one Kernel-bound Gateway Result. For `discard`,
 `before` or `after` may be null, but not both. A Check/Profile or failed diagnostic Result can
 record an investigation without claiming a performance improvement. Health/Env calls and raw Dev
 results without a Kernel binding do not qualify. The phase Prompt may permit Bootstrap-only
 `baseline`, which requires `before=null` and a measured `after` Result.
-`record-experiment` persists the complete entry and prints only a compact receipt such as
-`{"status":"recorded","experiment_id":"experiment_<id>"}`; use that ID when referring to the
-experiment later. It does not echo the Agent-authored text, assigned sequence, or timestamp.
-Keep `evidence` factual: report observations and measurements. Use `analysis` for interpretation,
-the hypothesis verdict, causal explanation, limitations, and remaining uncertainty. Do not use a
-top-level `result` field; that term is reserved for Gateway responses. `action` records what you
-actually did after analysis and normally must be `keep_after`, `restore_before`, `adopt`, or
-`abandon_direction`; use `baseline` only when the phase Prompt explicitly permits it.
-After each receipt, update the working terminal Report draft
-`scratch/attempt-report-draft.json`. Accumulate the Experiment ID in the relevant Finding and
-refine the diagnosis, evidence summaries, Profile bindings, knowledge use, and Attempt-level
-analysis while the evidence is fresh. The draft may be overwritten throughout the session. Do not
-call `attempt-report` during this process. When the engineering loop and all started Directions are
-closed, validate the completed draft and use it as the request. The first successful call publishes
-the write-once terminal handoff to the separate `scratch/attempt-report.json` and prints only a
-compact receipt such as
-`{"status":"published","report_status":"candidate_ready","file":"scratch/attempt-report.json",`
-`"experiment_count":3,"finding_count":2}`; the report text itself is never echoed back. An
-error response publishes nothing: correct the same draft using
-`issues`, `request_schema`, and `recovery`, then call `attempt-report` again. Never call it again
-after a successful response.
+`record-experiment` persists the entry and returns `status`, `experiment_id`, and an automatically generated
+`measurement_summary`. Do not submit measurement_summary yourself. It preserves exact Result
+references, operation status, correctness, available error details and returned Shape coverage.
+Comparable completed full Evaluates yield geometric-mean latency, speedup, latency reduction and
+per-Shape improved/retained/degraded counts using the inclusive +/-1% boundary. ABBA is explicitly
+labelled and uses A/B from that Result, not an unrelated Experiment before. Correctness-only,
+failed, incomplete, or incompatible measurements do not receive a performance verdict. Shape counts
+are returned timing coverage, not invented correctness pass counts. Predictions remain audit-only.
+The summary is deterministic measured evidence, not a causal explanation or proof against noise.
+`analysis` is optional: add only a new local interpretation or uncertainty; omit it when no cause is
+known. Do not duplicate metrics in `evidence`, repeat the Direction hypothesis, or invent a lesson.
+`action` is a local candidate decision: `keep_after`, `restore_before`, `adopt`, or `discard`;
+`baseline` is Bootstrap-only. `discard` permits one null side and never changes Direction lifecycle.
+The old `abandon_direction` spelling remains readable for compatibility; close the Direction
+separately with update-direction. Direction closure analysis is optional and describes only new
+route-level conclusions, untested alternatives, or next steps; start needs no analysis.
+Keep each interpretation with the record that owns it. An Experiment owns the local analysis
+of its measured implementation; a Direction owns only a new synthesis across experiments,
+untested alternatives, or next steps. Reference supporting Experiment IDs instead of rewriting
+their analyses. A Direction may close without analysis when there is no new conclusion.
+A failed implementation does not refute all implementations of a mechanism. Scope any judgment
+to the tested Kernel, hardware and workloads; distinguish stopping work from refuting a hypothesis.
+Use unresolved when the proposed causal hypothesis was not isolated by the evidence.
 
-A final chat message does not replace a successful `attempt-report` call. If you are brought
-back solely to complete the handoff, use the existing Journal, draft, and measured evidence;
-do not restart optimization or invent missing results.
-
-Each `attempt-report` request must contain
-exactly these fields:
+The terminal `attempt-report` is a handoff, not another analysis. It accepts exactly:
 
 ```json
 {
   "status": "candidate_ready",
-  "hypothesis": "tested hypothesis",
-  "diagnosis": {
-    "bottleneck": "localized correctness or performance issue",
-    "evidence": "measured evidence supporting the diagnosis"
-  },
-  "approach": {
-    "summary": "engineering mechanism tested",
-    "steps": ["ordered step"],
-    "expected_impact": "falsifiable expected effect",
-    "risks": ["known risk or rollback concern"]
-  },
-  "final_candidate": {"change_summary": "exact nominated working-tree state, including unchanged"},
-  "evidence_summary": {
-    "correctness": "Agent-visible correctness evidence",
-    "performance": "Agent-visible performance evidence"
-  },
-  "profile_evidence": {
-    "tool_used": "gateway-execute/profile",
-    "profiler": "ncu",
-    "profile_level": "sol",
-    "bottleneck_type": "memory_bound",
-    "evidence_summary": "key profiler metrics and host-side observations",
-    "evidence_chain": "causal chain from measurements to bottleneck and decision",
-    "supporting_results": [{
-      "operation": "profile",
-      "kernel_artifact_digest": "sha256:...",
-      "result_artifact_digest": "sha256:..."
-    }]
-  },
-  "analysis": "Attempt-level synthesis and hypothesis verdict",
-  "knowledge_used": [{
-    "record_id": "stable GPU Wiki Record ID",
-    "finding": "relevant knowledge",
-    "application": "how it changed the work"
-  }],
-  "findings": [{
-    "category": "correctness or performance",
-    "observation": "measured fact",
-    "root_cause": "supported cause",
-    "resolution": "fix, rollback, workaround, no fix, or deferred action",
-    "lesson": "reusable lesson",
-    "supporting_experiment_ids": ["experiment_<id>"]
-  }],
-  "contributing_result_artifact_digests": ["sha256:<id>"],
+  "final_candidate": {"change_summary": "exact nominated source change, or unchanged incumbent"},
+  "contributing_result_artifact_digests": [],
   "blocker": null
 }
 ```
 
-Use `candidate_ready` when nominating the current Kernel for the controller-owned disposition,
-`pivot` when the phase Prompt permits ending without a nomination, and `blocked` for an external or
-infrastructure blocker. `candidate_ready` does not mean the Kernel is retained or registered; only
-Runtime policy can make that decision. `candidate_ready` requires `final_candidate` and a null `blocker`; `pivot`
-requires both to be null; `blocked` requires a non-empty `blocker` and null `final_candidate`.
-Only `candidate_ready` requires non-empty Experiments, Direction events, and `findings`.
-`blocked` or `pivot` may carry zero Experiments and `findings: []` when no Direction needs closing;
-the Runtime-supplied Direction event list may also be empty when no Direction was started.
-Closing any `in_progress` Direction with `block` or `defer` first requires an associated Experiment,
-even when it records only an actual investigation or blocker with no measurement. Explain the actual
-blocker or stopping decision in the structured report; never fabricate an Experiment, Finding,
-Trial, or measurement merely to satisfy a non-empty list.
-Keep `knowledge_used` and `findings` structured as shown. Directions left `proposed` or `deferred`
-are the next available directions and require no duplicate ID list in the report. Every finding
-must state its `resolution`: the applied fix, rollback,
-workaround, explicit absence of a fix, or deferred action. Every finding must also name one or more
-unique `supporting_experiment_ids`
-returned by `record-experiment`; each ID must belong to this Attempt's Experiment Journal.
-`profile_evidence` must describe evidence returned by Runtime-bound profiling and
-bind every supporting Profile result to the exact Kernel Artifact and Result
-Artifact identifiers returned by Runtime. Any Runtime-recorded Profile result in your visible
-history is citable, including an earlier Profile or one obtained after recording an Experiment.
-No Experiment reference is required: do not create a diagnostic Experiment or reopen a Direction
-solely to make a Profile citable. Runtime verifies the exact identities and the `profile` operation
-against its own observations, not your prose. Include at least one `profile` result, set
-`profile_evidence` to `null` when you have no recorded Profile evidence, and never invent it.
-Use `contributing_result_artifact_digests` to name the historical results whose code or approach this
-Attempt actually drew on, using Result Artifact digests returned by Runtime. Supply at most 64 entries
-in any order; the tool and Runtime automatically sort and deduplicate them. ID format validation
-still applies to every entry. Use `[]` when you drew on none.
-It records where your work came from for whoever reads this Attempt later; it
-is a claim rather than a measured fact, and it neither replaces nor duplicates the Experiment
-`before` and `after` bindings. Do not include the
-Journal in the terminal request; the CLI obtains the authoritative current-Attempt snapshot from
-Runtime and attaches it. Do not run GPU, compiler, JIT,
-profiler, or evaluator work outside these bindings.
+Do not submit hypothesis, diagnosis, approach, evidence_summary, profile_evidence, analysis,
+knowledge_used, findings, or copies of Journal records. Keep analysis in the enabled Journal
+that owns it. Runtime generates correctness/performance summaries from actual measurements.
+When both modules are disabled, no experience analysis is required; your own scratch notes remain
+allowed. The final_candidate.change_summary describes source state, not a repeated causal lesson.
+
+Use candidate_ready to nominate current work/kernel for Runtime validation and retention;
+final_candidate is required and blocker must be null. Use pivot to end without a nomination
+(final_candidate=null, blocker=null), or blocked for a genuine external blocker
+(final_candidate=null, nonempty blocker). Bootstrap permits only candidate_ready or blocked.
+Enabled nomination Journal requirements still apply. An unmeasured Direction can close unresolved
+without invented results. Close only your in_progress(self) Directions and wait for every in-flight
+Gateway call before handoff; peer-owned Directions do not block your report.
+
+contributing_result_artifact_digests identifies historical Results whose code or approach you used;
+it is attribution, not nomination evidence or a performance verdict. Supply at most 64 actual
+Result digests, or [] when none. Runtime and the CLI sort and deduplicate them. The CLI obtains
+and attaches authoritative Journal snapshots for validation and recovery; do not copy them into
+the request. The later Runtime-generated Report exposes Journal IDs rather than repeating their
+analyses. Use the matching load tool for a selected visible record.
+
+Keep scratch/attempt-report-draft.json as a small handoff draft, then submit with attempt-report
+once the work and bookkeeping are complete. The first successful call publishes a write-once
+terminal handoff to scratch/attempt-report.json and returns a compact status/file receipt.
+Validation errors publish nothing: repair issues using request_schema and recovery, then retry.
+Never submit again after success. A local file or final chat message is not Runtime acceptance.
+Report-only recovery reuses existing evidence and does not start new optimization or measurements.

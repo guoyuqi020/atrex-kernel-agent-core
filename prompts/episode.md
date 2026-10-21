@@ -36,9 +36,9 @@ workspace, Evidence view, task identity, and tool protocols.
 
 ### 1. Recover only relevant state
 
-Inspect the incumbent and confirm the writable candidate initially matches it. Read the injected
-Evidence in order, then use the Journal indexes to locate only the Directions and Experiments
-relevant to the present bottleneck. Do not replay the entire lineage by default.
+Inspect the incumbent and confirm the writable candidate initially matches it. Follow the injected
+history retrieval guidance: query relevant Journal records and Artifacts first; inspect selected
+reports or conversation excerpts only to fill concrete gaps. Do not replay the entire lineage by default.
 
 Honor the injected measurement-reuse policy. Reuse matching trusted measurements and exact source;
 do not repeat work merely because an earlier Agent's interpretation may be wrong. To nominate exact
@@ -54,14 +54,19 @@ chain:
 evidence -> mechanism -> change -> expected measurable effect
 ```
 
-Before editing, write a concise plan under `scratch/` containing:
+Before editing, write a brief plan under `scratch/` containing:
 
-- one optimization category and concrete goal;
-- trusted facts, uncertain interpretations, and unsupported assumptions;
-- the smallest dependency-ordered edits that test the mechanism;
-- invariants, scope boundaries, risks, and rollback points;
-- correctness and performance acceptance/rejection criteria; and
-- measurable success and direction-exhaustion conditions.
+- the chosen change and expected effect, separating facts from assumptions;
+- the main correctness risks and the last viable candidate to restore;
+- the next concrete edit or focused probe; and
+- the next validation command and evidence that would support or reject the change.
+
+Once a step is actionable, write the change or run the focused probe instead of expanding the
+entire design. For a complex rewrite, first save the smallest end-to-end implementation that can
+be checked against the public contract, then add optimizations incrementally. Do not wait to
+resolve every layout, pipeline, and boundary question before the first implementation or probe.
+Keep the saved plan current with the next step. After an interruption, inspect the saved source
+and plan and continue from them; do not restart the entire design without new evidence.
 
 Treat numeric targets as trends unless the trusted task input makes them hard thresholds. Reject
 placeholders, hidden-case reconstruction, unrelated refactors, and plans that mix independent
@@ -81,9 +86,9 @@ target.
 ### 4. Research progressively
 
 Use the visible Direction and Experiment history for what this lineage already measured, and the
-knowledge query command for external architecture-, DSL-, compiler-, and operator-specific facts.
-This workspace carries no upstream project checkout. Preserve stable knowledge
-Record IDs only for records that materially affect the work. Test every adopted recommendation;
+available Skills and documented references for external architecture-, DSL-, compiler-, and
+operator-specific facts. Use a knowledge service only if a binding is provided; do not invent a
+query command. Preserve stable knowledge Record IDs only for records that materially affect the work. Test every adopted recommendation;
 stop research when one actionable direction has adequate support.
 
 ### 5. Implement and repair causally
@@ -112,21 +117,18 @@ Secondary hypotheses belong to another Direction or Attempt.
 ### 7. Record as work proceeds
 
 After every decisive measured keep, restoration, or direction-ending result, record the Experiment
-before another edit. Keep observations in `evidence` and interpretation in `analysis`, preserve the
+before another edit. Runtime supplies measurement_summary; analysis is optional and only adds new interpretations. Preserve the
 exact source/Trial/Result identities supplied by the tools, and record the action actually taken.
 Negative results are first-class evidence.
 
-Follow the Session-tool contracts for Direction state, Experiment linkage, incremental Report
-construction, retry behavior, and terminal validation; do not reconstruct the Journal from memory
-at the end. `blocked` or `pivot` may have zero Experiments and empty Findings if no Direction needs
-closing. Before `block` or `defer`, record an associated Experiment; if no measurement was possible,
-record the actual investigation or blocker with `abandon_direction`, citing a real Kernel-bound
-Gateway Result in at least one of `before` and `after`. Both cannot be null; no Result means the
-closure remains blocked, not permission to manufacture evidence.
-Do not fabricate evidence to finish.
-At closure, explicitly select relevant `supporting_experiment_ids` and declare
-`hypothesis_status` as `unresolved`, `supported`, or `refuted`. Lifecycle is not a verdict:
-untested reasoning stays unresolved. Preserve this distinction in Findings, memory, and Skills;
+Follow the Session-tool contracts for Direction state, Experiment linkage, compact Report
+handoff, retry behavior, and terminal validation; do not reconstruct the Journal from memory
+at the end. `blocked` or `pivot` may have zero Experiments . Before handoff, close
+started Directions with an honest stopping reason and `hypothesis_status`; unmeasured or inconclusive
+work can close `unresolved` with empty support, even without a Gateway call. Select relevant
+Experiment IDs or direct `supporting_results` only when evidence exists. No diagnostic call or
+fabricated record is required to finish. Lifecycle is not a verdict:
+untested reasoning stays unresolved. Preserve this distinction in Journal records, memory, and Skills;
 never promote incidental interpretations in unrelated Experiments into established constraints.
 
 ### 8. Preserve reusable execution helpers

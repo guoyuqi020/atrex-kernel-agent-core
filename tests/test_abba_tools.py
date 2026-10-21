@@ -120,6 +120,16 @@ def test_evaluate_comparison_uploads_a_and_b_and_preserves_result(
     assert "evaluation" not in response and "schema_version" not in response
 
 
+@pytest.mark.parametrize("repeats", [2, 4, 6, 8, 10, 12, 14, 16])
+def test_comparison_accepts_all_native_even_repeat_counts(
+    context: Any, captured_requests: list[dict[str, Any]], repeats: int
+) -> None:
+    runtime_tools.gateway_execute(context, _request(comparison=_comparison(repeats=repeats)))
+    assert len(captured_requests) == 1
+    assert captured_requests[0]["operation"] == "evaluate"
+    assert captured_requests[0]["comparison"] == {"method": "abba", "repeats": repeats}
+
+
 def test_default_evaluate_uses_a_fresh_invocation_identity(
     context: Any, captured_requests: list[dict[str, Any]]
 ) -> None:
@@ -249,7 +259,7 @@ def test_comparison_uses_fresh_invocation_identities_and_content_payloads(
     (context.workspace / "scratch/renamed.py").write_text("def changed_baseline(): pass\n")
     runtime_tools.gateway_execute(context, request)
     runtime_tools.gateway_execute(
-        context, {**request, "comparison": {**request["comparison"], "repeats": 3}}
+        context, {**request, "comparison": {**request["comparison"], "repeats": 4}}
     )
     (context.working_kernel / "kernel.py").write_text("def next_candidate(): pass\n")
     runtime_tools.gateway_execute(context, request)
@@ -272,9 +282,10 @@ def test_comparison_uses_fresh_invocation_identities_and_content_payloads(
             {"comparison": _comparison(baseline_path="scratch/missing.py")},
             "comparison.baseline_path",
         ),
-        ({"comparison": _comparison(repeats=1)}, "comparison.repeats"),
-        ({"comparison": _comparison(repeats=21)}, "comparison.repeats"),
-        ({"comparison": _comparison(repeats=True)}, "comparison.repeats"),
+        *[
+            ({"comparison": _comparison(repeats=value)}, "comparison.repeats")
+            for value in (0, 1, 3, 17, 18, 20, 21, True, False, 2.0, "2", None)
+        ],
         ({"comparison": _comparison(extra="not allowed")}, "comparison"),
         ({"mode": "correctness_only"}, "mode"),
         ({"candidate_path": "../outside"}, "candidate_path"),
@@ -311,6 +322,12 @@ def test_local_errors_identify_nested_fields_and_preserve_evaluate_schema(
         "gateway-execute", operation="evaluate"
     )
     assert field in json.dumps(response["recovery"])
+    if field == "comparison.repeats":
+        assert "even integer from 2 to 16" in response["detail"]
+        assert "2, 4, 6, 8, 10, 12, 14, 16" in response["detail"]
+        assert f"got {fields['comparison']['repeats']!r}" in response["detail"]
+        assert "no Dev fallback" in response["detail"]
+        assert "without Dev fallback" in json.dumps(response["recovery"])
     assert "Traceback" not in captured.out and "local-test-capability" not in captured.out
 
 
@@ -387,7 +404,8 @@ def test_evaluate_schema_and_prompt_examples_describe_nested_comparisons() -> No
     assert comparison["additionalProperties"] is False
     assert comparison["properties"]["method"] == {"const": "abba"}
     assert comparison["properties"]["repeats"]["minimum"] == 2
-    assert comparison["properties"]["repeats"]["maximum"] == 20
+    assert comparison["properties"]["repeats"]["maximum"] == 16
+    assert comparison["properties"]["repeats"]["multipleOf"] == 2
     assert comparison["properties"]["repeats"]["default"] == 2
     assert schema["allOf"][-1]["then"] == {"properties": {"mode": {"const": "full"}}}
     for field in ["comparison.baseline_path", "comparison.method", "comparison.repeats"]:
