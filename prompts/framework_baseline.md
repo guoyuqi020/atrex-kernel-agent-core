@@ -13,6 +13,7 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 | Purpose | Path or operation |
 | --- | --- |
 | immutable reference or seed Kernel | `input/kernel/` |
+| task-declared public operator sources | `input/problem/` when present |
 | writable baseline candidate copied from the seed | `work/kernel/` |
 | immutable Agent implementation and included Skills | `agent/optimizer/` |
 | read-only inherited phase prompts and instructions | `prompts/` |
@@ -22,6 +23,11 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 
 Private evaluator inputs and exact cases are absent. The trusted task context below is authoritative
 for the operator, hardware, and DSL.
+
+When `input/problem/` exists, read its `README.md` and the public `reference.py`, `input.py`, and
+sanitized `metadata.json` files present there before constructing probes. Runtime has already
+removed exact evaluator Shapes, case IDs, per-case weights, and private results. Do not use Dev or
+scan evaluator temporary directories to recover another copy of these task files.
 
 ## Execution boundary
 
@@ -53,7 +59,8 @@ for the operator, hardware, and DSL.
 
 ### 1. Reconstruct the operator contract
 
-Read the seed Kernel and use the public operator contract injected into this Prompt. Record:
+Read the seed Kernel, the injected public operator contract, and `input/problem/` when present.
+Record:
 
 - operator semantics and calling ABI;
 - public input/output shape regimes and domains;

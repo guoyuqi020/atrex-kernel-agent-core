@@ -350,6 +350,16 @@ def test_prompts_use_only_real_runtime_tool_names() -> None:
     assert "wiki_read" not in text
 
 
+def test_optimizer_prompts_use_local_public_problem_sources() -> None:
+    episode = (CORE_ROOT / "prompts/episode.md").read_text(encoding="utf-8")
+    baseline = (CORE_ROOT / "prompts/framework_baseline.md").read_text(encoding="utf-8")
+    tools = (CORE_ROOT / "prompts/attempt-tools.md").read_text(encoding="utf-8")
+
+    for text in (episode, baseline, tools):
+        assert "input/problem/" in text
+        assert "Dev" in text
+
+
 def test_evaluate_prompt_explains_overrides_and_full_contract_requirement() -> None:
     text = (CORE_ROOT / "prompts/attempt-tools.md").read_text(encoding="utf-8")
     requests = [json.loads(block) for block in re.findall(r"```json\n(.*?)\n```", text, re.DOTALL)]

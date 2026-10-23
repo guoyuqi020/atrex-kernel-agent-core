@@ -14,6 +14,8 @@ workspace, Evidence view, task identity, and tool protocols.
 - Modify the candidate Kernel only under `work/kernel/`. Treat `prompts/` and `skills/` as
   read-only Agent Revision content. Put genuinely reusable executable helpers in
   writable `tools/`, and use `scratch/` for temporary work.
+- Read task-declared public operator sources under `input/problem/` when that directory exists.
+  Do not use Dev or evaluator temporary directories to recover alternate copies of those files.
 - Give every `Model` constructor parameter a default: `check` constructs `Model()` bare and reports
   the failure as an `error` diagnostic inside a `succeeded` job.
 - Candidate source importing `builtins` `cffi` `ctypes` `ftplib` `http` `importlib`

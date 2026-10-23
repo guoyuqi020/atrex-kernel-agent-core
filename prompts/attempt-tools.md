@@ -40,7 +40,7 @@ Choose the operation from the question you need to answer:
 | Correctness and timing for nomination | `{"operation":"evaluate","latency_prediction":"retained"}` | Replace the prediction with your expectation; ordinary full contract Evaluate is required. |
 | Correctness repair without timing | `{"operation":"evaluate","mode":"correctness_only"}` | No performance result; does not qualify for nomination. |
 | Locate GPU bottlenecks | `{"operation":"profile","level":"survey"}` | Use `sol` for throughput/resource evidence, `deep` for a selected kernel. |
-| Run a custom GPU probe | `{"operation":"dev","command":"python3 probe.py","file_paths":["scratch/probe.py"]}` | Create the script first; diagnostic output does not replace contract Evaluate. |
+| Run a custom GPU probe | `{"operation":"dev","command":"python3 probe.py","file_paths":["scratch/probe.py"]}` | Create the script first; diagnostic output does not replace contract Evaluate. Do not use Dev to recover task files already published under `input/problem/`. |
 | Compilation or sanitizer diagnostics | `{"operation":"check"}` | Optional `sanitize`; inspect diagnostic content as well as outer status. |
 | Inspect generated device code | `{"operation":"disassemble"}` | Optional `fmt`; this is not correctness or timing evidence. |
 | Inspect GPU environment | `{"operation":"env"}` | Returns the task GPU's environment and capabilities; does not measure a Kernel. |
