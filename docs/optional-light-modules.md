@@ -501,8 +501,11 @@ on macOS. The Light sdist and wheel build successfully with the source/worker as
 ### Reusable workspace
 
 Managed Episodes expose `kernel.py`, writable `skills/` and `tools/`, temporary `scratch/`,
-optional Supervisor-owned `memory/v*.json`, and public contracts/instructions. `WORKSPACE.md` states
-the selected inheritance policy. Each reusable directory has a writable README index; Agents
+optional Supervisor-owned `memory/v*.json`, and public contracts/instructions. The generated
+`WORKSPACE.md` owns the task-specific source boundaries, protected files, directory purposes,
+inheritance policy and history locations. `CLAUDE.md` retains general engineering, evidence
+and Runtime rules and refers to that contract; the Episode prompt also refers to it instead
+of repeating the workspace rules. Each reusable directory has a writable README index; Agents
 must update it when adding, modifying or deleting custom contents. Store reusable methods in
 `skills/<name>/SKILL.md` and scripts in `tools/`; scratch is for one-off requests/probes/outputs.
 
