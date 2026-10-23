@@ -3884,7 +3884,11 @@ def _run_typed_gateway(
                 if ARCHIVES in batch_request or DIAGNOSTIC in batch_request:
                     import sys
                     return run_tree(sys.modules[__name__], args, batch_request, kind, queue_wait_grace)
-                if args.url and agate_executable is None:
+                if args.url:
+                    # The direct typed transport persists a wire idempotency
+                    # key before POST.  The CLI has no equivalent flag, so a
+                    # lost submit response would leave an accepted Eval/ABBA
+                    # job without a recoverable ID and wedge validation.
                     return run_direct_job(
                         url=args.url,
                         kind="eval" if kind == "run" else kind,

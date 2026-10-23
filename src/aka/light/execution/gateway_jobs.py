@@ -295,14 +295,23 @@ def execute_job(
     submission = state.get("submission", 0)
     retries = state.get("retries", {})
     wire_key = state.get("idempotency_key")
-    if idempotent_submission and not wire_key and state.get("phase") == "submitting":
-        raise EvidenceUnavailable("Old submission has no persisted wire key; operator reconciliation required")
+    # Releases predating wire idempotency can leave a durable ``submitting``
+    # checkpoint without a job ID or a key.  Refusing that state forever makes
+    # infrastructure recovery impossible even after the Gateway is healthy.
+    # Allocate a key now and persist it before the first replay below.  The
+    # legacy POST may have reached the Gateway, so this migration can cause one
+    # additional measurement, but every replay after migration is idempotent.
+    migrated_uncertain_submission = bool(
+        idempotent_submission and not wire_key and state.get("phase") == "submitting"
+    )
     wire_key = wire_key or uuid.uuid4().hex
 
     def save(phase, process=None):
         value = {"phase": phase, "submission": submission, "retries": retries, "identity": identity}
         if idempotent_submission:
             value["idempotency_key"] = wire_key
+        if migrated_uncertain_submission or state.get("migrated_uncertain_submission") is True:
+            value["migrated_uncertain_submission"] = True
         if process is not None:
             value["process"] = {"returncode": process.returncode, "stdout": process.stdout, "stderr": process.stderr}
         if directory:
