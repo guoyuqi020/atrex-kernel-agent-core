@@ -16,6 +16,8 @@ MAX_AGENT_EVALUATION_SHAPES = 4096
 MAX_AGENT_DISASSEMBLY_BYTES = 64 * 1024
 MAX_AGENT_PROFILE_METRICS = 64
 MAX_AGENT_DIAGNOSTICS = 16
+MAX_AGENT_DEV_STDOUT_BYTES = 128 * 1024
+MAX_AGENT_DEV_STDERR_BYTES = 64 * 1024
 SOURCE_ERROR_PREFIX = "[sandbox] SOURCE_ERROR_JSON="
 GATEWAY_ERROR_PREFIX = "[sandbox] GATEWAY_ERROR_JSON="
 MAX_GATEWAY_ERROR_BYTES = 64 * 1024
@@ -152,7 +154,6 @@ def gateway_error_result(value: dict[str, Any]) -> dict[str, Any]:
             "a Kernel correctness verdict. If the submission outcome is uncertain, ask the "
             "operator to reconcile it; do not resubmit blindly."
         )
-    result["recovery"] = [{"instruction": result["next_action"]}]
     return result
 
 
@@ -364,6 +365,47 @@ def _agent_clock_lock(value: object) -> dict[str, Any] | None:
     }
     return projected or None
 
+def _agent_dev_result(value: object) -> dict[str, Any] | None:
+    """Project the public fields of an underlying Agate Dev result.
+
+    Multi-file non-Eval operations use Dev as their execution transport. Keep
+    the same stdout/stderr/exit contract as an ordinary public Dev request while
+    bounding it before embedding it in a structured operation result.
+    """
+    if not isinstance(value, dict):
+        return None
+    projected: dict[str, Any] = {}
+    for key, limit in (
+        ("stdout", MAX_AGENT_DEV_STDOUT_BYTES),
+        ("stderr", MAX_AGENT_DEV_STDERR_BYTES),
+    ):
+        stream = value.get(key)
+        if not isinstance(stream, str):
+            continue
+        text, omitted = _bounded_utf8_text(stream, limit, marker=f"Dev {key}")
+        projected[key] = text
+        if omitted:
+            projected[f"{key}_truncated"] = True
+            projected[f"{key}_bytes_omitted"] = omitted
+    exit_code = value.get("exit_code")
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+        projected["exit_code"] = exit_code
+    output_bytes = value.get("output_bytes")
+    if (
+        isinstance(output_bytes, int)
+        and not isinstance(output_bytes, bool)
+        and output_bytes >= 0
+    ):
+        projected["output_bytes"] = output_bytes
+    if isinstance(value.get("output_truncated"), bool):
+        projected["output_truncated"] = value["output_truncated"]
+    return projected or None
+
+def _include_agent_dev_result(projected: dict[str, Any], result: dict[str, Any]) -> None:
+    dev_result = _agent_dev_result(result.get("dev_result"))
+    if dev_result is not None:
+        projected["dev_result"] = dev_result
+
 def profile_result(result: dict[str, Any], *, generalized: bool = False) -> dict[str, Any]:
     """Bound Profile metrics without losing aggregates on repeated projection."""
     kernels_value = result.get("kernels")
@@ -486,6 +528,7 @@ def profile_result(result: dict[str, Any], *, generalized: bool = False) -> dict
                 projected_exports[name] = entry
         if projected_exports:
             projected["exports"] = projected_exports
+    _include_agent_dev_result(projected, result)
     return projected
 
 def _agent_diagnostic_item(value: object) -> object | None:
@@ -583,6 +626,7 @@ def _agent_check_result(result: dict[str, Any]) -> dict[str, Any]:
     error = result.get("error")
     if error:
         projected["error"] = bounded_error(error)
+    _include_agent_dev_result(projected, result)
     return projected
 
 def _bounded_utf8_text(
@@ -714,6 +758,7 @@ def _agent_disassembly_result(
     error = result.get("error")
     if error:
         projected["error"] = bounded_error(error)
+    _include_agent_dev_result(projected, result)
     return projected
 
 def _positive_number(value: object) -> float | None:

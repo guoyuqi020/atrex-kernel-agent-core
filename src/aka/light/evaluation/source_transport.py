@@ -210,7 +210,15 @@ def run(gateway, args, request, kind, queue_wait_grace):
                         continue
                 except (ValueError, TypeError, AttributeError):
                     continue
-                job["source_tree_execution"] = job["result"]
+                execution = job["result"]
+                job["source_tree_execution"] = execution
+                # Whole-tree Check/Profile/Disassemble execute through Agate Dev,
+                # but retain their logical operation at the Agent boundary. Apply
+                # the same public-output decision as an ordinary Dev request before
+                # carrying the underlying Dev result into that logical result.
+                # Projection still redacts and bounds the public fields later.
+                if gateway.public_dev_output(shlex.split(diagnostic["command"])):
+                    result["dev_result"] = execution
                 job["result"] = result
                 return subprocess.CompletedProcess(process.args, 0 if result["passed"] else 1, json.dumps(job), process.stderr)
         raise EvidenceUnavailable("Source-tree diagnostic returned no complete result; inspect its saved Job")

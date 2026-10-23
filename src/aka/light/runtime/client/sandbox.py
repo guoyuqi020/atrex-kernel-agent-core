@@ -46,7 +46,6 @@ def client_error(code: str, message: str, instruction: str, *, repairable=False,
         "ok": False, "repairable": repairable, "detail": message,
         "error": {"code": code, "message": message, "next_action": instruction, **details},
         "issues": [{"path": path, "code": code, "message": message}],
-        "recovery": [{"instruction": instruction}],
     }), file=sys.stderr)
 
 

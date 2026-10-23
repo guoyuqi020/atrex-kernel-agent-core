@@ -237,9 +237,8 @@ def augment_error(response, *, route, request, research_records=False, superviso
             from aka.light.runtime.request_errors import REPAIR_REQUEST
             if error.get("next_action") == REPAIR_REQUEST:
                 error["next_action"] = instruction
-                if result.get("recovery") == [{"instruction": REPAIR_REQUEST}]:
-                    result["recovery"] = []
-            result["recovery"].append({"instruction": instruction})
+            else:
+                result.setdefault("recovery", []).append({"instruction": instruction})
     elif route == "/v1/gateway/execute" and parser is not None:
         argv = request.get("argv")
         argv = argv if isinstance(argv, list) else []
@@ -255,7 +254,7 @@ def augment_error(response, *, route, request, research_records=False, superviso
                 kind = word.split("=", 1)[1]
         result["request_schema"] = gateway_schema(kind if isinstance(kind, str) else None, parser)
         if isinstance(kind, str) and kind in {"record-read", "kernel-read", "kernel-records", "kernel-pareto-frontier"}:
-            result["recovery"].append({"instruction":
+            result.setdefault("recovery", []).append({"instruction":
                 "Use an ID returned by this Campaign. record-read needs --record-id; kernel-read needs "
                 "--kernel-id and --output-path scratch/FILE; kernel-records needs --kernel-id. "
                 "kernel-pareto-frontier takes no IDs. Queries never require a GPU resubmission."})
@@ -264,10 +263,10 @@ def augment_error(response, *, route, request, research_records=False, superviso
         tool = next((item for item in catalog if item["name"] == name), None)
         if tool is not None:
             result["request_schema"] = deepcopy(tool["input_schema"])
-        result["recovery"].append({"command": "python3 tools/plugin.py list",
+        result.setdefault("recovery", []).append({"command": "python3 tools/plugin.py list",
                                     "instruction": "Use the enabled tool's declared input schema; do not bypass the Runtime."})
     elif route == "/v1/wiki/query":
-        result["recovery"].append({"instruction":
+        result.setdefault("recovery", []).append({"instruction":
             "Use python3 tools/sandbox.py --kind wiki-query --help (or wiki-search/wiki-hardware). "
             "Pass only workspace-relative input files and bounded max-bytes/max-records; "
             "do not specify private Wiki stores."})

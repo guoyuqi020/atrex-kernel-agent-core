@@ -322,7 +322,7 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
         recovery = ([{"tool": "record-read", "request": {"record_id": error.record_id},
                       "command": "python3 tools/sandbox.py --kind record-read --record-id " + error.record_id,
                       "instruction": "Reuse the completed result; do not resubmit this exact Kernel task."}]
-                    if error.record_id else [{"instruction": info["next_action"]}])
+                    if error.record_id else None)
         response = error_response(info["message"], code=info["code"], repairable=False,
                                   next_action=info["next_action"], gateway_record_id=error.record_id,
                                   recovery=recovery)
