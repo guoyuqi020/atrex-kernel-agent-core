@@ -779,15 +779,31 @@ def _referenced_workspace_inputs(workspace: Path, parts: list[str]) -> set[str]:
         # custom code string must be declared explicitly with --input.
         if index > 0 and parts[index - 1] in {"-c", "--command"}:
             continue
+        # Preserve automatic discovery for conventional ``--option=path``
+        # arguments without treating the option name as part of the path. In
+        # particular, arbitrary inline values such as ``--cfg=<JSON>`` are
+        # ordinary argv and must not become filesystem names.
+        candidate = (
+            token.partition("=")[2]
+            if token.startswith("--") and "=" in token
+            else token
+        )
         try:
-            normalized = _safe_relative(token)
+            normalized = _safe_relative(candidate)
         except ValueError:
             continue
         source = workspace / normalized
-        if source.is_file():
-            selected.add(normalized)
-        elif source.is_dir():
-            selected.update(_expand_workspace_input(workspace, normalized))
+        try:
+            if source.is_file():
+                selected.add(normalized)
+            elif source.is_dir():
+                selected.update(_expand_workspace_input(workspace, normalized))
+        except OSError:
+            # Automatic argv discovery is best-effort. Tokens can be long
+            # inline JSON, binary-ish data, or otherwise invalid as a local
+            # filename; explicit --input paths remain strictly validated by
+            # _expand_workspace_input.
+            continue
     return selected
 
 
