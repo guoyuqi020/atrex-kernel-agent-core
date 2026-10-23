@@ -41,11 +41,13 @@ def correctness_policy_value(value: object) -> dict[str, Any]:
     ):
         raise ValueError("Correctness policy comparison is unsupported")
 
-    def tolerance(raw: object, label: str) -> dict[str, float]:
+    def tolerance(raw: object, label: str) -> dict[str, float | None]:
         item = object_value(raw, label)
-        if set(item) != {"atol", "rtol"}:
+        required = {"atol", "rtol"}
+        optional = {"max_mismatch_fraction", "max_rel_l2"}
+        if not required <= set(item) or not set(item) <= required | optional:
             raise ValueError(f"{label} fields do not match the Agent protocol")
-        result: dict[str, float] = {}
+        result: dict[str, float | None] = {}
         for key in ("atol", "rtol"):
             number = item[key]
             if (
@@ -55,6 +57,23 @@ def correctness_policy_value(value: object) -> dict[str, Any]:
                 or number < 0
             ):
                 raise ValueError(f"{label} {key} must be a finite non-negative number")
+            result[key] = float(number)
+        for key in ("max_mismatch_fraction", "max_rel_l2"):
+            if key not in item:
+                continue
+            number = item[key]
+            if number is None:
+                result[key] = None
+                continue
+            if (
+                not isinstance(number, int | float)
+                or isinstance(number, bool)
+                or not math.isfinite(number)
+                or number < 0
+                or (key == "max_mismatch_fraction" and number > 1)
+            ):
+                suffix = " between zero and one" if key == "max_mismatch_fraction" else ""
+                raise ValueError(f"{label} {key} must be a finite number{suffix}")
             result[key] = float(number)
         return result
 

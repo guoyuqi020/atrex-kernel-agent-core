@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from contexts.attempt import RuntimeAttemptContext
+from contexts.common import correctness_policy_value
 from contexts.lineage_bootstrap import RuntimeLineageBootstrapContext
 
 EVIDENCE_PROMPT = "# Evidence input\n\nInjected by the trusted controller.\n"
@@ -17,6 +18,22 @@ CORRECTNESS_POLICY = {
     "default_tolerance": {"atol": 0.01, "rtol": 0.05},
     "output_tolerances": {},
 }
+
+
+def test_correctness_policy_accepts_aggregate_tolerance_bounds() -> None:
+    policy = {
+        **CORRECTNESS_POLICY,
+        "output_tolerances": {
+            "mutated_inputs.out": {
+                "atol": 0.01,
+                "rtol": 0.05,
+                "max_mismatch_fraction": 0.001,
+                "max_rel_l2": 0.01,
+            }
+        },
+    }
+
+    assert correctness_policy_value(policy) == policy
 
 
 def _workspace(root: Path) -> tuple[Path, dict[str, object]]:
