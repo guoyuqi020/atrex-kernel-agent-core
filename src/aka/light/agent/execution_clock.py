@@ -6,12 +6,15 @@ writing the response. Client backgrounding/disconnection cannot release a wait.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar
+import json
 import math
 import os
+from pathlib import Path
 import signal
 import subprocess
 import threading
 import time
+import uuid
 
 from aka.light.agent.recovery_processes import session_process_snapshot
 
@@ -30,6 +33,9 @@ class ActiveBudget:
     def __init__(self, seconds=DEFAULT_TIMEOUT_SECONDS):
         self.seconds = validate_timeout(seconds)
         self.used = 0.0
+        # Recovery sessions within one stage share the same budget identity so
+        # Claude's reminder hook does not repeat already delivered thresholds.
+        self.id = uuid.uuid4().hex
 
     @property
     def remaining(self):
@@ -118,6 +124,59 @@ class SessionControl:
         self.paused_since = None
         self.wait_seconds = 0.0
         self.finished_active_seconds = None
+        self.budget_state_path = None
+        self.budget_id = ""
+        self.budget_stage_name = "Agent stage"
+        self.budget_total_seconds = 0.0
+        self.budget_remaining_at_start = 0.0
+
+    def configure_budget(
+        self,
+        path,
+        *,
+        budget_id,
+        stage_name,
+        total_seconds,
+        remaining_seconds,
+    ):
+        """Publish a best-effort active-time clock for invocation-local hooks."""
+        with self.condition:
+            self.budget_state_path = Path(path)
+            self.budget_id = str(budget_id)
+            self.budget_stage_name = str(stage_name or "Agent stage")
+            self.budget_total_seconds = validate_timeout(
+                total_seconds, "Agent budget total_seconds"
+            )
+            self.budget_remaining_at_start = max(0.0, float(remaining_seconds))
+            self._write_budget_state(paused=True)
+
+    def _write_budget_state(self, *, paused):
+        """Write clock state atomically; reminders must never affect execution."""
+        path = self.budget_state_path
+        if path is None:
+            return
+        remaining = max(
+            0.0,
+            self.budget_remaining_at_start - self.active_seconds(),
+        )
+        document = {
+            "schema_version": 1,
+            "budget_id": self.budget_id,
+            "stage_name": self.budget_stage_name,
+            "total_seconds": self.budget_total_seconds,
+            "remaining_seconds": remaining,
+            "updated_monotonic": time.monotonic(),
+            "paused": bool(paused),
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            temporary.write_text(json.dumps(document, sort_keys=True))
+            os.replace(temporary, path)
+        except (OSError, TypeError, ValueError):
+            # This file is advisory. A filesystem failure must not terminate or
+            # pause a coding session.
+            pass
 
     def attach(self, pid):
         with self.condition:
@@ -125,6 +184,7 @@ class SessionControl:
                 raise RuntimeError("Agent session has already closed")
             self.started = time.monotonic()
             self.scope = AgentProcessScope(pid)
+            self._write_budget_state(paused=False)
             self.condition.notify_all()
 
     def active_seconds(self):
@@ -154,6 +214,7 @@ class SessionControl:
             if not self.pending:
                 self.paused_since = time.monotonic()
             self.pending += 1
+            self._write_budget_state(paused=True)
             try:
                 self.scope.signal(signal.SIGSTOP)
                 # The first pass freezes known parents. Re-scan before dispatch
@@ -177,6 +238,7 @@ class SessionControl:
                     if not self.closed:
                         try:
                             self.scope.signal(signal.SIGCONT)
+                            self._write_budget_state(paused=False)
                         except BaseException:
                             self.kill()
                             raise
@@ -187,6 +249,7 @@ class SessionControl:
             if self.finished_active_seconds is None:
                 self.finished_active_seconds = self.active_seconds()
             self.closed = True
+            self._write_budget_state(paused=True)
             self.condition.notify_all()
 
     def kill(self):

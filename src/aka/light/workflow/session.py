@@ -233,13 +233,11 @@ class LongSessionRunner:
                         "work from the current draft. Do not merely explain the problem. "
                         f"{completion_instruction.strip()}"
                     )
-                environment = (
-                    {
-                        "ATREX_TELEMETRY_ATTEMPT_ID": f"{telemetry_attempt_prefix}-{attempt + 1}"
-                    }
-                    if telemetry_attempt_prefix
-                    else None
-                )
+                environment = {"ATREX_AGENT_STAGE_NAME": stage_name}
+                if telemetry_attempt_prefix:
+                    environment["ATREX_TELEMETRY_ATTEMPT_ID"] = (
+                        f"{telemetry_attempt_prefix}-{attempt + 1}"
+                    )
                 turn = native.invoke(
                     turn_prompt,
                     resume=resume,

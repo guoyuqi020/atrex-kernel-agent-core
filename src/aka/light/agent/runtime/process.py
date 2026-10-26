@@ -175,15 +175,32 @@ def _run_bounded(
     if limit <= 0:
         control.close()
         return "", "Agent active-time budget exhausted", -signal.SIGKILL, True
+    budget_state_path = cwd / ".atrex_long_horizon" / "agent-active-budget.json"
+    if budget is not None:
+        control.configure_budget(
+            budget_state_path,
+            budget_id=budget.id,
+            stage_name=(env or {}).get("ATREX_AGENT_STAGE_NAME", "Agent stage"),
+            total_seconds=budget.seconds,
+            remaining_seconds=budget.remaining,
+        )
     environment_values = prepare_agent_environment(
         cwd, dict(os.environ if env is None else env),
         (env or {}).get("ATREX_TELEMETRY_ATTEMPT_ID") or "\0".join(command),
     )
-    if environment_values.get("ATREX_AKA_RUNTIME_URL"):
+    if environment_values.get("ATREX_AKA_RUNTIME_URL") or budget is not None:
         from aka.light.agent.claude_tools import foreground_command
-        # Like Runtime, keep these calls foreground; the authenticated server
-        # suspension remains authoritative if a shell backgrounds/disconnects.
-        command = foreground_command(command, cwd, limit)
+        # Runtime calls remain foreground, and the same invocation-local hook
+        # carries active-time reminders even in stages without Runtime tools.
+        command = foreground_command(
+            command,
+            cwd,
+            limit,
+            budget_state_path=(
+                Path(".atrex_long_horizon/agent-active-budget.json")
+                if budget is not None else None
+            ),
+        )
     launch, view = wrap_agent_command(
         command, cwd, environment_values, auxiliary_input_files=auxiliary_input_files,
     )
