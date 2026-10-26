@@ -2066,6 +2066,9 @@ class Campaign:
                 output_limit_recovery_retries=getattr(
                     self.module_options, "output_limit_recovery_retries", 2
                 ),
+                dependency_policy_recovery_retries=getattr(
+                    self.module_options, "dependency_policy_recovery_retries", 2
+                ),
                 stage_name="Framework baseline",
                 initial_purpose="framework_baseline",
                 completion_instruction=(

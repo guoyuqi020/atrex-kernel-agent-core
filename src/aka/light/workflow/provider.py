@@ -18,6 +18,7 @@ class WorkflowOptions:
     goal_episodes: bool = False
     generate_memory: bool = False
     output_limit_recovery_retries: int = 2
+    dependency_policy_recovery_retries: int = 2
     episode_timeout_seconds: float = 14400
     search: SearchOptions | dict | None = None
     source_tree: dict | None = None
@@ -28,6 +29,11 @@ class WorkflowOptions:
         if (type(self.output_limit_recovery_retries) is not int
                 or not 0 <= self.output_limit_recovery_retries <= 10):
             raise ValueError("output_limit_recovery_retries must be an integer from 0 to 10")
+        if (type(self.dependency_policy_recovery_retries) is not int
+                or not 0 <= self.dependency_policy_recovery_retries <= 10):
+            raise ValueError(
+                "dependency_policy_recovery_retries must be an integer from 0 to 10"
+            )
         if self.source_tree is not None:
             from aka.light.workspace.sources import validate_import_options
             validate_import_options(self.source_tree)

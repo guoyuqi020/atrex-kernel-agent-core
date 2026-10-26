@@ -264,9 +264,10 @@ def wrap_agent_command(
             raise ValueError("selected Agent shell guard resource is unavailable")
         _mount(argv, SESSION_SHELL_GUARD.resolve(), SESSION_SHELL_GUARD)
         if environment.get("ATREX_AKA_RUNTIME_URL"):
-            from aka.light.agent import claude_tools
-            hook = Path(claude_tools.__file__).resolve()
-            _mount(argv, hook, hook)
+            from aka.light.agent import claude_tools, dependency_policy
+            for module in (claude_tools, dependency_policy):
+                hook_asset = Path(module.__file__).resolve()
+                _mount(argv, hook_asset, hook_asset)
         if view:
             for name in view.inputs:
                 source = view.root / name

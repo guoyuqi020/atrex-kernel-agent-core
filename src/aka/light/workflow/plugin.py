@@ -13,6 +13,9 @@ Config = {"type": "object", "properties": {
     "goal_episodes": {"type": "boolean"},
     "generate_memory": {"type": "boolean"},
     "output_limit_recovery_retries": {"type": "integer", "minimum": 0, "maximum": 10},
+    "dependency_policy_recovery_retries": {
+        "type": "integer", "minimum": 0, "maximum": 10,
+    },
     "episode_timeout_seconds": {"type": "number", "minimum": 0},
     "source_tree": {"type": "object", "properties": {
         "manifest": {"type": "string", "minLength": 1},
@@ -27,7 +30,8 @@ Config = {"type": "object", "properties": {
     }, "additionalProperties": False},
 }, "additionalProperties": False}
 Defaults = {"startup": False, "numerical_validation": True, "goal_episodes": False, "generate_memory": False,
-            "output_limit_recovery_retries": 2, "episode_timeout_seconds": 14400, "search": {}}
+            "output_limit_recovery_retries": 2, "dependency_policy_recovery_retries": 2,
+            "episode_timeout_seconds": 14400, "search": {}}
 
 
 def validate_config(config):

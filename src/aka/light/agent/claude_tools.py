@@ -1,8 +1,37 @@
-"""Invocation-local Claude foreground hook for the Supervisor HTTP clients."""
+"""Invocation-local Claude hooks for policy and Supervisor HTTP clients."""
 import json
 from pathlib import Path
 import shlex
 import sys
+
+try:
+    from .dependency_policy import (
+        canonical_sandbox_entrypoint,
+        dependency_command_violation,
+        protected_gateway_identity,
+    )
+except ImportError:  # Executed directly by Claude's system-Python hook.
+    from dependency_policy import (
+        canonical_sandbox_entrypoint,
+        dependency_command_violation,
+        protected_gateway_identity,
+    )
+
+
+def preflight_dependency_violation(command):
+    """Reject only violations proven by the same policy as the live guard."""
+    canonical = canonical_sandbox_entrypoint()
+    try:
+        cwd = Path.cwd().resolve(strict=True)
+    except (OSError, RuntimeError):
+        cwd = None
+    return dependency_command_violation(
+        ["bash", "-lc", command],
+        cwd=cwd,
+        trusted_sandbox_entrypoints=(canonical,),
+        canonical_sandbox_entrypoint=canonical,
+        protected_gateway=protected_gateway_identity(),
+    )
 
 
 def hook_output(payload, timeout_ms):
@@ -11,6 +40,17 @@ def hook_output(payload, timeout_ms):
     value = payload.get("tool_input")
     if not isinstance(value, dict) or not isinstance(value.get("command"), str):
         return None
+    violation = preflight_dependency_violation(value["command"])
+    if violation:
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                "Dependency policy rejected this command before execution. "
+                f"Reason: {violation}. Use provisioned dependencies and permitted "
+                "Runtime tools, then continue the same task without repeating it."
+            ),
+        }}
     if not any(name in value["command"] for name in ("tools/sandbox.py", "tools/plugin.py")):
         return None
     return {"hookSpecificOutput": {

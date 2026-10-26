@@ -55,6 +55,15 @@ GOAL_AFTER_STALLS = 3
 GOAL_HANDOFF_RESUMES = 20
 
 
+def _session_terminal_status(result: Any) -> str:
+    handoff = getattr(result, "handoff", None)
+    if handoff is not None:
+        return handoff.status
+    if getattr(result, "terminal_failure_kind", None) == "dependency_policy_violation":
+        return "blocked"
+    return "invalid_handoff"
+
+
 def _render(template: str, values: dict[str, object]) -> str:
     for key, value in values.items():
         template = template.replace("{{" + key + "}}", str(value))
@@ -1136,6 +1145,7 @@ class LongHorizonCampaign:
         tokens_accounted: bool = False,
         invocations: tuple[Any, ...] = (),
         output_limit_recoveries: int = 0,
+        dependency_policy_recoveries: int = 0,
         recovered_after_supervisor_interruption: bool = False,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Archive and commit one terminal episode exactly once."""
@@ -1171,6 +1181,9 @@ class LongHorizonCampaign:
             "session_id": session_id or None,
             "resume_count": max(0, int(resume_count)),
             "output_limit_recoveries": max(0, int(output_limit_recoveries)),
+            "dependency_policy_recoveries": max(
+                0, int(dependency_policy_recoveries)
+            ),
             "tokens": max(0, int(tokens)),
             "summary": outcome.get("summary")
             if isinstance(outcome, dict)
@@ -1886,6 +1899,11 @@ class LongHorizonCampaign:
                 output_limit_recovery_retries=getattr(
                     self.base_campaign.module_options, "output_limit_recovery_retries", 2
                 ),
+                dependency_policy_recovery_retries=getattr(
+                    self.base_campaign.module_options,
+                    "dependency_policy_recovery_retries",
+                    2,
+                ),
                 remaining_token_budget=(
                     max(0, self.token_budget - state.tokens) if self.token_budget else None
                 ),
@@ -1894,7 +1912,7 @@ class LongHorizonCampaign:
             # discard the coding session's usage. Receipt replay is harmless.
             store.record_usage(state, usage_receipt, result.tokens)
             handoff = result.handoff
-            status = handoff.status if handoff else "invalid_handoff"
+            status = _session_terminal_status(result)
             violation = ""
             candidate_commit = handoff.candidate_commit if handoff else ""
             paths: list[str] = []
@@ -1940,6 +1958,9 @@ class LongHorizonCampaign:
                 tokens_accounted=True,
                 invocations=result.invocations,
                 output_limit_recoveries=result.output_limit_recoveries,
+                dependency_policy_recoveries=(
+                    result.dependency_policy_recoveries
+                ),
             )
             if accepted and memory is not None:
                 target_util = float(getattr(self.base_campaign, "target_util", 0.0))

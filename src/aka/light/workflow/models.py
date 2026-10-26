@@ -46,6 +46,8 @@ class SessionResult:
     completion_diagnosis: str = ""
     invocations: tuple[InvocationObservation, ...] = ()
     output_limit_recoveries: int = 0
+    dependency_policy_recoveries: int = 0
+    terminal_failure_kind: str | None = None
 
 
 @dataclass

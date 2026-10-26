@@ -15,6 +15,7 @@ from aka.light.workflow.models import EpisodeHandoff, InvocationObservation, Ses
 from aka.light.workflow.protocol import handoff_diagnosis, read_handoff
 from aka.light.workflow.output_limit import (
     EPISODE_COMPLETION_INSTRUCTION,
+    dependency_policy_recovery_prompt,
     recovery_prompt,
 )
 from aka.light.agent.runtime.adapter import ClaudeAdapter, PiAdapter
@@ -22,6 +23,17 @@ from aka.light.execution.retry import InfrastructureUnavailable
 
 CompletionCheck = Callable[[EpisodeHandoff], str]
 _CLAUDE_TRANSIENT_API_ERRORS = {"api error: terminated"}
+_DEPENDENCY_POLICY_MARKER = (
+    "[orchestrator] dependency policy violation; terminated coding session:"
+)
+
+
+def _dependency_policy_violation(exit_status: int, stderr: str) -> str:
+    """Return bounded guard evidence without conflating ordinary exit 126."""
+    if exit_status != 126 or _DEPENDENCY_POLICY_MARKER not in stderr:
+        return ""
+    detail = stderr.rsplit(_DEPENDENCY_POLICY_MARKER, 1)[1].strip()
+    return (detail or "dependency guard terminated the coding session")[:2000]
 
 
 def _claude_retryable_api_error(message: str) -> bool:
@@ -110,6 +122,7 @@ class LongSessionRunner:
         telemetry_environment: Mapping[str, str] | None = None,
         record_usage: Callable[[int], None] | None = None,
         output_limit_recovery_retries: int = 2,
+        dependency_policy_recovery_retries: int = 2,
         remaining_token_budget: int | None = None,
         stage_name: str = "Episode",
         completion_instruction: str = EPISODE_COMPLETION_INSTRUCTION,
@@ -118,6 +131,11 @@ class LongSessionRunner:
         if (type(output_limit_recovery_retries) is not int
                 or not 0 <= output_limit_recovery_retries <= 10):
             raise ValueError("output_limit_recovery_retries must be an integer from 0 to 10")
+        if (type(dependency_policy_recovery_retries) is not int
+                or not 0 <= dependency_policy_recovery_retries <= 10):
+            raise ValueError(
+                "dependency_policy_recovery_retries must be an integer from 0 to 10"
+            )
         session_id = session_id or str(uuid.uuid4())
         is_codex = self.agent_cli == "codex"
         active_session_id = "" if is_codex else session_id
@@ -148,7 +166,9 @@ class LongSessionRunner:
             timed_out = False
             resume_count = 0
             invocations: list[InvocationObservation] = []
-            recoveries = 0
+            output_limit_recoveries = 0
+            dependency_policy_recoveries = 0
+            terminal_failure_kind: str | None = None
             next_prompt = prompt
             purpose = initial_purpose
             attempt = 0
@@ -238,6 +258,18 @@ class LongSessionRunner:
                     PiAdapter().classify_terminal_failure(stdout, active_session_id)
                     if self.agent_cli == "pi" else (None, None)
                 )
+                dependency_policy_violation = _dependency_policy_violation(
+                    exit_status, stderr
+                )
+                if dependency_policy_violation:
+                    # A confirmed local guard decision is more specific than
+                    # any provider-stream symptom emitted during termination.
+                    failure_kind, provider_error_code = (
+                        "dependency_policy_violation", None
+                    )
+                    terminal_failure_kind = failure_kind
+                else:
+                    terminal_failure_kind = None
                 if failure_kind:
                     exit_status = exit_status or 1
                 total_tokens += self.usage_policy(turn)
@@ -266,7 +298,10 @@ class LongSessionRunner:
                 timed_out = turn_timed_out
                 if handoff_path is not None:
                     observed = read_handoff(handoff_path)
-                    if observed is not None:
+                    if (
+                        observed is not None
+                        and failure_kind != "dependency_policy_violation"
+                    ):
                         assert completion_check is not None
                         completion_diagnosis = completion_check(observed)
                         if not completion_diagnosis:
@@ -338,13 +373,74 @@ class LongSessionRunner:
                         -signal.SIGTERM,
                         128 + signal.SIGTERM,
                     }
+                    if failure_kind == "dependency_policy_violation":
+                        completion_diagnosis = (
+                            "Dependency policy guard terminated the coding session: "
+                            f"{dependency_policy_violation}; "
+                            f"{dependency_policy_recoveries}/"
+                            f"{dependency_policy_recovery_retries} fresh-session "
+                            "recoveries used"
+                        )
+                        if (
+                            dependency_policy_recoveries
+                            >= dependency_policy_recovery_retries
+                        ):
+                            break
+                        if (
+                            remaining_token_budget is not None
+                            and total_tokens >= remaining_token_budget
+                        ):
+                            completion_diagnosis += f"; {stage_name} token budget exhausted"
+                            break
+                        if current_budget().remaining <= 0:
+                            completion_diagnosis += (
+                                f"; {stage_name} active-time budget exhausted"
+                            )
+                            timed_out = True
+                            break
+                        dependency_policy_recoveries += 1
+                        next_prompt = dependency_policy_recovery_prompt(
+                            workspace,
+                            prompt,
+                            stdout,
+                            active_session_id,
+                            dependency_policy_violation,
+                            dependency_policy_recoveries,
+                            dependency_policy_recovery_retries,
+                            stage_name=stage_name,
+                            completion_instruction=completion_instruction,
+                        )
+                        # The guarded process group no longer exists and must
+                        # never be resumed. Preserve files, but require a fresh
+                        # terminal handoff from the replacement session.
+                        native.close()
+                        if handoff_path is not None:
+                            handoff_path.unlink(missing_ok=True)
+                        active_session_id = str(uuid.uuid4())
+                        native = self.agent.open_session(
+                            self.agent_cli,
+                            workspace,
+                            session_id=active_session_id,
+                            environment=telemetry_environment,
+                            output_directory=output_directory,
+                        )
+                        purpose = "dependency_policy_recovery"
+                        print(
+                            "[long-horizon] dependency policy violation; preserving "
+                            f"{stage_name} draft; fresh-session recovery "
+                            f"{dependency_policy_recoveries}/"
+                            f"{dependency_policy_recovery_retries}",
+                            flush=True,
+                        )
+                        continue
                     if failure_kind == "output_limit":
                         completion_diagnosis = (
                             "Claude max_output_tokens: response output limit exceeded; "
-                            f"{recoveries}/{output_limit_recovery_retries} fresh-session recoveries used"
+                            f"{output_limit_recoveries}/{output_limit_recovery_retries} "
+                            "fresh-session recoveries used"
                         )
                         if (exit_status != 1
-                                or recoveries >= output_limit_recovery_retries):
+                                or output_limit_recoveries >= output_limit_recovery_retries):
                             break
                         if turn.terminal_usage.total_tokens is None:
                             completion_diagnosis += "; usage unavailable, cannot safely extend execution"
@@ -353,10 +449,10 @@ class LongSessionRunner:
                                 and total_tokens >= remaining_token_budget):
                             completion_diagnosis += f"; {stage_name} token budget exhausted"
                             break
-                        recoveries += 1
+                        output_limit_recoveries += 1
                         next_prompt = recovery_prompt(
                             workspace, prompt, stdout, active_session_id,
-                            recoveries, output_limit_recovery_retries,
+                            output_limit_recoveries, output_limit_recovery_retries,
                             stage_name=stage_name,
                             completion_instruction=completion_instruction,
                         )
@@ -371,7 +467,8 @@ class LongSessionRunner:
                         )
                         purpose = "output_limit_recovery"
                         print(f"[long-horizon] max_output_tokens; preserving {stage_name} draft; "
-                              f"fresh-session recovery {recoveries}/{output_limit_recovery_retries}",
+                              "fresh-session recovery "
+                              f"{output_limit_recoveries}/{output_limit_recovery_retries}",
                               flush=True)
                         continue
                     transient_api_error = (
@@ -408,7 +505,9 @@ class LongSessionRunner:
                 stderr_tail=stderr_all[-4000:],
                 completion_diagnosis=completion_diagnosis,
                 invocations=tuple(invocations),
-                output_limit_recoveries=recoveries,
+                output_limit_recoveries=output_limit_recoveries,
+                dependency_policy_recoveries=dependency_policy_recoveries,
+                terminal_failure_kind=terminal_failure_kind,
             )
         finally:
             native.close()
