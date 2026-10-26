@@ -184,6 +184,7 @@ class LongSessionRunner:
                         )
                     timed_out = True
                     exit_status = exit_status or -signal.SIGKILL
+                    terminal_failure_kind = "episode_budget_exhausted"
                     completion_diagnosis = (
                         f"{stage_name} active-time budget exhausted; no continuation started"
                     )
@@ -353,6 +354,7 @@ class LongSessionRunner:
                     completion_diagnosis = f"Provider session failed: {provider_error_code}"
                 if timed_out:
                     if current_budget().remaining <= 0:
+                        terminal_failure_kind = "episode_budget_exhausted"
                         completion_diagnosis = (
                             f"{stage_name} active-time budget exhausted; no continuation started"
                         )

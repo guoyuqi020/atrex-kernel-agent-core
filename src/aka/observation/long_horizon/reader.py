@@ -387,7 +387,16 @@ class WorkspaceReader:
                 "arch": baseline.get("arch") or hardware.get("arch"),
                 "updated_at": iso(max(observed_time, terminal_time, stamp(baseline.get("recorded_at")), memory_time)),
                 "progress": progress, "canonical": canonical,
-                "counts": {key: integer(state.get(key)) for key in ("episodes", "accepted", "rejected")},
+                "counts": {
+                    key: integer(state.get(key))
+                    for key in (
+                        "episodes",
+                        "accepted",
+                        "rejected",
+                        "episode_budget_exhausted",
+                        "protocol_failures",
+                    )
+                },
                 "tokens": {"total": total, "control_total": raw_tokens, "measurement": measurement,
                            "receipt_count": len(obj(state.get("usage_receipts"))), "reason_codes": reasons,
                            "pending": progress["pending_tokens"], "scope": SCOPE},

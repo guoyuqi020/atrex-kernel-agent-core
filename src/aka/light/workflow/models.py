@@ -70,6 +70,7 @@ class SupervisorState:
     rejected: int = 0
     pivoted: int = 0
     blocked: int = 0
+    episode_budget_exhausted: int = 0
     protocol_failures: int = 0
     interrupted: int = 0
     tokens: int = 0

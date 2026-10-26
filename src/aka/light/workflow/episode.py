@@ -59,8 +59,11 @@ def _session_terminal_status(result: Any) -> str:
     handoff = getattr(result, "handoff", None)
     if handoff is not None:
         return handoff.status
-    if getattr(result, "terminal_failure_kind", None) == "dependency_policy_violation":
+    failure_kind = getattr(result, "terminal_failure_kind", None)
+    if failure_kind == "dependency_policy_violation":
         return "blocked"
+    if failure_kind == "episode_budget_exhausted":
+        return "episode_budget_exhausted"
     return "invalid_handoff"
 
 
@@ -1294,6 +1297,8 @@ class LongHorizonCampaign:
                 state.pivoted += 1
             elif status == "blocked" and not violation:
                 state.blocked += 1
+            elif status == "episode_budget_exhausted":
+                state.episode_budget_exhausted += 1
             elif status == "invalid_handoff":
                 state.protocol_failures += 1
             else:
@@ -1592,6 +1597,8 @@ class LongHorizonCampaign:
                     elif terminal_status == "interrupted":
                         state.interrupted += 1
                         recovered_attempt["violation"] = "supervisor process interrupted"
+                    elif terminal_status == "episode_budget_exhausted":
+                        state.episode_budget_exhausted += 1
                     elif terminal_status == "invalid_handoff":
                         state.protocol_failures += 1
                     else:
@@ -1993,6 +2000,7 @@ class LongHorizonCampaign:
         print(
             f"[long-horizon] STOP {reason}; episodes={state.episodes} accepted={state.accepted} "
             f"rejected={state.rejected} pivoted={state.pivoted} blocked={state.blocked} "
+            f"episode_budget_exhausted={state.episode_budget_exhausted} "
             f"protocol_failures={state.protocol_failures} tokens={state.tokens}",
             flush=True,
         )
