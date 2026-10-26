@@ -349,45 +349,22 @@ def dependency_command_violation(
     if any(is_installer(segment) for segment in segments):
         return "third-party package installation/build command"
 
-    def direct_host_gpu_action(segment: list[str]) -> str | None:
+    def direct_host_jit_package_import(segment: list[str]) -> str | None:
         tokens = unwrap(segment)
         if not tokens:
             return None
         lowered = [token.lower() for token in tokens]
         executable = Path(lowered[0]).name
-        info_only = (
-            any(token in {"--help", "-h", "--version"} for token in lowered[1:])
-            or (executable == "nvcc" and "-V" in tokens[1:])
-        )
-        if executable in {"nvcc", "cicc", "ptxas", "fatbinary", "ninja"} and not info_only:
-            return "CUDA/JIT build tool executed directly on the host"
-        if executable in {"ncu", "rocprof", "rocprofv3", "compute-sanitizer"}:
-            return "GPU profiler executed directly on the host"
         if re.fullmatch(r"python[0-9.]*", executable):
             mode, entry = _python_entrypoint(tokens)
-            if mode == "script" and Path(entry).name in {
-                "kernel.py",
-                "test_kernel.py",
-                "profile_driver.py",
-            }:
-                return "kernel/evaluator executed directly on the host"
-            if mode == "module" and entry.split(".", 1)[0] in {"kernel", "test_kernel", "profile_driver"}:
-                return "kernel/evaluator executed directly on the host"
             if mode == "code":
                 imports = python_import_roots(entry)
-                if "kernel" in imports:
-                    return "kernel imported directly on the host"
                 if imports & {"flashinfer", "flash_attn", "xformers", "vllm"}:
                     return "JIT-capable third-party GPU package imported directly on the host"
-        if executable in {"bash", "sh", "dash", "zsh", "ksh"} and any(
-            Path(token).name in {"profile_nvidia.sh", "profile_kernel.sh"}
-            for token in tokens[1:]
-        ):
-            return "GPU profiler wrapper executed directly on the host"
         return None
 
     for segment in segments:
-        reason = direct_host_gpu_action(segment)
+        reason = direct_host_jit_package_import(segment)
         if reason is not None:
             return reason
 

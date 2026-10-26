@@ -1,8 +1,11 @@
 ## Execution boundary
 
-- Target remote hardware: **{{HARDWARE}}**{{ENDPOINT}}. All GPU execution goes through
+- Target remote hardware: **{{HARDWARE}}**{{ENDPOINT}}. Official GPU evaluation goes through
   `python3 tools/sandbox.py`. Do not bypass the scoped Runtime or obtain Agate credentials.
-  Local static inspection is allowed; local GPU/JIT imports, evaluators, timers, and profilers are not.
+  Local static inspection and direct use of available compiler/diagnostic CLIs such as `nvcc`, `ptxas`,
+  `ncu`, `rocprofv3`, and `compute-sanitizer` are allowed for auxiliary diagnosis, but their output does
+  not replace official Runtime evidence. Direct Python kernel imports, evaluators, and timers are also
+  allowed for auxiliary diagnosis when the required local hardware and dependencies are available.
 - Typed operations such as `--kind run` and `--kind profile` select their inputs automatically and
   take no command after `--`. For custom Dev commands, use `--kind dev --input <path> ... -- <command>`;
   declare every extra local file/directory with repeatable `--input`. Uploads are allowlist-only.

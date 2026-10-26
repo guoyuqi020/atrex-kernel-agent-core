@@ -166,7 +166,7 @@ _atrex_guarded_python() {
         esac
     done
     if _atrex_python_code_imports_blocked_module "$code"; then
-        echo "atrex policy: host kernel/JIT-capable GPU imports must run through tools/sandbox.py" >&2
+        echo "atrex policy: JIT-capable third-party GPU imports must run through tools/sandbox.py" >&2
         return 126
     fi
     if (( code_index >= 0 )); then
@@ -208,7 +208,7 @@ try:
 except (SyntaxError, ValueError, TypeError):
     raise SystemExit(1)
 
-blocked = {"kernel", "flashinfer", "flash_attn", "xformers", "vllm"}
+blocked = {"flashinfer", "flash_attn", "xformers", "vllm"}
 
 def import_roots(source, depth=0):
     try:
