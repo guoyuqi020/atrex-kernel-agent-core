@@ -2041,20 +2041,39 @@ class Campaign:
                 "avoid repeating completed research.\n\n" + prompt
             )
         try:
-            result = self._run_session(
+            from aka.light.workflow.session import LongSessionRunner
+
+            observation_root = framework_baseline_progress_path(self.workspace).parent
+            observation_root.mkdir(parents=True, exist_ok=True)
+            telemetry_environment = {
+                "ATREX_SESSION_CAPTURE_DIR": str(observation_root / "sessions"),
+                "ATREX_TELEMETRY_CAMPAIGN_ID": self.campaign_name,
+                "ATREX_TELEMETRY_ITERATION_ID": "framework-baseline-v1",
+                "ATREX_TELEMETRY_ATTEMPT_ID": "invocation",
+            }
+            telemetry_environment.update(self.agent_environment())
+            runner = LongSessionRunner(
+                agent=self.agent,
+                agent_cli=self.agent_cli,
+                usage_policy=lambda turn: turn.terminal_usage.total_tokens or 0,
+            )
+            result = runner.run(
                 self.workspace,
                 prompt,
-                timeout=self.framework_baseline_timeout,
-                agent_cli=self.agent_cli,
-                sandbox_hardware=self.sandbox_hardware,
-                sandbox_profile=self.sandbox_profile,
-                sandbox_url=self.sandbox_url,
-                sandbox_ssh=self.sandbox_ssh,
-                sandbox_ssh_init=self.sandbox_ssh_init,
-                sandbox_health_command=self.sandbox_health_command,
-                sandbox_timeout=self.sandbox_timeout,
+                active_timeout_seconds=self.framework_baseline_timeout,
+                output_directory=observation_root,
+                telemetry_environment=telemetry_environment,
+                output_limit_recovery_retries=getattr(
+                    self.module_options, "output_limit_recovery_retries", 2
+                ),
+                stage_name="Framework baseline",
+                initial_purpose="framework_baseline",
+                completion_instruction=(
+                    "Finish the preserved V1 implementation in kernel.py and its declared source "
+                    "tree. Leave the candidate ready for the Supervisor's framework-baseline "
+                    "gates; do not create Git commits or submit an episode-report."
+                ),
                 reasoning_effort="max",
-                extra_environment=self.agent_environment(),
             )
         except EnvironmentUnavailable:
             capture_framework_baseline_exit(

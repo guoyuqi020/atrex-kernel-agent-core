@@ -11,6 +11,13 @@ from aka.light.agent.session_tail import read_regular_bytes
 from aka.light.workspace.sources import source_name
 
 
+EPISODE_COMPLETION_INSTRUCTION = (
+    "Submit tools/sandbox.py --kind episode-report; the Supervisor seals the candidate. "
+    "Correct any report fields identified by Runtime feedback and resubmit episode-report. "
+    "Do not create Git commits or hand-write a handoff."
+)
+
+
 def _inventory(workspace: Path) -> dict:
     entries = []
     # List only public candidate/state names. Never ingest private metadata or
@@ -83,12 +90,21 @@ def _receipts(stdout: str, session_id: str) -> dict:
             "calls_without_observed_result": list(pending.values())[-8:]}
 
 
-def recovery_prompt(workspace: Path, original: str, stdout: str, session_id: str,
-                    retry: int, maximum: int) -> str:
+def recovery_prompt(
+    workspace: Path,
+    original: str,
+    stdout: str,
+    session_id: str,
+    retry: int,
+    maximum: int,
+    *,
+    stage_name: str = "Episode",
+    completion_instruction: str = EPISODE_COMPLETION_INSTRUCTION,
+) -> str:
     snapshot = {"reason": "max_output_tokens", "recovery": retry, "max_recoveries": maximum,
                 **_inventory(workspace), **_receipts(stdout, session_id)}
-    return original.rstrip() + "\n\n## Continue this Episode after an output limit\n\n" + (
-        "This is a NEW provider session in the SAME Episode and workspace, with the same "
+    return original.rstrip() + f"\n\n## Continue this {stage_name} after an output limit\n\n" + (
+        f"This is a NEW provider session in the SAME {stage_name} and workspace, with the same "
         "task, tools, visibility and remaining budget. Preserve the current kernel/source tree, "
         "scratch, skills and tools. Do not reset the candidate, rerun Bootstrap, or replay the "
         "whole previous conversation. Inspect saved files and the relevant saved plan, then "
@@ -98,7 +114,6 @@ def recovery_prompt(workspace: Path, original: str, stdout: str, session_id: str
         "Reuse real Kernel/Gateway record IDs and query only relevant history through enabled "
         "tools. Do not call disabled Direction/Experiment tools. A missing receipt does not "
         "prove that a remote job failed or never ran: reconcile it before submitting again. "
-        "Preserve unresolved blockers; never invent measurements. Submit the existing "
-        "tools/sandbox.py --kind episode-report contract when done; do not commit Git or "
-        "hand-write a handoff.\n\n"
+        "Preserve unresolved blockers; never invent measurements. "
+        f"{completion_instruction.strip()}\n\n"
     ) + json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n"

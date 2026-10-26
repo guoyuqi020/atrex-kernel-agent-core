@@ -13,7 +13,10 @@ from aka.light.execution.recovery import raise_if_environment_blocked
 from aka.contracts.agent import Agent, NativeInvocation
 from aka.light.workflow.models import EpisodeHandoff, InvocationObservation, SessionResult
 from aka.light.workflow.protocol import handoff_diagnosis, read_handoff
-from aka.light.workflow.output_limit import recovery_prompt
+from aka.light.workflow.output_limit import (
+    EPISODE_COMPLETION_INSTRUCTION,
+    recovery_prompt,
+)
 from aka.light.agent.runtime.adapter import ClaudeAdapter, PiAdapter
 from aka.light.execution.retry import InfrastructureUnavailable
 
@@ -71,9 +74,26 @@ class LongSessionRunner:
         self.agent = agent
         self.usage_policy = usage_policy
 
-    def run(self, *args, episode_timeout_seconds=14400, **kwargs) -> SessionResult:
+    def run(
+        self,
+        *args,
+        episode_timeout_seconds: float | None = None,
+        active_timeout_seconds: float | None = None,
+        **kwargs,
+    ) -> SessionResult:
         from aka.light.agent.execution_clock import episode_budget
-        with episode_budget(episode_timeout_seconds):
+        if episode_timeout_seconds is not None and active_timeout_seconds is not None:
+            raise ValueError(
+                "configure only one of episode_timeout_seconds or active_timeout_seconds"
+            )
+        timeout = (
+            active_timeout_seconds
+            if active_timeout_seconds is not None
+            else episode_timeout_seconds
+            if episode_timeout_seconds is not None
+            else 14400
+        )
+        with episode_budget(timeout):
             return self._run(*args, **kwargs)
 
     def _run(
@@ -81,9 +101,9 @@ class LongSessionRunner:
         workspace: Path,
         prompt: str,
         *,
-        handoff_path: Path,
-        handoff_resumes: int,
-        completion_check: CompletionCheck,
+        handoff_path: Path | None = None,
+        handoff_resumes: int = 0,
+        completion_check: CompletionCheck | None = None,
         reasoning_effort: str = "max",
         session_id: str = "",
         output_directory: Path | None = None,
@@ -91,6 +111,9 @@ class LongSessionRunner:
         record_usage: Callable[[int], None] | None = None,
         output_limit_recovery_retries: int = 2,
         remaining_token_budget: int | None = None,
+        stage_name: str = "Episode",
+        completion_instruction: str = EPISODE_COMPLETION_INSTRUCTION,
+        initial_purpose: str = "optimization",
     ) -> SessionResult:
         if (type(output_limit_recovery_retries) is not int
                 or not 0 <= output_limit_recovery_retries <= 10):
@@ -98,8 +121,13 @@ class LongSessionRunner:
         session_id = session_id or str(uuid.uuid4())
         is_codex = self.agent_cli == "codex"
         active_session_id = "" if is_codex else session_id
-        handoff_path.parent.mkdir(parents=True, exist_ok=True)
-        handoff_path.unlink(missing_ok=True)
+        if handoff_path is not None:
+            if completion_check is None:
+                raise ValueError("completion_check is required when handoff_path is configured")
+            handoff_path.parent.mkdir(parents=True, exist_ok=True)
+            handoff_path.unlink(missing_ok=True)
+        elif handoff_resumes:
+            raise ValueError("handoff_resumes requires handoff_path")
         native = self.agent.open_session(
             self.agent_cli,
             workspace,
@@ -122,7 +150,7 @@ class LongSessionRunner:
             invocations: list[InvocationObservation] = []
             recoveries = 0
             next_prompt = prompt
-            purpose = "optimization"
+            purpose = initial_purpose
             attempt = 0
             rate_limit_retries = 0
             retry_resume = False
@@ -131,19 +159,27 @@ class LongSessionRunner:
                 from aka.light.agent.execution_clock import current_budget
                 if current_budget().remaining <= 0:
                     if purpose == "rate_limit_recovery":
-                        raise InfrastructureUnavailable("Rate-limited Episode exhausted its active-time budget; draft preserved")
+                        raise InfrastructureUnavailable(
+                            f"Rate-limited {stage_name} exhausted its active-time budget; draft preserved"
+                        )
                     timed_out = True
                     exit_status = exit_status or -signal.SIGKILL
-                    completion_diagnosis = "Episode active-time budget exhausted; no continuation started"
+                    completion_diagnosis = (
+                        f"{stage_name} active-time budget exhausted; no continuation started"
+                    )
                     break
                 cancel = getattr(self, "cancel_event", None)
                 if cancel is not None and cancel.is_set():
                     from concurrent.futures import CancelledError
-                    raise CancelledError("Search coordinator stopped this Episode")
+                    raise CancelledError(f"Search coordinator stopped this {stage_name}")
                 if remaining_token_budget is not None and total_tokens >= remaining_token_budget:
                     if purpose == "rate_limit_recovery":
-                        raise InfrastructureUnavailable("Rate-limited Episode exhausted its token budget; draft preserved")
-                    completion_diagnosis = "Episode token budget exhausted; no continuation started"
+                        raise InfrastructureUnavailable(
+                            f"Rate-limited {stage_name} exhausted its token budget; draft preserved"
+                        )
+                    completion_diagnosis = (
+                        f"{stage_name} token budget exhausted; no continuation started"
+                    )
                     exit_status = exit_status or 1
                     break
                 if next_prompt is not None:
@@ -168,14 +204,13 @@ class LongSessionRunner:
                     resume_count += 1
                     resume = True
                     purpose = "handoff_resume"
+                    assert handoff_path is not None
                     diagnosis = completion_diagnosis or handoff_diagnosis(handoff_path)
                     turn_prompt = (
-                        "Continue the same long-horizon optimization episode. The previous turn did "
+                        f"Continue the same long-horizon {stage_name}. The previous turn did "
                         f"not satisfy the terminal contract: {diagnosis}. Resume concrete engineering "
-                        "work from the current draft. Submit tools/sandbox.py --kind episode-report; "
-                        "the Supervisor seals the candidate. Do not merely explain the problem. "
-                        "Correct the report fields indicated by Runtime feedback and resubmit "
-                        "episode-report. Do not create Git commits or hand-write a handoff."
+                        "work from the current draft. Do not merely explain the problem. "
+                        f"{completion_instruction.strip()}"
                     )
                 environment = (
                     {
@@ -222,43 +257,49 @@ class LongSessionRunner:
                 # Keep the invocation's recovery label, but let subsequent
                 # budget exhaustion record normal work once throttling ends.
                 if purpose == "rate_limit_recovery" and failure_kind != "rate_limit":
-                    purpose = "optimization"
+                    purpose = initial_purpose
                 if record_usage is not None:
                     record_usage(total_tokens)
                 # Even an interrupted candidate has consumed real model tokens.
                 # Account first, then stop without consuming an episode outcome.
                 raise_if_environment_blocked()
                 timed_out = turn_timed_out
-                observed = read_handoff(handoff_path)
-                if observed is not None:
-                    completion_diagnosis = completion_check(observed)
-                    if not completion_diagnosis:
-                        handoff = observed
-                        # A valid, committed terminal handoff is authoritative even
-                        # when the CLI lingered until its turn timeout afterward.
-                        exit_status = 0
-                        timed_out = False
-                        break
+                if handoff_path is not None:
+                    observed = read_handoff(handoff_path)
+                    if observed is not None:
+                        assert completion_check is not None
+                        completion_diagnosis = completion_check(observed)
+                        if not completion_diagnosis:
+                            handoff = observed
+                            # A valid, committed terminal handoff is authoritative even
+                            # when the CLI lingered until its turn timeout afterward.
+                            exit_status = 0
+                            timed_out = False
+                            break
+                    else:
+                        completion_diagnosis = handoff_diagnosis(handoff_path)
                 else:
-                    completion_diagnosis = handoff_diagnosis(handoff_path)
+                    completion_diagnosis = ""
                 if failure_kind == "rate_limit" and not timed_out:
                     rate_limit_retries += 1
                     purpose = "rate_limit_recovery"
                     delay = min(60, 5 * 2 ** min(rate_limit_retries - 1, 4))
                     print(f"[long-horizon] provider rate limit ({provider_error_code}); "
-                          f"retry {rate_limit_retries} in {delay}s; same Episode and draft; "
+                          f"retry {rate_limit_retries} in {delay}s; same {stage_name} and draft; "
                           "no optimization round consumed", flush=True)
                     if (current_budget().remaining <= 0 or
                             (remaining_token_budget is not None and total_tokens >= remaining_token_budget)):
-                        raise InfrastructureUnavailable("Rate-limited Episode reached its budget; draft preserved")
+                        raise InfrastructureUnavailable(
+                            f"Rate-limited {stage_name} reached its budget; draft preserved"
+                        )
                     if (cancel if cancel is not None else Event()).wait(delay):
                         from concurrent.futures import CancelledError
                         raise CancelledError("Search coordinator stopped rate-limit recovery")
                     continuation = (
-                        "Continue the SAME optimization Episode after provider throttling. "
+                        f"Continue the SAME {stage_name} after provider throttling. "
                         "Preserve the existing kernel/source tree and scratch. Inspect saved progress "
                         "and reconcile existing Runtime/Gateway results before repeating work. "
-                        "Finish the existing episode-report contract; do not reset the candidate."
+                        f"Do not reset the candidate. {completion_instruction.strip()}"
                     )
                     if native.supports_resume and active_session_id:
                         next_prompt = continuation
@@ -277,7 +318,9 @@ class LongSessionRunner:
                     completion_diagnosis = f"Provider session failed: {provider_error_code}"
                 if timed_out:
                     if current_budget().remaining <= 0:
-                        completion_diagnosis = "Episode active-time budget exhausted; no continuation started"
+                        completion_diagnosis = (
+                            f"{stage_name} active-time budget exhausted; no continuation started"
+                        )
                         break
                     can_resume = (
                         bool(active_session_id)
@@ -308,15 +351,17 @@ class LongSessionRunner:
                             break
                         if (remaining_token_budget is not None
                                 and total_tokens >= remaining_token_budget):
-                            completion_diagnosis += "; Episode token budget exhausted"
+                            completion_diagnosis += f"; {stage_name} token budget exhausted"
                             break
                         recoveries += 1
                         next_prompt = recovery_prompt(
                             workspace, prompt, stdout, active_session_id,
                             recoveries, output_limit_recovery_retries,
+                            stage_name=stage_name,
+                            completion_instruction=completion_instruction,
                         )
                         # Unlike a report-format repair, this starts a fresh
-                        # model context without resetting the Episode/draft.
+                        # model context without resetting the current stage's draft.
                         native.close()
                         active_session_id = str(uuid.uuid4())
                         native = self.agent.open_session(
@@ -325,7 +370,7 @@ class LongSessionRunner:
                             output_directory=output_directory,
                         )
                         purpose = "output_limit_recovery"
-                        print(f"[long-horizon] max_output_tokens; preserving Episode draft; "
+                        print(f"[long-horizon] max_output_tokens; preserving {stage_name} draft; "
                               f"fresh-session recovery {recoveries}/{output_limit_recovery_retries}",
                               flush=True)
                         continue
