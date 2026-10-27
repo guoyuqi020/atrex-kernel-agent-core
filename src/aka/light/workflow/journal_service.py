@@ -1090,10 +1090,6 @@ class SupervisorJournalService:
                         "experiment_id",
                         "direction_id",
                         "name",
-                        "hypothesis",
-                        "change",
-                        "gateway_record_ids",
-                        "analysis",
                         "action",
                     )
                 }

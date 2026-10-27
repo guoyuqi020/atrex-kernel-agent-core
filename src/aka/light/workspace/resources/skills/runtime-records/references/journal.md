@@ -318,8 +318,8 @@ current and visible earlier Episodes, not just this Episode. A Direction index e
 only `direction_id`, `name`, `change_scope`, and `status`. Historical Directions recorded before
 `change_scope` read as `unspecified`. Use `load-direction` for the hypothesis, rationale, plan,
 latest analysis, assessment, experiment associations, and ancestry. An Experiment index entry has
-`experiment_id`, `direction_id`, `name`, `hypothesis`, `change`, `gateway_record_ids`, Agent-authored
-`analysis`, and `action`.
+only `experiment_id`, `direction_id`, `name`, and `action`. Use `load-experiment` for its hypothesis,
+change, Gateway Record IDs, analysis, timestamp, and optional Wiki attribution.
 These exports do not update automatically; invoke list again when you need a fresh snapshot.
 
 ```bash

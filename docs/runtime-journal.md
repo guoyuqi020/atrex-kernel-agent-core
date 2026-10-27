@@ -77,6 +77,10 @@ is a compact catalog containing only ID, name, change scope and status. The Agen
 Direction before choosing the most important one rather than the easiest local edit, and records the
 comparative rationale in the `start` event's `analysis`.
 
+The Experiment list is likewise a compact catalog containing only Experiment ID, Direction ID, name
+and action. Full hypothesis, change, Gateway Record references, analysis and attribution require an
+explicit Experiment load.
+
 ### Reports and old consumers
 
 No Direction may remain in progress at handoff. `candidate_ready` requires a current-Episode selected Experiment, a passing full Evaluate record for byte-identical `kernel.py`, and a Supervisor-created candidate commit. The existing worktree validator checks HEAD, branch, source match and permitted diff. Custom-input, Shape-subset, correctness-only, Profile or ABBA alone are insufficient for that report binding; acceptance requires policy-matched recorded ABBA.
