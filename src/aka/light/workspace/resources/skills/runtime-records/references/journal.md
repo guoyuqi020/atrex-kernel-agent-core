@@ -26,10 +26,8 @@ Save as `scratch/direction.json`:
   "action": "propose",
   "name": "Fuse the elementwise stages",
   "change_scope": "major_redesign",
-  "hypothesis": "One GPU launch can reduce intermediate memory traffic",
-  "rationale": "The current source materializes an intermediate tensor",
+  "hypothesis": "For bandwidth-bound shapes, fusing the two stages should remove the intermediate tensor and improve evaluator latency by at least 5% without changing outputs",
   "plan": ["Implement one fused path", "Check correctness and compare with the incumbent"],
-  "success_criteria": ["All cases pass", "Performance improves under the required evaluator"],
   "stop_conditions": ["No gain after a bounded implementation repair"]
 }
 ```
@@ -44,12 +42,14 @@ Response:
 {"status":"recorded","direction_id":"direction_11111111111111111111111111111111"}
 ```
 
-All shown fields are required. `change_scope` is `local` for a bounded modification to the current
+All shown fields except `stop_conditions` are required. `change_scope` is `local` for a bounded modification to the current
 implementation or `major_redesign` for a structural rewrite, new kernel family, materially different
-schedule, or new decomposition. This is an Agent planning assessment, not measured evidence. Preserve
-the incumbent and put a bounded, reversible probe for a major redesign in `plan`. `name`, `hypothesis`,
-and `rationale` are non-empty strings;
-`plan`, `success_criteria`, and `stop_conditions` are lists of non-empty strings. A proposal records
+schedule, or new decomposition. Put the proposed mechanism, applicable shape or workload scope, and
+falsifiable expected outcome in `hypothesis`; do not repeat them in separate motivation or success
+fields. This is an Agent planning assessment, not measured evidence. Preserve the incumbent and put
+a bounded, reversible probe for a major redesign in `plan`. `name` and `hypothesis` are non-empty
+strings; `plan` and optional `stop_conditions` are lists of non-empty strings. Use stop conditions
+only for additional execution constraints that are not simply the inverse of the hypothesis. A proposal records
 the idea but does not start it or consume one of the Episode's three start slots. During research,
 record a genuinely distinct promising idea immediately as a proposal so it survives the Session,
 without interrupting the active Direction. Before every proposal, refresh `list-directions`, load
@@ -129,12 +129,11 @@ concrete, falsifiable prediction for this particular change, while the owning Di
 broader research hypothesis. There is no top-level `evidence` field. The cited Gateway Records are
 the measurement source of truth; use `record-read` to inspect their saved results. `analysis` remains
 the Agent's interpretation and should not duplicate result payloads. Optional `wiki_usage`, `wiki_query_ids`, and
-`wiki_usage_status` record knowledge attribution. The `evidence` inside each `wiki_usage` row is a
-separate attribution explanation and remains Agent-authored. Invalid attribution rejects the request
+`wiki_usage_status` record knowledge attribution. Invalid attribution rejects the request
 before an Experiment is recorded; correct the returned field issues and resubmit with the same Gateway
 Record IDs, without repeating GPU work. Previously stored malformed attribution remains diagnostic
 on read. Copy the provider's returned `query_id` verbatim. Each usage row needs `query_id`,
-`disposition`, `use`, `evidence`, and either an emitted `wiki_id` (`store::record`) or `cite`
+`disposition`, and either an emitted `wiki_id` (`store::record`) or `cite`
 (`wiki@version relative-path:start-end`); both may be retained. Query IDs are bounded opaque tokens,
 not restricted to one backend's prefix. Attribution arrays contain at most 64 entries. `declared`
 requires non-empty valid usage; `wiki_query_ids` must include every query ID appearing in `wiki_usage`,
@@ -164,9 +163,7 @@ Add the following fields to the Experiment request, copying IDs and citations fr
   "wiki_usage": [{
     "query_id": "wiki-query-0123456789abcdef0123456789abcdef",
     "wiki_id": "gpu_wiki::example.record",
-    "disposition": "applied",
-    "use": "Fused the two memory passes described by the record",
-    "evidence": "The cited Gateway evaluation measured lower latency"
+    "disposition": "applied"
   }]
 }
 ```
@@ -212,8 +209,9 @@ Gateway observation. A completed correctness failure can refute a correctness cl
 cannot settle a performance claim. Runtime verifies records and Kernel bindings, not the scientific
 truth or relevance of your interpretation. Do not use unrelated measurements to justify a claim.
 
-`associated_experiment_ids` includes all linked Experiments; `supporting_experiment_ids` is only the
-latest explicit closure selection. Late records extend associations without rewriting that selection.
+Use `list-experiments` and filter by `direction_id` to find all linked Experiments.
+`supporting_experiment_ids` is only the latest explicit closure selection. Late records remain linked
+without rewriting that selection.
 To revise a conclusion, explicitly submit another closure with its assessment and selected evidence.
 No in-progress Direction may remain at terminal handoff;
 proposed/deferred Directions may remain for later exploration.
@@ -306,7 +304,7 @@ Each command returns an acknowledgement, not the index itself:
 Read the named local file. It contains `{"directions":[...]}` or `{"experiments":[...]}` across the
 current and visible earlier Episodes, not just this Episode. A Direction index entry has
 only `direction_id`, `name`, `change_scope`, and `status`. Historical Directions recorded before
-`change_scope` read as `unspecified`. Use `load-direction` for the hypothesis, rationale, plan,
+`change_scope` read as `unspecified`. Use `load-direction` for the hypothesis, plan, optional stop conditions,
 latest analysis, assessment, experiment associations, and ancestry. An Experiment index entry has
 only `experiment_id`, `direction_id`, and `name`. Use `load-experiment` for its hypothesis,
 change, Gateway Record IDs, analysis, timestamp, and optional Wiki attribution.
@@ -318,8 +316,9 @@ python3 tools/sandbox.py --kind load-experiment --record-id experiment_222222222
 ```
 
 Load returns the record directly as JSON, not a file or `result` wrapper. A loaded Direction includes
-the proposal including `change_scope`, current `status`/`analysis`/`hypothesis_status`, timestamps, declared ancestry,
-all `associated_experiment_ids`, and explicitly selected `supporting_experiment_ids`.
+the proposal including `change_scope`, current `status`/`analysis`/`hypothesis_status`, declared ancestry,
+and explicitly selected `supporting_experiment_ids`. Find all associated Experiments by filtering
+`list-experiments` entries on `direction_id`.
 Old closures without an explicit assessment read as unresolved; their old automatic support is
 association only. Old unmeasured notes remain readable but cannot support new closures.
 A loaded Experiment contains its submitted fields plus `experiment_id`
@@ -332,14 +331,15 @@ Reuse the same ID for an unchanged hypothesis; use `start` to resume a closed Di
 implementation of that hypothesis is an Experiment, not a new ancestry kind. For a changed
 hypothesis, a proposal may add one of these `relationship` values:
 
-- `refinement`: narrow or extend a parent hypothesis, such as focusing a tiling idea on register pressure.
-- `correction`: revise a mistaken parent hypothesis while preserving the original record.
+- `refinement`: narrow or extend exactly one parent hypothesis, such as focusing a tiling idea on register pressure.
+- `correction`: revise exactly one mistaken parent hypothesis while preserving the original record.
 - `combination`: combine ideas from two or more distinct parent Directions, such as fusion and layout changes.
 
 Add `derived_from_direction_ids` and/or `derived_from_experiment_ids` from visible history. Each list
-allows at most 32 unique IDs. Explain the derivation in `rationale`; these labels do not establish
+allows at most 32 unique IDs. Make the changed claim and its derivation clear in `hypothesis`; these labels do not establish
 that a hypothesis is correct. Cross-Campaign/DSL porting is not supported by this Journal.
 
-A relationship needs a parent; `combination` needs two distinct parent Directions, directly or via
-Experiments. A `correction` may set `supersedes_direction_id` to one parent; this does not change that
-parent's lifecycle. Ancestry is immutable; lifecycle updates must not include these extra fields.
+A relationship needs a parent. `refinement` and `correction` resolve to exactly one parent Direction,
+directly or through cited Experiments; `combination` needs at least two distinct parents. Relationships
+do not change a parent's lifecycle. Ancestry is immutable; lifecycle updates must not include these
+extra fields.

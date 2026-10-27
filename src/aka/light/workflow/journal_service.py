@@ -51,11 +51,9 @@ DIRECTION_PROPOSAL_FIELDS = {
     "name",
     "change_scope",
     "hypothesis",
-    "rationale",
     "plan",
-    "success_criteria",
-    "stop_conditions",
 }
+DIRECTION_PROPOSAL_OPTIONAL_FIELDS = {"stop_conditions"}
 DIRECTION_CHANGE_SCOPES = {"local", "major_redesign"}
 DIRECTION_UPDATE_FIELDS = {"action", "direction_id", "analysis"}
 DIRECTION_CLOSURE_FIELDS = DIRECTION_UPDATE_FIELDS | {"hypothesis_status", "supporting_experiment_ids"}
@@ -353,28 +351,33 @@ def _apply_direction_events(
         try:
             advance_direction(statuses, started, direction_id, action)
             if action == "propose":
-                for field in ("name", "hypothesis", "rationale", "recorded_at"):
+                for field in ("name", "hypothesis", "recorded_at"):
                     _text(event.get(field), f"Direction {field}")
                 scope = event.get("change_scope", "unspecified")
                 if scope != "unspecified":
                     _change_scope(scope)
-                for field in ("plan", "success_criteria", "stop_conditions"):
-                    _text_list(event.get(field), f"Direction {field}")
+                _text_list(event.get("plan"), "Direction plan")
+                _text_list(event.get("stop_conditions", []), "Direction stop_conditions")
+                # Keep finalized Journals from the former, more repetitive
+                # proposal contract readable without requiring new proposals
+                # to reproduce the same claim in three fields.
+                if "rationale" in event:
+                    _text(event.get("rationale"), "Direction rationale")
+                if "success_criteria" in event:
+                    _text_list(event.get("success_criteria"), "Direction success_criteria")
             _text_list(event.get("supporting_experiment_ids", []), "supporting_experiment_ids")
         except ValueError as error:
             raise RuntimeStateError(
                 f"Invalid Direction history in Episode {journal['episode']}: {error}"
             ) from error
         if action == "propose":
-            views[direction_id] = {
+            direction = {
                 "direction_id": direction_id,
                 "name": event["name"],
                 "change_scope": event.get("change_scope", "unspecified"),
                 "hypothesis": event["hypothesis"],
-                "rationale": event["rationale"],
                 "plan": event["plan"],
-                "success_criteria": event["success_criteria"],
-                "stop_conditions": event["stop_conditions"],
+                "stop_conditions": event.get("stop_conditions", []),
                 "status": "proposed",
                 "analysis": None,
                 "recorded_at": event["recorded_at"],
@@ -383,6 +386,12 @@ def _apply_direction_events(
                 "hypothesis_status": "unresolved",
                 **relationship_fields(event),
             }
+            # Legacy fields remain visible on legacy Directions; they are not
+            # invented for the compact contract.
+            for field in ("rationale", "success_criteria"):
+                if field in event:
+                    direction[field] = event[field]
+            views[direction_id] = direction
         elif direction_id in views:
             direction = _editable_direction(views, direction_id)
             direction["status"] = _DIRECTION_STATUS[action]
@@ -517,7 +526,10 @@ def update_direction(
     }
     if action == "propose":
         require_fields(
-            value, DIRECTION_PROPOSAL_FIELDS, optional=RELATIONSHIP_FIELDS, label="Direction proposal"
+            value,
+            DIRECTION_PROPOSAL_FIELDS,
+            optional=DIRECTION_PROPOSAL_OPTIONAL_FIELDS | RELATIONSHIP_FIELDS,
+            label="Direction proposal",
         )
         direction_id = f"direction_{uuid.uuid4().hex}"
         advance_direction(statuses, started, direction_id, action)
@@ -544,10 +556,10 @@ def update_direction(
             "name": _text(value["name"], "Direction name"),
             "change_scope": _change_scope(value["change_scope"]),
             "hypothesis": _text(value["hypothesis"], "Direction hypothesis"),
-            "rationale": _text(value["rationale"], "Direction rationale"),
             "plan": _text_list(value["plan"], "Direction plan"),
-            "success_criteria": _text_list(value["success_criteria"], "Direction success_criteria"),
-            "stop_conditions": _text_list(value["stop_conditions"], "Direction stop_conditions"),
+            "stop_conditions": _text_list(
+                value.get("stop_conditions", []), "Direction stop_conditions"
+            ),
             "recorded_at": _now(),
             **ancestry,
         }
@@ -764,9 +776,10 @@ def _closure_support(
             "Direction's visible Experiments.",
             code="direction_support_required",
             next_action=(
-                "Use load-direction to find associated_experiment_ids; record-experiment first "
-                "if necessary. Select the relevant IDs explicitly and declare hypothesis_status. "
-                "Each Experiment must cite real Kernel-bound Gateway evidence."
+                "Use list-experiments and select entries whose direction_id matches this "
+                "Direction; record-experiment first if necessary. Select the relevant IDs "
+                "explicitly and declare hypothesis_status. Each Experiment must cite real "
+                "Kernel-bound Gateway evidence."
             ),
         )
     if history is None:
@@ -862,14 +875,16 @@ def record_experiment(
             if not isinstance(row, dict):
                 continue
             label = f"wiki_usage[{index}]"
-            for field in sorted(set(row) - {"query_id", "wiki_id", "cite", "disposition", "use", "evidence"})[:32]:
+            for field in sorted(set(row) - {"query_id", "wiki_id", "cite", "disposition"})[:32]:
                 issues.append({"path": f"{label}.{field[:128]}", "code": "extra_forbidden", "message": "Unexpected attribution field."})
-            for field in ("use", "evidence"):
-                text = row.get(field)
-                if not isinstance(text, str) or not text.strip() or len(text) > 16000:
-                    issues.append({"path": f"{label}.{field}", "code": "invalid_string",
-                                   "message": "Expected non-empty text of at most 16000 characters."})
         normalize_wiki_attribution(experiment)
+        for row in experiment.get("wiki_usage", []):
+            if isinstance(row, dict):
+                # The Experiment already records the change, analysis and
+                # Gateway evidence. Attribution only needs identity and use
+                # disposition.
+                row.pop("use", None)
+                row.pop("evidence", None)
         for message in experiment.get("wiki_usage_errors", []):
             field = re.match(r"wiki_usage_status|wiki_query_ids|wiki_usage(?:\[[0-9]+\](?:\.[a-z_]+)?)?", message)
             issues.append({"path": field[0] if field else "wiki_usage", "code": "wiki_attribution_invalid",
@@ -1057,7 +1072,12 @@ class SupervisorJournalService:
             direction = _direction_views(self.path, self.campaign_root).get(direction_id)
             if direction is None:
                 raise ValueError("Direction ID is outside visible history")
-            return deepcopy(direction)
+            visible = deepcopy(direction)
+            # Keep audit timestamps and the derivable complete association in
+            # the private Journal. Expose only fields useful to Agent decisions.
+            for field in ("associated_experiment_ids", "recorded_at", "updated_at"):
+                visible.pop(field, None)
+            return visible
         if operation == "experiment_record":
             body = request.get("request")
             if not isinstance(body, Mapping):
@@ -1096,6 +1116,10 @@ class SupervisorJournalService:
             # Records remain the only public source of measurement facts.
             visible.pop("evidence", None)
             visible.pop("action", None)
+            for row in visible.get("wiki_usage", []):
+                if isinstance(row, dict):
+                    row.pop("use", None)
+                    row.pop("evidence", None)
             return visible
         if operation == "episode_report":
             body = request.get("request")
@@ -1381,4 +1405,6 @@ class SupervisorJournalService:
 
 
 __all__ = ["SupervisorJournalService", "initialize_journal", "journal_lock", "load_journal", "selected_evaluation", "sealed_candidate_source",
-           "DIRECTION_PROPOSAL_FIELDS", "DIRECTION_CHANGE_SCOPES", "DIRECTION_UPDATE_FIELDS", "DIRECTION_CLOSURE_FIELDS", "EXPERIMENT_FIELDS"]
+           "DIRECTION_PROPOSAL_FIELDS", "DIRECTION_PROPOSAL_OPTIONAL_FIELDS",
+           "DIRECTION_CHANGE_SCOPES", "DIRECTION_UPDATE_FIELDS",
+           "DIRECTION_CLOSURE_FIELDS", "EXPERIMENT_FIELDS"]

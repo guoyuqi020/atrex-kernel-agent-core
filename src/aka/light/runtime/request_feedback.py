@@ -37,6 +37,7 @@ def journal_schema(operation, body, *, research_records=False, supervisor_git=Tr
     """The schema describes the JSON request file, not its HTTP envelope."""
     from aka.light.workflow.journal_service import (
         DIRECTION_PROPOSAL_FIELDS,
+        DIRECTION_PROPOSAL_OPTIONAL_FIELDS,
         DIRECTION_CHANGE_SCOPES,
         DIRECTION_UPDATE_FIELDS,
         DIRECTION_CLOSURE_FIELDS,
@@ -83,8 +84,7 @@ def journal_schema(operation, body, *, research_records=False, supervisor_git=Tr
                      .replace("(?P<start>", "(").replace("(?P<end>", "(") + "$",
                      "description": "Copy wiki@version relative-path:start-end verbatim; no parent paths; end >= start."},
             "disposition": {"type": "string", "enum": sorted(WIKI_USAGE_DISPOSITIONS)},
-            "use": _text(), "evidence": _text(),
-        }, {"query_id", "disposition", "use", "evidence"})
+        }, {"query_id", "disposition"})
         usage["anyOf"] = [{"required": ["wiki_id"]}, {"required": ["cite"]}]
         properties = {key: _text() for key in EXPERIMENT_FIELDS}
         properties.update(direction_id={"type": "string", "pattern": "^direction_[0-9a-f]{32}$"},
@@ -104,13 +104,14 @@ def journal_schema(operation, body, *, research_records=False, supervisor_git=Tr
         properties["action"] = {"const": action}
         if action == "propose":
             properties["change_scope"] = {"enum": sorted(DIRECTION_CHANGE_SCOPES)}
-            for key in ("plan", "success_criteria", "stop_conditions"):
+            for key in ("plan", "stop_conditions"):
                 properties[key] = {"type": "array", "maxItems": 64,
                                    "items": {"type": "string", "minLength": 1, "maxLength": 4000}}
             properties.update(relationship={"enum": list(RELATIONSHIPS)},
                               derived_from_direction_ids=_ids("direction_", maximum=32),
-                              derived_from_experiment_ids=_ids("experiment_", maximum=32),
-                              supersedes_direction_id={"type": "string", "pattern": "^direction_[0-9a-f]{32}$"})
+                              derived_from_experiment_ids=_ids("experiment_", maximum=32))
+            for key in DIRECTION_PROPOSAL_OPTIONAL_FIELDS:
+                properties.setdefault(key, _text())
         else:
             properties["direction_id"] = {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"}
             if action in CLOSURES:

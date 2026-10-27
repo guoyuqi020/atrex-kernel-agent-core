@@ -257,8 +257,9 @@ an `provider_error` receipt state; they cannot impersonate `completed` or `reuse
 Journal attribution supports the existing `wiki_usage` rows with `wiki_id`
 (`store::record`) as well as versioned `cite` (`wiki@version relative-path:start-end`).
 Copy the provider's emitted query ID verbatim; IDs are bounded opaque tokens, not
-restricted to the local query prefix. Each row retains `disposition`, `use` and
-`evidence`, and may carry both a record ID and a citation. `wiki_query_ids` and
+restricted to the local query prefix. Each row retains `disposition` and may carry
+both a record ID and a citation. The Experiment's `change`, `analysis`, and Gateway
+Records already describe application and measured evidence. `wiki_query_ids` and
 `wiki_usage_status` keep the same use/no-use semantics. New Light Experiment requests
 with invalid attribution fail before writing and return repairable field issues and
 the complete request schema; resubmit corrected fields with the same Gateway Record

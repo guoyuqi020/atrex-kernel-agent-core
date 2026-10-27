@@ -6,8 +6,10 @@ and explain why it outranks the alternatives in the `start` event's `analysis`. 
 change merely because it is easier than a higher-value redesign. Use `update-direction` before
 exploring the selected Direction. Advance at most three Directions per Episode, with only one
 `in_progress` at a time; additional proposals may remain for later. Put plans in
-`plan`, `success_criteria`, and `stop_conditions`, and classify `change_scope` as `local` or
-`major_redesign`. A major redesign should begin with a bounded, reversible probe while preserving
+`plan`, and classify `change_scope` as `local` or `major_redesign`. Put the mechanism, applicable
+scope, and falsifiable expected outcome together in `hypothesis`; do not restate them in separate
+motivation or success fields. Use optional `stop_conditions` only for additional execution limits
+that are not simply the inverse of the hypothesis. A major redesign should begin with a bounded, reversible probe while preserving
 the current best. When work reveals a distinct new idea, refresh `list-directions`, load likely
 name/scope matches, and compare their hypotheses before proposing it. Reuse the existing ID for the
 same hypothesis and use an Experiment for implementation variants. A genuinely new idea may be proposed immediately without
@@ -23,7 +25,7 @@ Close every in-progress Direction before `episode-report`. Each closure must exp
 Lifecycle is not a hypothesis verdict. Every Experiment needs at least one real Kernel-bound Gateway
 Record; failed diagnostics may document an unresolved blocker, but supported/refuted requires a
 completed observation in every selected Experiment. Runtime validates bindings, not causal relevance.
-Never invent evidence to close a Direction. Late Experiments update `associated_experiment_ids`
+Never invent evidence to close a Direction. Late Experiments remain linked through their `direction_id`
 without reopening a Direction or changing its selected support. For a candidate, select a current-Episode
 Experiment citing a passing Evaluate for the exact candidate source left in the workspace
 (including every file of a contracted source tree);

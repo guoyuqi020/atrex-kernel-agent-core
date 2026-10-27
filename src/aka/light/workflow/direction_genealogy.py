@@ -12,14 +12,18 @@ RELATIONSHIP_FIELDS = frozenset(
         "relationship",
         "derived_from_direction_ids",
         "derived_from_experiment_ids",
-        "supersedes_direction_id",
     }
 )
+_LEGACY_RELATIONSHIP_FIELDS = frozenset({"supersedes_direction_id"})
 
 
 def relationship_fields(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Omit empty defaults so historical Directions acquire no invented edges."""
-    return {key: value[key] for key in sorted(RELATIONSHIP_FIELDS) if value.get(key)}
+    """Omit empty defaults while retaining ancestry stored by older Journals."""
+    return {
+        key: value[key]
+        for key in sorted(RELATIONSHIP_FIELDS | _LEGACY_RELATIONSHIP_FIELDS)
+        if value.get(key)
+    }
 
 
 def _ids(raw: object, prefix: str, field: str) -> list[str]:
@@ -50,10 +54,7 @@ def validate_relationship(
     evidence = _ids(
         value.get("derived_from_experiment_ids", []), "experiment", "derived_from_experiment_ids"
     )
-    supersedes = value.get("supersedes_direction_id")
-    if supersedes is not None:
-        _ids([supersedes], "direction", "supersedes_direction_id")
-    if kind is None and not parents and not evidence and supersedes is None:
+    if kind is None and not parents and not evidence:
         return {}
     if kind not in RELATIONSHIPS:
         raise ValueError(
@@ -80,14 +81,14 @@ def validate_relationship(
         effective_parents.add(parent)
     if not effective_parents:
         raise ValueError("relationship requires at least one parent Direction or Experiment")
+    if kind in {"refinement", "correction"} and len(effective_parents) != 1:
+        raise ValueError(
+            f"{kind} requires exactly one parent Direction, directly or via Experiments"
+        )
     if kind == "combination" and len(effective_parents) < 2:
         raise ValueError(
             "combination requires at least two distinct parent Directions, "
             "directly or via Experiments"
-        )
-    if supersedes is not None and (kind != "correction" or supersedes not in effective_parents):
-        raise ValueError(
-            "supersedes_direction_id requires correction and must name one of its parent Directions"
         )
 
     pending = list(effective_parents)
@@ -109,5 +110,4 @@ def validate_relationship(
         "relationship": kind,
         "derived_from_direction_ids": parents,
         "derived_from_experiment_ids": evidence,
-        "supersedes_direction_id": supersedes,
     }
