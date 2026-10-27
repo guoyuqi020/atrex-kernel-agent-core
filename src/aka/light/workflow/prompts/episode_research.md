@@ -1,8 +1,8 @@
 ## Prior iteration state
 
-Before proposing or starting any Direction in this Episode, call `list-directions` and review every
-visible Direction summary. Load the strongest candidates when their full plan, evidence links, or
-latest analysis affects the choice. Compare expected performance impact, supporting evidence,
+Before proposing or starting any Direction in this Episode, call `list-directions` to obtain the
+compact catalog, then call `load-direction` for every visible Direction before choosing. Compare
+expected performance impact, supporting evidence,
 implementation cost, unresolved uncertainty, and whether a valuable redesign was previously deferred.
 Choose the single most important Direction rather than the easiest local edit, reuse its ID when the
 hypothesis is unchanged, and explain the comparison in the `start` event's `analysis`. If no existing
@@ -25,9 +25,9 @@ Use this as a working guide when useful, not as additional mandatory stages:
 3. **Research the question.** Use available references, Profile, or an explicitly enabled knowledge
    tool to resolve a specific uncertainty that informs the next change. Do not call disabled Wiki
    or research/profile without a concrete purpose. If research reveals a distinct promising idea,
-   refresh `list-directions` before proposing it, compare every visible hypothesis, and load likely
-   matches. Reuse an existing Direction for the same hypothesis and record implementation variants as
-   Experiments. Otherwise propose the new Direction immediately so it is not lost, but leave it
+   refresh `list-directions` before proposing it, load likely name/scope matches, and compare their
+   hypotheses. Reuse an existing Direction for the same hypothesis and record implementation
+   variants as Experiments. Otherwise propose the new Direction immediately so it is not lost, but leave it
    `proposed`; do not interrupt the current `in_progress` Direction merely to start the new idea.
 4. **Implement and validate.** Work on one coherent candidate at a time. Use Gateway Evaluate for
    correctness and performance, reusing a matching saved result instead of repeating the measurement.

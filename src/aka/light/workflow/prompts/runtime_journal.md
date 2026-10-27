@@ -1,16 +1,16 @@
 ## Runtime Journal and handoff
 
-At the beginning of each Episode, call `list-directions` before proposing or starting work. Review
-every visible summary, load the strongest candidates as needed, choose the most important Direction,
+At the beginning of each Episode, call `list-directions` before proposing or starting work, then
+call `load-direction` for every visible Direction. Choose the most important Direction,
 and explain why it outranks the alternatives in the `start` event's `analysis`. Do not select a local
 change merely because it is easier than a higher-value redesign. Use `update-direction` before
 exploring the selected Direction. Advance at most three Directions per Episode, with only one
 `in_progress` at a time; additional proposals may remain for later. Put plans in
 `plan`, `success_criteria`, and `stop_conditions`, and classify `change_scope` as `local` or
 `major_redesign`. A major redesign should begin with a bounded, reversible probe while preserving
-the current best. When work reveals a distinct new idea, refresh `list-directions` and compare all
-visible hypotheses before proposing it. Reuse the existing ID for the same hypothesis and use an
-Experiment for implementation variants. A genuinely new idea may be proposed immediately without
+the current best. When work reveals a distinct new idea, refresh `list-directions`, load likely
+name/scope matches, and compare their hypotheses before proposing it. Reuse the existing ID for the
+same hypothesis and use an Experiment for implementation variants. A genuinely new idea may be proposed immediately without
 closing or interrupting the active Direction; leave it `proposed` until deliberately selected later.
 Use `record-experiment` after decisive results. State a concrete falsifiable prediction in the
 Experiment's `hypothesis`, cite Gateway Record IDs, describe the actual `change`, and provide only

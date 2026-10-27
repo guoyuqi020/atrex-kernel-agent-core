@@ -14,16 +14,16 @@ New Long Horizon Episodes use Runtime Journal. Do not call legacy append/finaliz
 or write control handoffs. Leave the selected measured source in `kernel.py`; the Supervisor
 creates the commit and decides acceptance independently.
 
-1. At the beginning of each Episode, call `list-directions` and review every visible summary. Load
-   the strongest candidates as needed, choose the most important Direction, and explain the comparison
-   in the `start` event's `analysis`. Reuse an existing Direction when its hypothesis is unchanged;
+1. At the beginning of each Episode, call `list-directions` for the compact catalog, then call
+   `load-direction` for every visible Direction. Choose the most important Direction and explain the
+   comparison in the `start` event's `analysis`. Reuse an existing Direction when its hypothesis is unchanged;
    propose a new one only when no visible Direction represents the intended work.
 2. Record decisive Experiments promptly. Use `hypothesis` for this change's concrete, falsifiable
    prediction; provide the actual `change`, `gateway_record_ids`, your `analysis`, and the resulting
    action. The cited Gateway Records are the measurement facts; use `record-read` when needed rather
    than copying their results into the Experiment.
-3. If work reveals a distinct promising idea, refresh `list-directions`, compare all visible
-   hypotheses, and load likely duplicates. Reuse an existing Direction for the same hypothesis and
+3. If work reveals a distinct promising idea, refresh `list-directions`, load likely name/scope
+   matches, and compare their hypotheses. Reuse an existing Direction for the same hypothesis and
    record implementation variants as Experiments. Otherwise propose the new Direction immediately,
    but leave it proposed while the current Direction remains active.
 4. Close the Direction with an explicit hypothesis assessment and supporting Experiment IDs.

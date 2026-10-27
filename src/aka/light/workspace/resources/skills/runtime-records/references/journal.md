@@ -13,8 +13,8 @@ shorten text or lists and retry; the client sends no request on a size rejection
 ## Propose a Direction
 
 At the beginning of every Episode, invoke `list-directions` before proposing or starting a Direction.
-Review every returned summary and load the strongest candidates when their full details affect the
-choice. Rank them by expected performance impact, evidence, implementation cost, unresolved
+It returns only IDs, names, scopes, and statuses. Load every visible Direction before choosing, then
+rank them by expected performance impact, evidence, implementation cost, unresolved
 uncertainty, and unfinished high-value work. Choose the most important Direction rather than the
 easiest change, and put the comparative selection rationale in the subsequent `start` event's
 `analysis`. If an unchanged hypothesis already exists, reuse its Direction ID.
@@ -52,8 +52,8 @@ and `rationale` are non-empty strings;
 `plan`, `success_criteria`, and `stop_conditions` are lists of non-empty strings. A proposal records
 the idea but does not start it or consume one of the Episode's three start slots. During research,
 record a genuinely distinct promising idea immediately as a proposal so it survives the Session,
-without interrupting the active Direction. Before every proposal, refresh `list-directions`, compare
-all visible hypotheses, and load likely matches. Reuse an existing Direction ID for the same
+without interrupting the active Direction. Before every proposal, refresh `list-directions`, load
+likely name/scope matches, and compare their hypotheses. Reuse an existing Direction ID for the same
 hypothesis; a different implementation of that hypothesis belongs in an Experiment. Propose any
 number of useful, nonduplicate Directions.
 
@@ -315,9 +315,9 @@ Each command returns an acknowledgement, not the index itself:
 
 Read the named local file. It contains `{"directions":[...]}` or `{"experiments":[...]}` across the
 current and visible earlier Episodes, not just this Episode. A Direction index entry has
-`direction_id`, `name`, `change_scope`, `hypothesis`, latest `analysis`, `status`,
-`hypothesis_status`, and any declared ancestry. Historical Directions recorded before this field read
-as `unspecified`. An Experiment index entry has
+only `direction_id`, `name`, `change_scope`, and `status`. Historical Directions recorded before
+`change_scope` read as `unspecified`. Use `load-direction` for the hypothesis, rationale, plan,
+latest analysis, assessment, experiment associations, and ancestry. An Experiment index entry has
 `experiment_id`, `direction_id`, `name`, `hypothesis`, `change`, `gateway_record_ids`, Agent-authored
 `analysis`, and `action`.
 These exports do not update automatically; invoke list again when you need a fresh snapshot.

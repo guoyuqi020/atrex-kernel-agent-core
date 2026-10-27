@@ -73,9 +73,9 @@ The Journal's private evidence reader derives full-evaluation eligibility from s
 Queries combine the current Journal with finalized earlier Runtime Journals in this Campaign, including non-winning explorations. The Supervisor builds a process-local Direction/Experiment history index on first use or restart, then ingests newly finalized Episodes once; ordinary requests read and replay only the current Episode. Each incremental ingest builds a private copy and atomically publishes the completed index, so concurrent readers keep an immutable snapshot rather than observing a partially folded Episode. A straggling older-Episode binding receives a private historical snapshot and cannot replace the newest Campaign cache. Unfinished previous Episodes, future Episodes and unrelated Campaigns are excluded. A deleted abandoned unfinished Episode disappears during the next rebuild; an existing unreadable Journal still fails closed. Stable global Direction/Experiment IDs and immutable ancestry avoid reconstructing identity from Episode-local indexes. List outputs are snapshots, not automatically refreshed files.
 
 Each Episode begins by listing all visible Directions before proposing or starting work. The list
-includes hypothesis and latest-analysis context for comparing the whole catalog. The Agent loads the
-strongest candidates when full details matter, chooses the most important Direction rather than the
-easiest local edit, and records the comparative rationale in the `start` event's `analysis`.
+is a compact catalog containing only ID, name, change scope and status. The Agent loads every visible
+Direction before choosing the most important one rather than the easiest local edit, and records the
+comparative rationale in the `start` event's `analysis`.
 
 ### Reports and old consumers
 
