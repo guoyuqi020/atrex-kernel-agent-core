@@ -57,6 +57,16 @@ measure rather than expanding the plan. Wait for each Runtime call to finish bef
 editing the measured source or starting another task; follow the waiting and recovery
 rules in `CLAUDE.md` and the relevant tool Skill.
 
+A candidate that already qualifies for nomination is a recoverable checkpoint, not by itself a
+reason to end the Episode. Preserve its exact source and measurement identity before further edits.
+While active-time budget remains, continue with a concrete, evidence-backed next step that has a
+material expected effect on the objective; restore the best measured candidate if the experiment
+fails. A follow-up is secondary only when its expected effect is immaterial, existing evidence
+already resolves it, it has no bounded falsifiable probe, or it cannot fit the remaining active-time
+budget. Do not classify a structural change as secondary merely because it is larger than the last
+successful edit. Before reporting, either execute each remaining high-value follow-up or record the
+specific evidence or budget constraint that makes it inapplicable now.
+
 {{RESEARCH_WORKFLOW}}
 
 {{WIKI_DIRECTIVE}}
