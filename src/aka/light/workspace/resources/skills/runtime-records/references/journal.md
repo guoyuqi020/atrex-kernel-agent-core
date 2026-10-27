@@ -12,6 +12,13 @@ shorten text or lists and retry; the client sends no request on a size rejection
 
 ## Propose a Direction
 
+At the beginning of every Episode, invoke `list-directions` before proposing or starting a Direction.
+Review every returned summary and load the strongest candidates when their full details affect the
+choice. Rank them by expected performance impact, evidence, implementation cost, unresolved
+uncertainty, and unfinished high-value work. Choose the most important Direction rather than the
+easiest change, and put the comparative selection rationale in the subsequent `start` event's
+`analysis`. If an unchanged hypothesis already exists, reuse its Direction ID.
+
 Save as `scratch/direction.json`:
 
 ```json
@@ -289,8 +296,9 @@ Each command returns an acknowledgement, not the index itself:
 
 Read the named local file. It contains `{"directions":[...]}` or `{"experiments":[...]}` across the
 current and visible earlier Episodes, not just this Episode. A Direction index entry has
-`direction_id`, `name`, `change_scope`, `status`, `hypothesis_status`, and any declared ancestry.
-Historical Directions recorded before this field read as `unspecified`. An Experiment index entry has
+`direction_id`, `name`, `change_scope`, `hypothesis`, latest `analysis`, `status`,
+`hypothesis_status`, and any declared ancestry. Historical Directions recorded before this field read
+as `unspecified`. An Experiment index entry has
 `experiment_id`, `name`, `hypothesis`, `change`, `gateway_record_ids`, `evidence`, `analysis`, `action`.
 These exports do not update automatically; invoke list again when you need a fresh snapshot.
 

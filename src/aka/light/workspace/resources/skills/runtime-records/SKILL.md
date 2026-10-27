@@ -14,7 +14,10 @@ New Long Horizon Episodes use Runtime Journal. Do not call legacy append/finaliz
 or write control handoffs. Leave the selected measured source in `kernel.py`; the Supervisor
 creates the commit and decides acceptance independently.
 
-1. Inspect prior evidence, propose a research Direction, then start it before exploration.
+1. At the beginning of each Episode, call `list-directions` and review every visible summary. Load
+   the strongest candidates as needed, choose the most important Direction, and explain the comparison
+   in the `start` event's `analysis`. Reuse an existing Direction when its hypothesis is unchanged;
+   propose a new one only when no visible Direction represents the intended work.
 2. Record decisive Experiments promptly, linking actual `gateway_record_ids`; separate measured
    `evidence` from your `analysis`. Measurements are automatically saved; interpretation is not.
 3. Close the Direction with an explicit hypothesis assessment and supporting Experiment IDs.

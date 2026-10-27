@@ -1,8 +1,14 @@
 ## Prior iteration state
 
-Use Journal list/load tools and optional `memory/v*.json` summaries for relevant historical
-Directions and Experiments. Treat prior analysis as interpretation, not measurement authority.
-Revisit a rejected Direction only with new evidence or a materially different implementation.
+Before proposing or starting any Direction in this Episode, call `list-directions` and review every
+visible Direction summary. Load the strongest candidates when their full plan, evidence links, or
+latest analysis affects the choice. Compare expected performance impact, supporting evidence,
+implementation cost, unresolved uncertainty, and whether a valuable redesign was previously deferred.
+Choose the single most important Direction rather than the easiest local edit, reuse its ID when the
+hypothesis is unchanged, and explain the comparison in the `start` event's `analysis`. If no existing
+Direction deserves work, propose and start a new one. Use optional `memory/v*.json` summaries as
+additional context. Treat prior analysis as interpretation, not measurement authority. Revisit a
+rejected Direction only with new evidence or a materially different implementation.
 
 ## Engineering loop
 

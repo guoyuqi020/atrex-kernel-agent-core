@@ -1068,6 +1068,8 @@ class SupervisorJournalService:
                     "direction_id": item["direction_id"],
                     "name": item["name"],
                     "change_scope": item.get("change_scope", "unspecified"),
+                    "hypothesis": item["hypothesis"],
+                    "analysis": item.get("analysis"),
                     "status": item["status"],
                     "hypothesis_status": item["hypothesis_status"],
                     **relationship_fields(item),

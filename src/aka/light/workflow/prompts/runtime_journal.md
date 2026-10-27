@@ -1,7 +1,11 @@
 ## Runtime Journal and handoff
 
-Use `update-direction` before exploring a Direction. Advance at most three Directions per Episode,
-with only one `in_progress` at a time; additional proposals may remain for later. Put plans in
+At the beginning of each Episode, call `list-directions` before proposing or starting work. Review
+every visible summary, load the strongest candidates as needed, choose the most important Direction,
+and explain why it outranks the alternatives in the `start` event's `analysis`. Do not select a local
+change merely because it is easier than a higher-value redesign. Use `update-direction` before
+exploring the selected Direction. Advance at most three Directions per Episode, with only one
+`in_progress` at a time; additional proposals may remain for later. Put plans in
 `plan`, `success_criteria`, and `stop_conditions`, and classify `change_scope` as `local` or
 `major_redesign`. A major redesign should begin with a bounded, reversible probe while preserving
 the current best. Use `record-experiment` after decisive results,
