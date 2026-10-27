@@ -8,7 +8,6 @@ Config = {"type": "object", "properties": {
     "tool_modules": {
         "type": "array",
         "items": {"type": "string", "enum": ["directions", "experiments"]},
-        "uniqueItems": True,
     },
 }, "additionalProperties": False}
 Defaults = {"tool_modules": ["directions", "experiments"]}
