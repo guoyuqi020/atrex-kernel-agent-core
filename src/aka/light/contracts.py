@@ -44,6 +44,9 @@ class Acceptance(Protocol):
 
 class JournalFactory(Protocol):
     research_records: bool
+    tool_modules: tuple[str, ...]
+    directions_enabled: bool
+    experiments_enabled: bool
 
     def initialize(self, path, *, episode, base_commit, branch, memory_version): ...
     def open(self, **options): ...

@@ -5,9 +5,13 @@ name = "journal-plugin"
 provide = ("light_journal",)
 identity_packages = ("aka.light.workflow.journal", "aka.light.workflow.journal_service")
 Config = {"type": "object", "properties": {
-    "research_records": {"type": "boolean"},
+    "tool_modules": {
+        "type": "array",
+        "items": {"type": "string", "enum": ["directions", "experiments"]},
+        "uniqueItems": True,
+    },
 }, "additionalProperties": False}
-Defaults = {"research_records": True}
+Defaults = {"tool_modules": ["directions", "experiments"]}
 
 def apply(ctx, config):
     from .journal import JournalFactory

@@ -516,9 +516,18 @@ class LongHorizonCampaign:
             )
             acceptance_request = selected_verifier.agent_instructions(**context)
         research_records = self.base_campaign.research_records
+        research_modules = set(self.base_campaign.research_modules)
+        if research_modules == {"directions", "experiments"}:
+            workflow_fragment, journal_fragment = "episode_research.md", "runtime_journal.md"
+        elif research_modules == {"directions"}:
+            workflow_fragment, journal_fragment = "episode_directions.md", "runtime_directions.md"
+        elif research_modules == {"experiments"}:
+            workflow_fragment, journal_fragment = "episode_experiments.md", "runtime_experiments.md"
+        else:
+            workflow_fragment, journal_fragment = "episode_unrecorded.md", "runtime_report.md"
         fragments = {
-            "RESEARCH_WORKFLOW": "episode_research.md" if research_records else "episode_unrecorded.md",
-            "RUNTIME_JOURNAL_CONTRACT": "runtime_journal.md" if research_records else "runtime_report.md",
+            "RESEARCH_WORKFLOW": workflow_fragment,
+            "RUNTIME_JOURNAL_CONTRACT": journal_fragment,
             "WIKI_DIRECTIVE": "episode_wiki.md" if self.base_campaign.tool_runtime.wiki else "",
             "CONVERSION_DIRECTIVE": "",
             "PPU_DIRECTIVE": "",
@@ -561,7 +570,7 @@ class LongHorizonCampaign:
                 "GOAL_DIRECTIVE": (
                     "This is a goal-oriented Episode after sustained stalls. Reassess the operator "
                     "roadmap and explore materially different approaches sequentially. "
-                    + ("Respect the Runtime's Direction limits. " if research_records else "") +
+                    + ("Respect the Runtime's Direction limits. " if "directions" in research_modules else "") +
                     "Preserve measured Kernel IDs so you can restore "
                     "the best validated candidate before reporting. Continue until the useful "
                     "roadmap is completed or exhausted; do not stop at the first failed Direction. "
@@ -573,7 +582,7 @@ class LongHorizonCampaign:
                 "ACCEPTANCE_REQUEST": acceptance_request,
                 "REPORT_SELECTION": (
                     "the selected Experiment cites a passing full Evaluate for the exact candidate."
-                    if research_records else
+                    if "experiments" in research_modules else
                     "gateway_record_ids directly cite a passing full Evaluate for the exact candidate."
                 ),
                 "OPERATOR": self.base_campaign.name,
@@ -591,7 +600,7 @@ class LongHorizonCampaign:
                     "This episode is resuming after a supervisor restart. Keep and reuse the "
                     "existing workspace, scratch files, and source "
                     "edits. Inspect them before acting; do not discard them. Use the "
-                    + ("Runtime Journal list/load tools" if research_records else "record-read and kernel-records tools") +
+                    + ("enabled Runtime Journal list/load tools" if research_records else "record-read and kernel-records tools") +
                     " to inspect durable evidence, then continue the "
                     "in-progress work or repair and resubmit its terminal report."
                     if resumed

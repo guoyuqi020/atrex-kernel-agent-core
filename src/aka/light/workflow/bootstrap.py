@@ -860,6 +860,10 @@ class Campaign:
     def research_records(self) -> bool:
         return self.tool_runtime.research_records
 
+    @property
+    def research_modules(self) -> tuple[str, ...]:
+        return self.tool_runtime.tool_modules
+
     def _link_runtime(self) -> None:
         from aka.light.workflow.store import CampaignStore
 
@@ -871,6 +875,7 @@ class Campaign:
             native_root,
             plugin_registry=self.plugin_registry,
             research_records=self.research_records,
+            research_modules=self.research_modules,
             is_ppu=hardware_vendor(self.platform, self.arch) == "ppu",
         )
         install_workspace_policy(

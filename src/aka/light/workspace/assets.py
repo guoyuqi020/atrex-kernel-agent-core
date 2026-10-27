@@ -137,7 +137,8 @@ def link_custom_skills(workspace: Path, reserved: tuple[str, ...]) -> None:
 
 
 def link_runtime(workspace: Path, atrex_bench_root: Path | None = None, *, is_ppu: bool = False,
-                 plugin_registry=None, research_records: bool = True) -> None:
+                 plugin_registry=None, research_records: bool = True,
+                 research_modules=("directions", "experiments")) -> None:
     from aka.light.agent.home import open_private_directory
     from aka.light.workspace.files import publish
 
@@ -165,6 +166,13 @@ def link_runtime(workspace: Path, atrex_bench_root: Path | None = None, *, is_pp
             if name == "runtime-records" and not research_records and filename != "references/records.md":
                 source = resource(f"skills/runtime-report/{filename}")
             publish(workspace, f"skills/{name}/{filename}", source.read_bytes())
+    modules = set(research_modules)
+    if modules == {"directions"}:
+        publish(workspace, "skills/runtime-records/SKILL.md",
+                resource("skills/runtime-records/directions-only.md").read_bytes())
+    elif modules == {"experiments"}:
+        publish(workspace, "skills/runtime-records/SKILL.md",
+                resource("skills/runtime-records/experiments-only.md").read_bytes())
     names.extend(plugin_registry.install_agent_skills(workspace))
     for backend in (".claude", ".qoder", ".agents"):
         _remove_legacy_link(workspace / backend / "agents")

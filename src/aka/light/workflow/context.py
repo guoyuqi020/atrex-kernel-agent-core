@@ -66,6 +66,7 @@ def link_episode_runtime(campaign: Campaign, workspace: Path) -> None:
         native,
         plugin_registry=campaign.plugin_registry,
         research_records=campaign.research_records,
+        research_modules=campaign.research_modules,
         is_ppu=hardware_vendor(campaign.platform, campaign.arch) == "ppu",
     )
     install_workspace_policy(

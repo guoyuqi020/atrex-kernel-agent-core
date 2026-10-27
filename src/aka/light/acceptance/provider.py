@@ -79,6 +79,7 @@ class CandidateValidation:
     ensure_live: Callable[[], None]
     supplemental: Callable[[bytes], str] | None = None
     research_records: bool = False
+    experiments_enabled: bool = False
 
 
 class RecordedAcceptance:
@@ -147,7 +148,7 @@ class RecordedAcceptance:
                     f"Inspect python3 tools/sandbox.py --kind record-read --record-id {record_id}. "
                     + ("Repair the Kernel implementation, record a passing full Evaluate and its Experiment, then resubmit "
                        "episode-report with the matching selected_experiment_id. "
-                       if context.research_records else
+                       if context.experiments_enabled else
                        "Repair the Kernel implementation, obtain a passing full Evaluate, then resubmit episode-report "
                        "with its gateway_record_ids. ") +
                     "The Supervisor runs its "

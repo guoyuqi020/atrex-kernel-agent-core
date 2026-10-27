@@ -37,6 +37,7 @@ class EpisodeSearchDriver:
                   "agent": asdict(self.campaign.agent.options),
                   "inherit_state": self.campaign.candidate_workspace.inherit_state,
                   "research_records": self.campaign.research_records,
+                  "research_modules": list(self.campaign.research_modules),
                   "wiki": self.campaign.tool_runtime.wiki,
                   "pause_agent_during_requests": (
                       self.campaign.tool_runtime.pause_agent_during_requests

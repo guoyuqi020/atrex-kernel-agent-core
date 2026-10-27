@@ -288,6 +288,8 @@ class _Handler(BaseHTTPRequestHandler):
             result = augment_error(
                 result, route=self.path, request=getattr(self, "decoded_request", None),
                 research_records=owner.journal_factory.research_records,
+                directions_enabled=owner.journal_factory.directions_enabled,
+                experiments_enabled=owner.journal_factory.experiments_enabled,
                 supervisor_git=binding.service.supervisor_git if binding else True,
                 parser=build_parser() if self.path == "/v1/gateway/execute" and status == 400 else None,
                 catalog=owner.plugins.catalog() if self.path == "/v1/plugins/execute" and status == 400 else (),
@@ -605,6 +607,7 @@ class SupervisorRuntime:
                 view = (self.workspace_provider.open_draft if self.workspace_provider else EpisodeWorkspace)(workspace, evidence / "agent",
                                         is_ppu=hardware_vendor(self.config.hardware) == "ppu",
                                         research_records=self.journal_factory.research_records,
+                                        research_modules=self.journal_factory.tool_modules,
                                         plugin_registry=self.plugins,
                                         adaptive_root=(self.audit_root or self.root) / "adaptive-state",
                                         episode=episode, history=history)
@@ -924,6 +927,7 @@ class SupervisorRuntime:
                 reuse_completed=True, reuse_correctness=correctness, candidate_source=frozen),
             read_record=self.measurements.read, ensure_live=ensure_live,
             research_records=self.journal_factory.research_records,
+            experiments_enabled=self.journal_factory.experiments_enabled,
             supplemental=(lambda frozen: validator(
                 capability.journal.service.git_workspace, frozen, parent=capability
             )) if validator else None,
@@ -947,9 +951,14 @@ class SupervisorRuntime:
             except (AgentRequestError, RuntimeStateError):
                 raise
             except ValueError as error:
+                enabled = []
+                if self.journal_factory.directions_enabled:
+                    enabled.append("list/load-direction")
+                if self.journal_factory.experiments_enabled:
+                    enabled.append("list/load-experiment")
                 evidence_hint = (
-                    "Use list/load-direction or list/load-experiment for IDs, and record-read for measurement evidence. "
-                    if self.journal_factory.research_records else
+                    ("Use " + " and ".join(enabled) + " for Journal IDs, and record-read for measurement evidence. ")
+                    if enabled else
                     "Use record-read to check gateway_record_ids; candidate_ready must cite a passing full Evaluate for the current Kernel source tree. "
                 )
                 raise AgentRequestError(str(error), next_action=(

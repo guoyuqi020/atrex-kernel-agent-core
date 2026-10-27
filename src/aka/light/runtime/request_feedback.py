@@ -33,7 +33,8 @@ def _object(properties, required):
             "additionalProperties": False}
 
 
-def journal_schema(operation, body, *, research_records=False, supervisor_git=True):
+def journal_schema(operation, body, *, research_records=False, directions_enabled=None,
+                   experiments_enabled=None, supervisor_git=True):
     """The schema describes the JSON request file, not its HTTP envelope."""
     from aka.light.workflow.journal_service import (
         DIRECTION_PROPOSAL_FIELDS,
@@ -46,8 +47,12 @@ def journal_schema(operation, body, *, research_records=False, supervisor_git=Tr
     from aka.light.workflow.direction_lifecycle import DIRECTION_STATUS, CLOSURES
     from aka.light.workflow.direction_genealogy import RELATIONSHIPS
 
-    if operation in {"direction_update", "experiment_record"} and not research_records:
-        return {"available": False, "reason": "research_records_disabled"}
+    directions_enabled = research_records if directions_enabled is None else directions_enabled
+    experiments_enabled = research_records if experiments_enabled is None else experiments_enabled
+    if operation in {"direction_update", "directions_list", "direction_load"} and not directions_enabled:
+        return {"available": False, "reason": "directions_disabled"}
+    if operation in {"experiment_record", "experiments_list", "experiment_load"} and not experiments_enabled:
+        return {"available": False, "reason": "experiments_disabled"}
     if operation == "episode_report":
         properties = {"status": {"enum": ["candidate_ready", "pivot", "blocked"]}, "summary": _text(),
                       "accepted_ppu_diagnostics": {"type": "array", "items": {"type": "object"}}}
@@ -55,9 +60,9 @@ def journal_schema(operation, body, *, research_records=False, supervisor_git=Tr
         status = body.get("status")
         status = status if isinstance(status, str) else None
         if status in {None, "candidate_ready"}:
-            field = "selected_experiment_id" if research_records else "gateway_record_ids"
+            field = "selected_experiment_id" if experiments_enabled else "gateway_record_ids"
             properties[field] = ({"type": "string", "pattern": "^experiment_[0-9a-f]{32}$"}
-                                 if research_records else _ids("gateway-", minimum=1))
+                                 if experiments_enabled else _ids("gateway-", minimum=1))
             if status == "candidate_ready":
                 required.add(field)
             if not supervisor_git:
@@ -86,17 +91,21 @@ def journal_schema(operation, body, *, research_records=False, supervisor_git=Tr
             "disposition": {"type": "string", "enum": sorted(WIKI_USAGE_DISPOSITIONS)},
         }, {"query_id", "disposition"})
         usage["anyOf"] = [{"required": ["wiki_id"]}, {"required": ["cite"]}]
-        properties = {key: _text() for key in EXPERIMENT_FIELDS}
-        properties.update(direction_id={"type": "string", "pattern": "^direction_[0-9a-f]{32}$"},
-                          gateway_record_ids=_ids("gateway-", minimum=1),
+        fields = set(EXPERIMENT_FIELDS)
+        properties = {key: _text() for key in fields}
+        if directions_enabled:
+            fields.add("direction_id")
+            properties["direction_id"] = {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"}
+        properties.update(gateway_record_ids=_ids("gateway-", minimum=1),
                           wiki_usage={"type": "array", "maxItems": 64, "items": usage},
                           wiki_query_ids={"type": "array", "maxItems": 64, "items": query_id},
                           wiki_usage_status={"type": "string", "enum": sorted(WIKI_USAGE_STATUSES)})
-        return _object(properties, EXPERIMENT_FIELDS)
+        return _object(properties, fields)
     if operation == "direction_update":
         action = body.get("action")
         if not isinstance(action, str) or action not in DIRECTION_STATUS:
-            return {"oneOf": [journal_schema(operation, {"action": item}, research_records=True)
+            return {"oneOf": [journal_schema(operation, {"action": item}, research_records=True,
+                                              directions_enabled=True, experiments_enabled=experiments_enabled)
                               for item in DIRECTION_STATUS]}
         fields = (DIRECTION_PROPOSAL_FIELDS if action == "propose" else
                   DIRECTION_CLOSURE_FIELDS if action in CLOSURES else DIRECTION_UPDATE_FIELDS)
@@ -116,7 +125,10 @@ def journal_schema(operation, body, *, research_records=False, supervisor_git=Tr
             properties["direction_id"] = {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"}
             if action in CLOSURES:
                 properties["hypothesis_status"] = {"enum": ["unresolved", "supported", "refuted"]}
-                properties["supporting_experiment_ids"] = _ids("experiment_", minimum=1, maximum=32)
+                if experiments_enabled:
+                    properties["supporting_experiment_ids"] = _ids("experiment_", minimum=1, maximum=32)
+                else:
+                    fields = fields - {"supporting_experiment_ids"}
         return _object(properties, fields)
     if operation in {"directions_list", "experiments_list"}:
         return {"cli_options": {"--output-path": {"type": "string", "pattern": "^scratch/.+"}},
@@ -215,9 +227,11 @@ def field_issues(body, schema):
     return issues
 
 
-def augment_error(response, *, route, request, research_records=False, supervisor_git=True, parser=None,
-                  catalog=()):
+def augment_error(response, *, route, request, research_records=False, directions_enabled=None,
+                  experiments_enabled=None, supervisor_git=True, parser=None, catalog=()):
     """Add only public format guidance; preserve authoritative recovery/classification."""
+    directions_enabled = research_records if directions_enabled is None else directions_enabled
+    experiments_enabled = research_records if experiments_enabled is None else experiments_enabled
     result = deepcopy(response)
     request = request if isinstance(request, dict) else {}
     error = result.get("error")
@@ -233,7 +247,10 @@ def augment_error(response, *, route, request, research_records=False, superviso
             operation = ""
         body = request.get("request")
         body = body if isinstance(body, dict) else {}
-        schema = journal_schema(operation, body, research_records=research_records, supervisor_git=supervisor_git)
+        schema = journal_schema(operation, body, research_records=research_records,
+                                directions_enabled=directions_enabled,
+                                experiments_enabled=experiments_enabled,
+                                supervisor_git=supervisor_git)
         if schema is not None:
             result["request_schema"] = schema
             issues = field_issues(body, schema)
@@ -243,15 +260,20 @@ def augment_error(response, *, route, request, research_records=False, superviso
                 specific = [item for item in result.get("issues", []) if item.get("path") != "$"]
                 result["issues"] = (specific + [item for item in issues if item not in specific])[:32]
         else:
-            result["supported_operations"] = [op for op in JOURNAL_TOOLS if research_records or op not in
-                                               {"direction_update", "experiment_record"}]
+            result["supported_operations"] = [
+                op for op in JOURNAL_TOOLS
+                if (op not in {"direction_update", "directions_list", "direction_load"} or directions_enabled)
+                and (op not in {"experiment_record", "experiments_list", "experiment_load"} or experiments_enabled)
+            ]
         if operation in JOURNAL_TOOLS:
             result["operation"] = JOURNAL_TOOLS[operation]
         if operation == "episode_report":
             instruction = (
                 "Correct the report fields or cited evidence and resubmit episode-report. "
                 "A validation rejection does not complete the Episode. " +
-                ("Select the current Episode's Experiment and close active Directions." if research_records else
+                ("Select the current Episode's Experiment and close active Directions." if experiments_enabled and directions_enabled else
+                 "Select the current Episode's Experiment." if experiments_enabled else
+                 "Close active Directions and cite gateway_record_ids directly." if directions_enabled else
                  "Do not create Direction/Experiment records. candidate_ready cites gateway_record_ids, "
                  "including a passing standard full Evaluate for the byte-identical Kernel source tree."))
             from aka.light.runtime.request_errors import REPAIR_REQUEST

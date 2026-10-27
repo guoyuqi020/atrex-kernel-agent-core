@@ -62,7 +62,7 @@ def bounded_tree_entries(root: Path):
 
 class EpisodeWorkspace:
     def __init__(self, worktree: Path, directory: Path, *, is_ppu: bool = False,
-                 research_records: bool = True, plugin_registry=None,
+                 research_records: bool = True, research_modules=("directions", "experiments"), plugin_registry=None,
                  inherit_state: bool = True, adaptive_root: Path | None = None,
                  episode: int | None = None, history=None):
         if plugin_registry is None:
@@ -73,6 +73,7 @@ class EpisodeWorkspace:
         self.state_path = directory / "state.json"
         self.is_ppu = is_ppu
         self.research_records = research_records
+        self.research_modules = tuple(research_modules)
         self.plugin_registry = plugin_registry
         self.inherit_state = inherit_state
         self.history = history
@@ -87,6 +88,8 @@ class EpisodeWorkspace:
         state = {} if fresh else json.loads(_read(self.state_path))
         if not fresh and state.get("research_records", True) != self.research_records:
             raise ValueError("Cannot change research_records for an existing Episode draft")
+        if not fresh and tuple(state.get("research_modules", ("directions", "experiments"))) != self.research_modules:
+            raise ValueError("Cannot change research_modules for an existing Episode draft")
         if "inherit_state" in state and state["inherit_state"] != self.inherit_state:
             raise ValueError("Cannot change inherit_state while resuming an existing Episode")
         with open_private_directory(self.root):
@@ -155,6 +158,7 @@ class EpisodeWorkspace:
         self.prepare_session()
         durable_write_json(self.state_path, dict(state, kernel_digest=digest,
                                                research_records=self.research_records,
+                                               research_modules=list(self.research_modules),
                                                inherit_state=self.inherit_state,
                                                runtime_plugins=plugin_snapshot))
         return self.root
@@ -165,6 +169,7 @@ class EpisodeWorkspace:
         from aka.light.workspace.files import publish
         from aka.light.workspace.adaptive import ensure_readmes
         link_runtime(self.root, is_ppu=self.is_ppu, research_records=self.research_records,
+                     research_modules=self.research_modules,
                      plugin_registry=self.plugin_registry)
         ensure_readmes(self.root)
         link_custom_skills(self.root, self.reserved_paths)

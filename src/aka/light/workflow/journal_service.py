@@ -60,13 +60,32 @@ DIRECTION_CLOSURE_FIELDS = DIRECTION_UPDATE_FIELDS | {"hypothesis_status", "supp
 _HYPOTHESIS_STATUSES = {"unresolved", "supported", "refuted"}
 _EVIDENCE_KINDS = {"run", "same_allocation_abba", "profile", "dev", "check", "disassemble"}
 EXPERIMENT_FIELDS = {
-    "direction_id",
     "name",
     "hypothesis",
     "change",
     "gateway_record_ids",
     "analysis",
 }
+JOURNAL_MODULES = frozenset({"directions", "experiments"})
+
+
+def _tool_modules(journal: Mapping[str, object]) -> tuple[str, ...]:
+    """Return the immutable per-Episode Journal module selection."""
+    raw = journal.get("tool_modules")
+    if raw is None:
+        return ("directions", "experiments") if journal.get("research_records", True) else ()
+    if (
+        not isinstance(raw, list)
+        or any(not isinstance(item, str) for item in raw)
+        or len(set(raw)) != len(raw)
+        or set(raw) - JOURNAL_MODULES
+    ):
+        raise RuntimeStateError("The Supervisor-owned Journal module policy is invalid.")
+    return tuple(raw)
+
+
+def _module_enabled(journal: Mapping[str, object], module: str) -> bool:
+    return module in _tool_modules(journal)
 
 
 class _HistoryIndex:
@@ -176,15 +195,17 @@ def initialize_journal(
     base_commit: str,
     branch: str,
     memory_version: int | None = None,
-    research_records: bool = True,
+    tool_modules: tuple[str, ...] | list[str] = ("directions", "experiments"),
 ) -> dict[str, Any]:
     """Create one private Runtime-managed Episode Journal."""
-    if type(research_records) is not bool:
-        raise ValueError("research_records must be a boolean")
+    modules = tuple(tool_modules)
+    if len(set(modules)) != len(modules) or set(modules) - JOURNAL_MODULES:
+        raise ValueError("tool_modules may contain only unique directions and experiments")
     value: dict[str, Any] = {
         "schema_version": 2,
         "runtime_managed": True,
-        "research_records": research_records,
+        "research_records": bool(modules),
+        "tool_modules": list(modules),
         "episode": episode,
         "memory_version": memory_version,
         "base_commit": base_commit,
@@ -218,7 +239,14 @@ def load_journal(path: Path) -> dict[str, Any]:
         raise RuntimeStateError("The Supervisor-owned Journal collections are invalid.")
     if type(value.get("research_records", True)) is not bool:
         raise RuntimeStateError("The Supervisor-owned Journal research policy is invalid.")
-    if value.get("research_records") is False and (value["direction_events"] or value["experiments"]):
+    modules = _tool_modules(value)
+    if bool(modules) != value.get("research_records", True):
+        raise RuntimeStateError("The Supervisor-owned Journal research policy disagrees with tool_modules.")
+    if "directions" not in modules and value["direction_events"]:
+        raise RuntimeStateError("Direction-disabled Journal contains unexpected Direction records.")
+    if "experiments" not in modules and value["experiments"]:
+        raise RuntimeStateError("Experiment-disabled Journal contains unexpected Experiment records.")
+    if not modules and (value["direction_events"] or value["experiments"]):
         raise RuntimeStateError("Research-disabled Journal contains unexpected research records.")
     return value
 
@@ -479,17 +507,16 @@ def _save_journal(path: Path, campaign_root: Path, journal: dict[str, Any]) -> N
     private_write(path, journal)
 
 
-def _mutable_journal(path: Path) -> dict[str, Any]:
+def _mutable_journal(path: Path, module: str | None = None) -> dict[str, Any]:
     journal = load_journal(path)
-    if journal.get("research_records") is False:
+    if module is not None and not _module_enabled(journal, module):
+        label = "Direction" if module == "directions" else "Experiment"
         raise AgentRequestError(
-            "Direction and research Experiment recording is disabled for this Episode",
-            code="research_records_disabled",
+            f"{label} recording is disabled for this Episode",
+            code=f"{module}_disabled",
             next_action=(
-                "Do not submit update-direction or record-experiment. Continue optimizing and "
-                "use saved Gateway Records. Submit episode-report with status and summary; for "
-                "candidate_ready include gateway_record_ids citing a passing full Evaluate for "
-                "the exact Kernel source tree. See skills/runtime-records/references/journal.md."
+                f"Do not use {label} Journal tools in this Episode. Continue with the enabled "
+                "modules and saved Gateway Records, then follow the current episode-report schema."
             ),
         )
     if journal.get("state") != "in_progress":
@@ -505,7 +532,7 @@ def _mutable_journal(path: Path) -> dict[str, Any]:
 
 
 def _append_event(path: Path, campaign_root: Path, event: dict[str, Any]) -> None:
-    journal = _mutable_journal(path)
+    journal = _mutable_journal(path, "directions")
     events = journal["direction_events"]
     events.append(event)
     _save_journal(path, campaign_root, journal)
@@ -514,7 +541,8 @@ def _append_event(path: Path, campaign_root: Path, event: dict[str, Any]) -> Non
 def update_direction(
     path: Path, campaign_root: Path, request: Mapping[str, object]
 ) -> dict[str, object]:
-    _mutable_journal(path)
+    current = _mutable_journal(path, "directions")
+    experiments_enabled = _module_enabled(current, "experiments")
     value = dict(request)
     action = value.get("action")
     history = _visible_history(path, campaign_root)
@@ -573,15 +601,18 @@ def update_direction(
             raise ValueError(
                 "Direction action must be propose, start, complete, abandon, block, or defer"
             )
+        fields = (DIRECTION_CLOSURE_FIELDS if experiments_enabled else
+                  DIRECTION_CLOSURE_FIELDS - {"supporting_experiment_ids"})
         require_fields(
             value,
-            DIRECTION_CLOSURE_FIELDS if action in _CLOSURES else DIRECTION_UPDATE_FIELDS,
+            fields if action in _CLOSURES else DIRECTION_UPDATE_FIELDS,
             label=f"Direction {action}",
         )
         direction_id = _text(value["direction_id"], "Direction ID")
         advance_direction(statuses, started, direction_id, action)
         supporting = (
-            _closure_support(path, campaign_root, direction_id, value, history=history)
+            _closure_support(path, campaign_root, direction_id, value, history=history,
+                             experiments_enabled=experiments_enabled)
             if action in _CLOSURES
             else []
         )
@@ -684,7 +715,7 @@ def selected_evaluation(path: Path, journals_root: Path, source: bytes) -> dict[
     digest = "sha256:" + hashlib.sha256(source).hexdigest()
     if current.get("state") != "candidate_ready" or current.get("candidate_kernel_digest") != digest:
         raise ValueError("Selected report does not match the acceptance Kernel")
-    if current.get("research_records") is False:
+    if not _module_enabled(current, "experiments"):
         record_ids = _validate_record_ids(journals_root, current["outcome"].get("gateway_record_ids"),
                                           label="Episode Report")
     else:
@@ -764,11 +795,15 @@ def _completed_record(record: Mapping[str, Any]) -> bool:
 
 def _closure_support(
     path: Path, campaign_root: Path, direction_id: str, value: Mapping[str, object],
-    *, history: _VisibleHistory | None = None,
+    *, history: _VisibleHistory | None = None, experiments_enabled: bool = True,
 ) -> list[str]:
     assessment = value.get("hypothesis_status")
     if not isinstance(assessment, str) or assessment not in _HYPOTHESIS_STATUSES:
         raise ValueError("hypothesis_status must be unresolved, supported, or refuted")
+    if not experiments_enabled:
+        if value.get("supporting_experiment_ids") not in (None, []):
+            raise ValueError("Experiment recording is disabled; omit supporting_experiment_ids")
+        return []
     selected = _text_list(value.get("supporting_experiment_ids"), "supporting_experiment_ids")
     if not 1 <= len(selected) <= 32 or len(set(selected)) != len(selected):
         raise AgentRequestError(
@@ -820,28 +855,35 @@ def record_experiment(
     request: Mapping[str, object],
 ) -> dict[str, object]:
     value = dict(request)
-    current = _mutable_journal(path)
+    current = _mutable_journal(path, "experiments")
+    directions_enabled = _module_enabled(current, "directions")
+    required = set(EXPERIMENT_FIELDS)
+    if directions_enabled:
+        required.add("direction_id")
     require_fields(
         value,
-        EXPERIMENT_FIELDS,
-        optional={"wiki_usage", "wiki_query_ids", "wiki_usage_status"},
+        required,
+        optional={"direction_id", "wiki_usage", "wiki_query_ids", "wiki_usage_status"} - required,
         label="Experiment",
     )
-    direction_id = _text(value["direction_id"], "Experiment Direction ID")
-    if DIRECTION_ID_RE.fullmatch(direction_id) is None:
-        raise ValueError("Experiment Direction ID has an invalid format")
-    direction = _direction_views(path, campaign_root).get(direction_id)
-    if direction is None:
-        raise ValueError("Experiment Direction is outside visible history")
-    if direction["status"] not in {"in_progress", *_CLOSED_STATUSES}:
-        raise ValueError(
-            "Experiment Direction must be in progress or closed; start a proposed Direction "
-            "before recording evidence. Late evidence does not reopen exploration"
-        )
+    direction_id = None
+    if directions_enabled:
+        direction_id = _text(value["direction_id"], "Experiment Direction ID")
+        if DIRECTION_ID_RE.fullmatch(direction_id) is None:
+            raise ValueError("Experiment Direction ID has an invalid format")
+        direction = _direction_views(path, campaign_root).get(direction_id)
+        if direction is None:
+            raise ValueError("Experiment Direction is outside visible history")
+        if direction["status"] not in {"in_progress", *_CLOSED_STATUSES}:
+            raise ValueError(
+                "Experiment Direction must be in progress or closed; start a proposed Direction "
+                "before recording evidence. Late evidence does not reopen exploration"
+            )
+    elif "direction_id" in value:
+        raise ValueError("Direction recording is disabled; omit direction_id from Experiment")
     record_ids = _validate_record_ids(campaign_root, value["gateway_record_ids"])
     experiment = {
         "experiment_id": f"experiment_{uuid.uuid4().hex}",
-        "direction_id": direction_id,
         "sequence": len(current["experiments"]) + 1,
         "recorded_at": _now(),
         "name": _text(value["name"], "Experiment name"),
@@ -850,6 +892,8 @@ def record_experiment(
         "gateway_record_ids": record_ids,
         "analysis": _text(value["analysis"], "Experiment analysis"),
     }
+    if direction_id is not None:
+        experiment["direction_id"] = direction_id
     if any(key in value for key in ("wiki_usage", "wiki_query_ids", "wiki_usage_status")):
         from aka.light.workflow.journal_projection import normalize_wiki_attribution
 
@@ -933,13 +977,21 @@ def validate_report_evidence(
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]], bytes | None]:
     """Read-only preflight shared by HTTP submission and Supervisor terminal rechecks."""
     current = load_journal(path)
-    if current.get("research_records") is False:
+    directions_enabled = _module_enabled(current, "directions")
+    experiments_enabled = _module_enabled(current, "experiments")
+    if not experiments_enabled:
         if selected_id is not None:
             raise ValueError("Research recording is disabled; cite gateway_record_ids instead of selected_experiment_id")
         if status != "candidate_ready":
             if gateway_record_ids is not None:
                 raise ValueError(f"{status} cannot include gateway_record_ids")
-            return current, {}, None
+            directions = (_direction_views(path, campaign_root) if directions_enabled else {})
+            if directions_enabled:
+                in_progress = [item["direction_id"] for item in directions.values()
+                               if item["status"] == "in_progress"]
+                if in_progress:
+                    raise ValueError("Episode Report cannot leave a Direction in progress: " + ", ".join(in_progress))
+            return current, dict(directions), None
         records = _validate_record_ids(campaign_root, gateway_record_ids, label="Episode Report")
         from aka.light.workspace.sources import snapshot as source_snapshot
         source = source_snapshot(workspace, policy=source_policy)
@@ -954,12 +1006,19 @@ def validate_report_evidence(
                            "instruction": "Check the result and its Kernel binding before correcting the report."}
                           for record_id in records[:8]],
             )
-        return current, {}, source
+        directions = (_direction_views(path, campaign_root) if directions_enabled else {})
+        if directions_enabled:
+            in_progress = [item["direction_id"] for item in directions.values()
+                           if item["status"] == "in_progress"]
+            if in_progress:
+                raise ValueError("Episode Report cannot leave a Direction in progress: " + ", ".join(in_progress))
+        return current, dict(directions), source
     if gateway_record_ids is not None:
         raise ValueError("Research recording is enabled; select an Experiment with selected_experiment_id")
     history = _visible_history(path, campaign_root)
     current = history.current
-    directions = _direction_views(path, campaign_root, history=history)
+    directions = (_direction_views(path, campaign_root, history=history)
+                  if directions_enabled else {})
     in_progress = [
         item["direction_id"] for item in directions.values() if item["status"] == "in_progress"
     ]
@@ -969,9 +1028,10 @@ def validate_report_evidence(
             "evidence as an Experiment, then close with hypothesis_status and "
             "supporting_experiment_ids: " + ", ".join(in_progress)
         )
-    for event in current["direction_events"]:
+    for event in current["direction_events"] if directions_enabled else ():
         if event.get("hypothesis_status") is not None:
-            _closure_support(path, campaign_root, event["direction_id"], event, history=history)
+            _closure_support(path, campaign_root, event["direction_id"], event, history=history,
+                             experiments_enabled=experiments_enabled)
     if status != "candidate_ready":
         if selected_id is not None and selected_id != "":
             raise ValueError(f"{status} cannot include selected_experiment_id")
@@ -988,11 +1048,12 @@ def validate_report_evidence(
             "selected_experiment_id must identify exactly one Experiment in the current Episode"
         )
     selected = matches[0]
-    direction_id = selected.get("direction_id")
-    if not isinstance(direction_id, str) or direction_id not in directions:
-        raise ValueError("selected Experiment Direction is outside visible history")
-    if directions[direction_id]["status"] not in _CLOSED_STATUSES:
-        raise ValueError("selected Experiment Direction must have been started and closed")
+    if directions_enabled:
+        direction_id = selected.get("direction_id")
+        if not isinstance(direction_id, str) or direction_id not in directions:
+            raise ValueError("selected Experiment Direction is outside visible history")
+        if directions[direction_id]["status"] not in _CLOSED_STATUSES:
+            raise ValueError("selected Experiment Direction must have been started and closed")
     records = _validate_record_ids(campaign_root, selected.get("gateway_record_ids"))
     from aka.light.workspace.sources import snapshot as source_snapshot
     kernel_source = source_snapshot(workspace, policy=source_policy)
@@ -1048,6 +1109,16 @@ class SupervisorJournalService:
         }
         if operation not in fields:
             raise ValueError(f"unsupported Journal operation: {operation}")
+        journal = load_journal(self.path)
+        module = ("directions" if operation in {"direction_update", "directions_list", "direction_load"}
+                  else "experiments" if operation in {"experiment_record", "experiments_list", "experiment_load"}
+                  else None)
+        if module is not None and not _module_enabled(journal, module):
+            raise AgentRequestError(
+                f"{module.capitalize()} tools are disabled for this Episode",
+                code=f"{module}_disabled",
+                next_action="Use only the enabled Runtime tools and follow the current episode-report schema.",
+            )
         require_fields(dict(request), {"operation", fields[operation]}, label="Journal operation")
         if operation in {"direction_update", "experiment_record", "episode_report"}:
             self._check_legacy_journal()
@@ -1084,17 +1155,12 @@ class SupervisorJournalService:
                 raise ValueError("experiment_record requires a request object")
             return record_experiment(self.path, self.campaign_root, body)
         if operation == "experiments_list":
-            experiments = [
-                {
-                    key: item[key]
-                    for key in (
-                        "experiment_id",
-                        "direction_id",
-                        "name",
-                    )
-                }
-                for item in _visible_experiments(self.path, self.campaign_root)
-            ]
+            experiments = []
+            for item in _visible_experiments(self.path, self.campaign_root):
+                row = {key: item[key] for key in ("experiment_id", "name")}
+                if "direction_id" in item:
+                    row["direction_id"] = item["direction_id"]
+                experiments.append(row)
             return _write_index(self.workspace, request.get("file"), {"experiments": experiments})
         if operation == "experiment_load":
             experiment_id = _text(request.get("experiment_id"), "Experiment ID")
@@ -1263,7 +1329,7 @@ class SupervisorJournalService:
         validate_candidate: Callable[[bytes], dict[str, Any]] | None = None,
     ) -> dict[str, object]:
         persisted = load_journal(self.path)
-        research_records = persisted.get("research_records", True)
+        experiments_enabled = _module_enabled(persisted, "experiments")
         allowed = {
             "status",
             "summary",
@@ -1274,7 +1340,7 @@ class SupervisorJournalService:
         }
         if self.supervisor_git:
             allowed.remove("candidate_commit")
-        if not research_records:
+        if not experiments_enabled:
             allowed.remove("selected_experiment_id")
             allowed.add("gateway_record_ids")
         require_fields(dict(raw), {"status", "summary"}, optional=allowed, label="Episode Report")
@@ -1376,7 +1442,7 @@ class SupervisorJournalService:
             "selected_experiment_id": selected_id if status == "candidate_ready" else None,
             "blocker": str(blocker).strip() if status == "blocked" else None,
         }
-        if not research_records:
+        if not experiments_enabled:
             current["outcome"]["gateway_record_ids"] = (
                 _text_list(raw["gateway_record_ids"], "Episode Report gateway_record_ids")
                 if status == "candidate_ready" else []

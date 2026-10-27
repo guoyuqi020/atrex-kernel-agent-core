@@ -392,7 +392,12 @@ def supplemental_feedback(campaign, workspace, *, state_root, standard_correctne
     validation_digest = _digest(validation_files)
     cache = getattr(campaign, "_supplemental_results", {})
     research_records = campaign.research_records
-    key = (str(state_root), validation_digest, standard_correctness_passed, flow, research_records)
+    research_modules = tuple(getattr(
+        campaign, "research_modules", ("directions", "experiments") if research_records else ()
+    ))
+    experiments_enabled = "experiments" in research_modules
+    key = (str(state_root), validation_digest, standard_correctness_passed, flow,
+           research_modules)
     if key in cache:
         return cache[key]
 
@@ -533,7 +538,7 @@ def supplemental_feedback(campaign, workspace, *, state_root, standard_correctne
                 "Repair the editable Kernel implementation, rerun the bounded V1 smoke command, then stop. "
                 "Do not submit episode-report. "
             )
-        elif research_records:
+        elif experiments_enabled:
             next_step = "Repair the candidate within its editable source scope, measure it, record its Experiment and resubmit episode-report. "
         else:
             next_step = (
