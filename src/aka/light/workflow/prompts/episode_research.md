@@ -33,9 +33,10 @@ Use this as a working guide when useful, not as additional mandatory stages:
    correctness and performance, reusing a matching saved result instead of repeating the measurement.
 5. **Record and decide.** Record each decisive result as an Experiment. Its `hypothesis` is the
    concrete, falsifiable prediction for this change, not a repetition of the Direction's broader
-   hypothesis. Supply the actual `change`, Gateway Record IDs, `analysis`, and decision; the Runtime
-   derives `evidence` from those immutable measurement records. Use the evidence to continue, repair,
-   restore a measured Kernel, or change Direction.
+   hypothesis. Supply the actual `change`, Gateway Record IDs, `analysis`, and decision. The cited
+   Gateway Records are the measurement facts; use `record-read` when you need their results instead
+   of copying measurement values into the Experiment. Use those facts to continue, repair, restore a
+   measured Kernel, or change Direction.
    Prepare the report as work proceeds, but do not submit it merely because one candidate is already
    promotable. Submit an evidence-backed candidate, pivot, or blocker using the terminal contract
    below only after no remaining concrete high-value step fits the active-time budget. When deferring

@@ -127,9 +127,9 @@ Response:
 
 All shown fields are required; textual fields must be non-empty. Experiment `hypothesis` is the
 concrete, falsifiable prediction for this particular change, while the owning Direction keeps the
-broader research hypothesis. Do not submit a top-level `evidence` field: Runtime derives a bounded
-`runtime_measurement_summary/v1` from every cited Gateway Record and stores it with the Experiment.
-`analysis` remains the Agent's interpretation. Optional `wiki_usage`, `wiki_query_ids`, and
+broader research hypothesis. There is no top-level `evidence` field. The cited Gateway Records are
+the measurement source of truth; use `record-read` to inspect their saved results. `analysis` remains
+the Agent's interpretation and should not duplicate result payloads. Optional `wiki_usage`, `wiki_query_ids`, and
 `wiki_usage_status` record knowledge attribution. The `evidence` inside each `wiki_usage` row is a
 separate attribution explanation and remains Agent-authored. Invalid attribution rejects the request
 before an Experiment is recorded; correct the returned field issues and resubmit with the same Gateway
@@ -318,8 +318,8 @@ current and visible earlier Episodes, not just this Episode. A Direction index e
 `direction_id`, `name`, `change_scope`, `hypothesis`, latest `analysis`, `status`,
 `hypothesis_status`, and any declared ancestry. Historical Directions recorded before this field read
 as `unspecified`. An Experiment index entry has
-`experiment_id`, `direction_id`, `name`, `hypothesis`, `change`, `gateway_record_ids`, Runtime-generated
-`evidence`, Agent-authored `analysis`, and `action`.
+`experiment_id`, `direction_id`, `name`, `hypothesis`, `change`, `gateway_record_ids`, Agent-authored
+`analysis`, and `action`.
 These exports do not update automatically; invoke list again when you need a fresh snapshot.
 
 ```bash

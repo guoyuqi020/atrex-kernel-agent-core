@@ -42,7 +42,6 @@ MEMORY_EXPERIMENT_FIELDS = (
     "name",
     "hypothesis",
     "change",
-    "evidence",
     "result",
     "decision",
     "timestamp",
@@ -338,7 +337,7 @@ def _memory_experience(journal: dict[str, Any]) -> dict[str, Any]:
         extra = {
             key: value
             for key, value in raw.items()
-            if key not in MEMORY_EXPERIMENT_FIELDS
+            if key not in MEMORY_EXPERIMENT_FIELDS and key != "evidence"
         }
         if extra:
             compact["details"] = _memory_experiment_value(extra)

@@ -20,7 +20,8 @@ creates the commit and decides acceptance independently.
    propose a new one only when no visible Direction represents the intended work.
 2. Record decisive Experiments promptly. Use `hypothesis` for this change's concrete, falsifiable
    prediction; provide the actual `change`, `gateway_record_ids`, your `analysis`, and the resulting
-   action. Runtime derives factual `evidence` from the immutable records; do not submit that field.
+   action. The cited Gateway Records are the measurement facts; use `record-read` when needed rather
+   than copying their results into the Experiment.
 3. If work reveals a distinct promising idea, refresh `list-directions`, compare all visible
    hypotheses, and load likely duplicates. Reuse an existing Direction for the same hypothesis and
    record implementation variants as Experiments. Otherwise propose the new Direction immediately,

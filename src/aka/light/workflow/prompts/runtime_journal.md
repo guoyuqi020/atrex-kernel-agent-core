@@ -14,8 +14,9 @@ Experiment for implementation variants. A genuinely new idea may be proposed imm
 closing or interrupting the active Direction; leave it `proposed` until deliberately selected later.
 Use `record-experiment` after decisive results. State a concrete falsifiable prediction in the
 Experiment's `hypothesis`, cite Gateway Record IDs, describe the actual `change`, and provide only
-your interpretation in `analysis`; Runtime derives the factual `evidence` summary from the records.
-Reuse saved results and exact source when applicable; separate plan/profile documents are not required.
+your interpretation in `analysis`. Gateway Records are the measurement facts; call `record-read` for
+their saved results instead of copying measurement values into the Experiment. Reuse saved results
+and exact source when applicable; separate plan/profile documents are not required.
 
 Close every in-progress Direction before `episode-report`. Each closure must explicitly select
 `supporting_experiment_ids` and declare `hypothesis_status=unresolved|supported|refuted`.
