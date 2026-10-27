@@ -49,12 +49,14 @@ from aka.light.workspace.files import MAX_FILE_BYTES, publish, read_input, relat
 DIRECTION_PROPOSAL_FIELDS = {
     "action",
     "name",
+    "change_scope",
     "hypothesis",
     "rationale",
     "plan",
     "success_criteria",
     "stop_conditions",
 }
+DIRECTION_CHANGE_SCOPES = {"local", "major_redesign"}
 DIRECTION_UPDATE_FIELDS = {"action", "direction_id", "analysis"}
 DIRECTION_CLOSURE_FIELDS = DIRECTION_UPDATE_FIELDS | {"hypothesis_status", "supporting_experiment_ids"}
 _HYPOTHESIS_STATUSES = {"unresolved", "supported", "refuted"}
@@ -167,6 +169,15 @@ def _text_list(value: object, label: str) -> list[str]:
             "each at most 4000 characters"
         )
     return [item.strip() for item in value]
+
+
+def _change_scope(value: object) -> str:
+    if not isinstance(value, str) or value not in DIRECTION_CHANGE_SCOPES:
+        raise field_error(
+            "change_scope",
+            "Direction change_scope must be local or major_redesign",
+        )
+    return value
 
 
 def initialize_journal(
@@ -353,6 +364,9 @@ def _apply_direction_events(
             if action == "propose":
                 for field in ("name", "hypothesis", "rationale", "recorded_at"):
                     _text(event.get(field), f"Direction {field}")
+                scope = event.get("change_scope", "unspecified")
+                if scope != "unspecified":
+                    _change_scope(scope)
                 for field in ("plan", "success_criteria", "stop_conditions"):
                     _text_list(event.get(field), f"Direction {field}")
             _text_list(event.get("supporting_experiment_ids", []), "supporting_experiment_ids")
@@ -364,6 +378,7 @@ def _apply_direction_events(
             views[direction_id] = {
                 "direction_id": direction_id,
                 "name": event["name"],
+                "change_scope": event.get("change_scope", "unspecified"),
                 "hypothesis": event["hypothesis"],
                 "rationale": event["rationale"],
                 "plan": event["plan"],
@@ -536,6 +551,7 @@ def update_direction(
             "direction_id": direction_id,
             "action": "propose",
             "name": _text(value["name"], "Direction name"),
+            "change_scope": _change_scope(value["change_scope"]),
             "hypothesis": _text(value["hypothesis"], "Direction hypothesis"),
             "rationale": _text(value["rationale"], "Direction rationale"),
             "plan": _text_list(value["plan"], "Direction plan"),
@@ -1051,6 +1067,7 @@ class SupervisorJournalService:
                 {
                     "direction_id": item["direction_id"],
                     "name": item["name"],
+                    "change_scope": item.get("change_scope", "unspecified"),
                     "status": item["status"],
                     "hypothesis_status": item["hypothesis_status"],
                     **relationship_fields(item),
@@ -1384,4 +1401,4 @@ class SupervisorJournalService:
 
 
 __all__ = ["SupervisorJournalService", "initialize_journal", "journal_lock", "load_journal", "selected_evaluation", "sealed_candidate_source",
-           "DIRECTION_PROPOSAL_FIELDS", "DIRECTION_UPDATE_FIELDS", "DIRECTION_CLOSURE_FIELDS", "EXPERIMENT_FIELDS", "EXPERIMENT_ACTIONS"]
+           "DIRECTION_PROPOSAL_FIELDS", "DIRECTION_CHANGE_SCOPES", "DIRECTION_UPDATE_FIELDS", "DIRECTION_CLOSURE_FIELDS", "EXPERIMENT_FIELDS", "EXPERIMENT_ACTIONS"]

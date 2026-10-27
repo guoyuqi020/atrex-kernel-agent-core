@@ -41,7 +41,7 @@ flowchart TD
 
 | Object | Content | Ownership |
 | --- | --- | --- |
-| Direction | Hypothesis, rationale, plan, lifecycle, explicit assessment and ancestry | Agent proposes/interprets; Runtime validates and persists |
+| Direction | Hypothesis, rationale, local/major-redesign scope, plan, lifecycle, explicit assessment and ancestry | Agent proposes/interprets; Runtime validates and persists |
 | Experiment | Change, Gateway Record IDs, evidence narrative, analysis and action | Agent-authored interpretation; referenced measurements validated by Runtime |
 | Gateway Record | Exact request/Kernel binding and saved projected response | Existing Measurement Store |
 | Episode Report | Terminal status, summary, selected Experiment or blocker | Agent submits; Runtime validates; Supervisor independently decides acceptance |

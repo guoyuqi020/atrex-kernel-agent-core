@@ -18,6 +18,7 @@ Save as `scratch/direction.json`:
 {
   "action": "propose",
   "name": "Fuse the elementwise stages",
+  "change_scope": "major_redesign",
   "hypothesis": "One GPU launch can reduce intermediate memory traffic",
   "rationale": "The current source materializes an intermediate tensor",
   "plan": ["Implement one fused path", "Check correctness and compare with the incumbent"],
@@ -36,7 +37,11 @@ Response:
 {"status":"recorded","direction_id":"direction_11111111111111111111111111111111"}
 ```
 
-All shown fields are required. `name`, `hypothesis`, and `rationale` are non-empty strings;
+All shown fields are required. `change_scope` is `local` for a bounded modification to the current
+implementation or `major_redesign` for a structural rewrite, new kernel family, materially different
+schedule, or new decomposition. This is an Agent planning assessment, not measured evidence. Preserve
+the incumbent and put a bounded, reversible probe for a major redesign in `plan`. `name`, `hypothesis`,
+and `rationale` are non-empty strings;
 `plan`, `success_criteria`, and `stop_conditions` are lists of non-empty strings. A proposal records
 the idea but does not start it. Propose any number of useful, nonduplicate directions.
 
@@ -284,7 +289,8 @@ Each command returns an acknowledgement, not the index itself:
 
 Read the named local file. It contains `{"directions":[...]}` or `{"experiments":[...]}` across the
 current and visible earlier Episodes, not just this Episode. A Direction index entry has
-`direction_id`, `name`, `status`, `hypothesis_status`, and any declared ancestry. An Experiment index entry has
+`direction_id`, `name`, `change_scope`, `status`, `hypothesis_status`, and any declared ancestry.
+Historical Directions recorded before this field read as `unspecified`. An Experiment index entry has
 `experiment_id`, `name`, `hypothesis`, `change`, `gateway_record_ids`, `evidence`, `analysis`, `action`.
 These exports do not update automatically; invoke list again when you need a fresh snapshot.
 
@@ -294,7 +300,7 @@ python3 tools/sandbox.py --kind load-experiment --record-id experiment_222222222
 ```
 
 Load returns the record directly as JSON, not a file or `result` wrapper. A loaded Direction includes
-the proposal, current `status`/`analysis`/`hypothesis_status`, timestamps, declared ancestry,
+the proposal including `change_scope`, current `status`/`analysis`/`hypothesis_status`, timestamps, declared ancestry,
 all `associated_experiment_ids`, and explicitly selected `supporting_experiment_ids`.
 Old closures without an explicit assessment read as unresolved; their old automatic support is
 association only. Old unmeasured notes remain readable but cannot support new closures.

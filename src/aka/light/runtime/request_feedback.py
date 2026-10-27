@@ -37,6 +37,7 @@ def journal_schema(operation, body, *, research_records=False, supervisor_git=Tr
     """The schema describes the JSON request file, not its HTTP envelope."""
     from aka.light.workflow.journal_service import (
         DIRECTION_PROPOSAL_FIELDS,
+        DIRECTION_CHANGE_SCOPES,
         DIRECTION_UPDATE_FIELDS,
         DIRECTION_CLOSURE_FIELDS,
         EXPERIMENT_FIELDS,
@@ -103,6 +104,7 @@ def journal_schema(operation, body, *, research_records=False, supervisor_git=Tr
         properties = {key: _text() for key in fields}
         properties["action"] = {"const": action}
         if action == "propose":
+            properties["change_scope"] = {"enum": sorted(DIRECTION_CHANGE_SCOPES)}
             for key in ("plan", "success_criteria", "stop_conditions"):
                 properties[key] = {"type": "array", "maxItems": 64,
                                    "items": {"type": "string", "minLength": 1, "maxLength": 4000}}

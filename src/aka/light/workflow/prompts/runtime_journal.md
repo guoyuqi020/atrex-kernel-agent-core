@@ -2,7 +2,9 @@
 
 Use `update-direction` before exploring a Direction. Advance at most three Directions per Episode,
 with only one `in_progress` at a time; additional proposals may remain for later. Put plans in
-`plan`, `success_criteria`, and `stop_conditions`. Use `record-experiment` after decisive results,
+`plan`, `success_criteria`, and `stop_conditions`, and classify `change_scope` as `local` or
+`major_redesign`. A major redesign should begin with a bounded, reversible probe while preserving
+the current best. Use `record-experiment` after decisive results,
 citing Gateway Record IDs in `gateway_record_ids` and separating `evidence` from `analysis`.
 Reuse saved results and exact source when applicable; separate plan/profile documents are not required.
 
