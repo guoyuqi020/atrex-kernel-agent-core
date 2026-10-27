@@ -220,13 +220,12 @@ def has_agent_problem(op_dir: Path) -> bool:
 def should_use_generalized_problem(op_dir: Path, optimization_mode: str) -> bool:
     """Return whether an operator must expose a generalized public contract.
 
-    Private exact-case handling is a production policy, not an operator-layout side effect.
-    Production uses a supplied contract when present and otherwise generates one from
-    ``shapes.json`` before setup. Leaderboard always keeps its detailed shapes public.
+    Native Atrex-Bench campaigns use a supplied contract when present and otherwise
+    generate one from ``shapes.json`` before setup. Exact evaluator cases stay private
+    in both Leaderboard and Production modes.
     """
     return (
-        optimization_mode == "production"
-        and not is_sol_op(op_dir)
+        not is_sol_op(op_dir)
         and (op_dir / "shapes.json").is_file()
         and find_atrex_bench_root(op_dir) is not None
     )
@@ -235,7 +234,7 @@ def should_use_generalized_problem(op_dir: Path, optimization_mode: str) -> bool
 def agent_visible_operator_files(op_dir: Path, *, generalized: bool) -> tuple[str, ...]:
     """Return the allowlisted operator files copied into an optimization workspace."""
     if generalized:
-        # A production campaign may intentionally arrive here without a source problem; it
+        # A native campaign may intentionally arrive here without a source problem; it
         # generates one in its workspace before any optimization session starts.
         if has_agent_problem(op_dir):
             validate_agent_problem(

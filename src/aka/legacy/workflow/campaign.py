@@ -191,7 +191,7 @@ class Campaign:
             return
         destination = self.workspace / AGENT_PROBLEM_FILENAME
         print(
-            "[orchestrator] generalized problem: production received detailed shapes only; "
+            "[orchestrator] generalized problem: campaign received detailed shapes only; "
             "starting AKA problem-authoring session",
             flush=True,
         )
@@ -229,7 +229,7 @@ class Campaign:
                         continue
                     detail = result.stderr_tail or result.stdout_tail
                     raise RuntimeError(
-                        "AKA could not generate a valid generalized production problem after "
+                        "AKA could not generate a valid generalized problem after "
                         f"two attempts: {validation_error}"
                         + (f"; agent output: {detail}" if detail else "")
                     ) from exc
@@ -692,7 +692,7 @@ class Campaign:
             self.workspace, content, runtime_files=initial_files(self.plugin_registry))
         if code:
             raise RuntimeError(f'Task workspace initialization failed with code {code}')
-        # Production native tasks always expose a generalized public contract. Exact shapes and
+        # Native tasks always expose a generalized public contract. Exact shapes and
         # release metadata remain in the source operator directory and are injected only at the
         # sandbox boundary. A missing public contract is authored before the baseline session.
         inputs = self._problem_inputs()
@@ -1145,11 +1145,6 @@ class Campaign:
                 return "adopt", "validate the retained framework candidate"
             return "run", "resuming preserved framework-baseline work"
 
-        if self.framework_baseline == "auto" and self.optimization_mode != "production":
-            return (
-                "skip",
-                "leaderboard mode keeps the permissive V0 (use --framework-baseline always)",
-            )
         if not progressed:
             if not self.source_checks_enabled:
                 return "pin", "multi-GPU Agate source checks are disabled; retain the validated V0"

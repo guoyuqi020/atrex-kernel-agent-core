@@ -26,7 +26,9 @@
   authorize using a prebuilt operator as the candidate's computation. Production reviews judge actual
   use, not package names; compiler/header/ABI/launch plumbing for self-authored kernels is not banned
   merely because it comes from one of these packages.
-  As in Legacy, the process guard terminates a session on a confirmed local dependency-policy violation.
+  Production enables a process guard that terminates a session on a confirmed local
+  dependency-policy violation. Leaderboard disables this dependency-policy guard by default;
+  shared Gateway and tracked-workspace protections remain active in both modes.
   If required tooling is unavailable, choose supported tooling or report a blocker.
 - Shared Gateway infrastructure is Supervisor-owned. Do not start, stop, signal, reconfigure, or
   replace its services, screen/SSH sessions, state, database, logs, or jobs. Report infrastructure

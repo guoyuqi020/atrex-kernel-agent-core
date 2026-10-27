@@ -251,8 +251,8 @@ def parse_arguments(argv):
         default="auto",
         help="Run one dedicated session after V0 setup that "
         "replaces the V0 PyTorch wrapper with the first self-contained framework "
-        "kernel, recorded as v1 (so optimization episodes start at v2). Production "
-        "auto = production mode only; always = leaderboard too; "
+        "kernel, recorded as v1 (so optimization episodes start at v2). "
+        "auto and always enable the stage in either optimization mode; "
         "never = optimize directly from the V0 kernel.",
     )
     ap.add_argument(

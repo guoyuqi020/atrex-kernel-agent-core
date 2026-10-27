@@ -326,7 +326,7 @@ cleaning any listed remote workspaces.
 
 SOL and native Atrex-Bench operators run one campaign over the complete workload set. Every
 candidate is validated for full-workload correctness and compared by its full-workload geomean.
-Production makes generalized input handling a mode policy rather than an operator opt-in. A native
+Native Atrex-Bench campaigns use generalized input handling in both modes. A native
 operator's user-provided `agent_problem.json` is validated and used directly. When only detailed
 `shapes.json` exists, a dedicated clean problem-authoring session reads the evaluator inputs in an
 ephemeral directory and derives the public contract before any baseline or optimization session runs.
@@ -339,9 +339,8 @@ the ephemeral remote profile job; the complete hidden shape table never enters t
 Optimization feedback retains aggregate results plus real per-shape latency keyed by opaque shape id,
 while withholding shape inputs, per-case failure details, and raw evaluator logs. The Atrex-Bench
 runtime is copied into the workspace without linking its checkout-level `data/` tree. Sandbox private
-shape injection, opaque-shape profiling, and generalized result masking require the persisted workspace
-mode to be `production`. Leaderboard always retains legacy exact-shape exposure, regardless of whether
-the source operator also contains a public problem contract.
+shape injection, opaque-shape profiling, and generalized result masking apply in both Leaderboard and
+Production whenever the workspace contains the public problem contract.
 
 ### Production policy
 
@@ -401,7 +400,7 @@ V0 profiling, multi-seed validation, and ABBA are intentionally deferred.
 
 ### 3. Establish the framework baseline
 
-Production mode runs a dedicated framework-baseline session by default
+Both optimization modes run a dedicated framework-baseline session by default
 (`--framework-baseline=auto`). For a supervisor-seeded reference V0 it skips the redundant pre-V1
 policy review and pre-creates a minimal native `solution.json`. Before the implementation Agent starts,
 the supervisor gives the bounded public contract, immutable reference, input builder, and V0 evidence to

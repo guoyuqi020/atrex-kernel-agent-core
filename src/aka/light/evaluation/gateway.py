@@ -1043,16 +1043,12 @@ def _fp4_correctness_max_rel_l2(
 
 
 def _is_generalized_workspace(workspace: Path) -> bool:
-    """Return whether production policy enables private exact-case handling."""
-    state = read_json_object(workspace / MODE_STATE_FILENAME) or {}
-    return (
-        state.get("mode") == "production"
-        and (workspace / AGENT_PROBLEM_FILENAME).is_file()
-    )
+    """Return whether this workspace uses private exact-case handling."""
+    return (workspace / AGENT_PROBLEM_FILENAME).is_file()
 
 
 def private_reference_dir(workspace: Path, *, environment: Mapping[str, str] | None = None) -> Path | None:
-    """Resolve private evaluator inputs only for a generalized production workspace."""
+    """Resolve private evaluator inputs only for a generalized workspace."""
     if not _is_generalized_workspace(workspace):
         return None
     raw = (os.environ if environment is None else environment).get(PRIVATE_REFERENCE_ENV, "")

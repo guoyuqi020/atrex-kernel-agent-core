@@ -144,6 +144,12 @@ _atrex_guarded_python() {
     local executable="$1"
     shift
     local -a original=("$@")
+    case "${ATREX_DEPENDENCY_GUARD_ENABLED:-1}" in
+        0|false|FALSE|no|NO|off|OFF)
+            command "$executable" "${original[@]}"
+            return $?
+            ;;
+    esac
     local value code="" code_index=-1 index
     for ((index = 0; index < ${#original[@]}; index++)); do
         value="${original[index]}"

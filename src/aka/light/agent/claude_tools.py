@@ -11,12 +11,14 @@ try:
     from .dependency_policy import (
         canonical_sandbox_entrypoint,
         dependency_command_violation,
+        dependency_guard_enabled,
         protected_gateway_identity,
     )
 except ImportError:  # Executed directly by Claude's system-Python hook.
     from dependency_policy import (
         canonical_sandbox_entrypoint,
         dependency_command_violation,
+        dependency_guard_enabled,
         protected_gateway_identity,
     )
 
@@ -34,6 +36,7 @@ def preflight_dependency_violation(command):
         trusted_sandbox_entrypoints=(canonical,),
         canonical_sandbox_entrypoint=canonical,
         protected_gateway=protected_gateway_identity(),
+        enforce_dependencies=dependency_guard_enabled(),
     )
 
 

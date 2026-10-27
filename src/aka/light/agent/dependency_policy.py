@@ -11,6 +11,19 @@ import stat
 
 DEFAULT_PROTECTED_GATEWAY_SCREEN = "atrex-local-gateway"
 DEFAULT_PROTECTED_GATEWAY_STATE_NAME = "atrex-local-gateway"
+DEPENDENCY_GUARD_ENV = "ATREX_DEPENDENCY_GUARD_ENABLED"
+
+
+def dependency_guard_enabled(environment=None):
+    """Return whether dependency-policy commands must be actively blocked.
+
+    Campaigns always set this explicitly: Production enables the guard while
+    Leaderboard disables it.  Standalone callers that predate the mode flag
+    remain fail-closed so dropping the environment cannot weaken Production.
+    """
+    values = os.environ if environment is None else environment
+    value = str(values.get(DEPENDENCY_GUARD_ENV, "1")).strip().casefold()
+    return value not in {"0", "false", "no", "off"}
 
 
 def protected_gateway_identity(environment=None):
@@ -128,6 +141,7 @@ def python_import_roots(code: str, *, _depth: int = 0) -> set[str]:
 def dependency_command_violation(
     argv, *, cwd=None, trusted_sandbox_entrypoints=(),
     canonical_sandbox_entrypoint=None, protected_gateway=None,
+    enforce_dependencies=True,
 ):
     """Report confirmed policy violations for the shared dependency guard.
 
@@ -345,6 +359,12 @@ def dependency_command_violation(
 
     if any(shared_gateway_mutation(segment) for segment in segments):
         return "shared localhost gateway lifecycle/state mutation"
+
+    # Leaderboard keeps the transport and shared-service boundary but permits
+    # dependency experimentation. Production additionally enforces the local
+    # installation/build/JIT policy below.
+    if not enforce_dependencies:
+        return None
 
     if any(is_installer(segment) for segment in segments):
         return "third-party package installation/build command"

@@ -1,6 +1,6 @@
-# Derive a generalized production optimization problem
+# Derive a generalized optimization problem
 
-You are the problem-authoring stage for an AKA production GPU-kernel campaign. This is a bounded,
+You are the problem-authoring stage for an AKA GPU-kernel campaign. This is a bounded,
 non-interactive preprocessing task, not a kernel implementation task.
 
 The current temporary directory contains evaluator-owned inputs:

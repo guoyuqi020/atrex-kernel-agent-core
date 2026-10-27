@@ -80,7 +80,7 @@ python -m pip install /tmp/aka-dist/*.whl
   containing `scripts/run_eval.py` and `src/atrex_bench`. An optional `agent_problem.json` may provide
   the generalized public contract using schema `atrex.agent_problem.v1`.
 
-Production native campaigns never expose detailed shapes to baseline or optimization sessions. If
+Native campaigns never expose detailed shapes to baseline or optimization sessions. If
 `agent_problem.json` is supplied, AKA validates and copies it directly. Otherwise a separate clean AKA
 preprocessing session using the configured `--agent-cli` at maximum reasoning effort reads
 `reference.py`, `input.py`, and the evaluator-owned detailed shapes, derives the public
@@ -89,10 +89,9 @@ persists only that contract in the campaign workspace. Exact shapes and evaluato
 injected privately during sandbox evaluation. Canonical memory retains real per-shape latency under
 opaque ids; set `PROFILE_SHAPE_ID` to one of those ids to profile that real shape privately.
 
-Leaderboard mode always preserves legacy exact-shape behavior, even when the source operator also
-contains `agent_problem.json`; sandbox private-shape injection and generalized result masking are
-production-only. The orchestrator never treats operator inputs as editable candidate files. Start a
-fresh workspace when resuming an older production campaign that exposed exact shapes.
+Leaderboard and Production both use private-shape injection and generalized result masking. The
+orchestrator never treats operator inputs as editable candidate files. Start a fresh workspace when
+resuming an older campaign that exposed exact shapes.
 
 For native Atrex-Bench and SOL operators, V0 does not launch a coding Agent. The supervisor commits
 the verbatim reference wrapper, runs exactly one official full-workload base-seed evaluator, writes
@@ -249,14 +248,14 @@ verifying any deferred remote cleanup.
 1. **Resolve and isolate the campaign.** The Workflow validates the operator and explicitly selected
    resources, probes the runtime GPU architecture, and creates or resumes
    `kernel_opt_<name>_<framework>_<platform>/` below `--workspace` or the current directory.
-2. **Prepare production inputs.** Native production campaigns validate a supplied
+2. **Prepare private evaluator inputs.** Native campaigns validate a supplied
    `agent_problem.json` or derive one in a clean preprocessing session, then keep detailed evaluator
    shapes private.
 3. **Establish V0.** The supervisor commits the evaluator-owned reference wrapper, runs one official
    full-workload base-seed evaluation, and records canonical `memory/v0.json` without launching a
    coding Agent.
 4. **Establish V1 when enabled.** `--framework-baseline=auto` creates a self-contained
-   framework-native V1 in production mode. When enabled, read-only reviewers provide bounded
+   framework-native V1 in either mode. When enabled, read-only reviewers provide bounded
    correctness guidance; the coding Agent implements and smoke-tests, while the supervisor owns full
    evaluation, policy review, memory, and the final commit.
 5. **Run isolated optimization episodes.** Each episode owns one candidate direction in a private
@@ -380,7 +379,7 @@ package a non-compliant final candidate. Production runs use a separate
 `kernel_opt_<name>_<framework>_<platform>_production` workspace and cannot accidentally resume a
 leaderboard campaign.
 
-With the default `--framework-baseline=auto`, production inserts one dedicated framework bring-up
+With the default `--framework-baseline=auto`, both modes insert one dedicated framework bring-up
 session after V0. Native V1 receives a pre-seeded manifest and three latency-quantile smoke ids; the
 supervisor first runs the enabled isolated Codex and Qoder correctness reviews over the bounded public
 contract and immutable reference, concurrently when both are enabled. Reviewers nominate only from a
@@ -421,7 +420,7 @@ Rerunning the same command keeps the interrupted worktree and resumes V1 from th
                                                     Configure full ask-qoder (default: off)
 --optimization-mode MODE         leaderboard (default) or production
 --framework DSL                  Explicit DSL; omit for automatic parallel dispatch
---framework-baseline MODE        auto (production only), always, or never
+--framework-baseline MODE        auto, always, or never
 --framework-baseline-timeout S   Framework bring-up wall-clock budget (default: 28800)
 --target-util PCT                Peak-utilization short-circuit (default: 90)
 --setup-timeout S                Legacy V0/problem-authoring session timeout (default: 7200)

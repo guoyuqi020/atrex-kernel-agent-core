@@ -15,6 +15,7 @@ from aka.light.agent.recovery_processes import spawn_owned_session
 from aka.light.agent.dependency_policy import (
     canonical_sandbox_entrypoint,
     dependency_command_violation,
+    dependency_guard_enabled,
     python_import_roots,
 )
 
@@ -35,6 +36,7 @@ def register_sandbox_entrypoints(*paths: Path) -> None:
 def dependency_process_violation(
     argv: list[str], *, cwd: Path | None = None,
     trusted_sandbox_entrypoints: frozenset[Path] | None = None,
+    enforce_dependencies: bool = True,
 ) -> str | None:
     """Report a confirmed violation using the shared hook/guard policy."""
     protected = protected_gateway_identity()
@@ -48,6 +50,7 @@ def dependency_process_violation(
         ),
         canonical_sandbox_entrypoint=canonical_sandbox_entrypoint(),
         protected_gateway=protected,
+        enforce_dependencies=enforce_dependencies,
     )
 
 
@@ -111,18 +114,23 @@ def dependency_guard(
     violations: list[str],
     environment_state_file: str = "",
     environment_failures: list[str] | None = None,
+    enforce_policy: bool = True,
 ) -> None:
-    """Use Legacy's always-on guard with Light's process-aware HTTP classifier.
+    """Use Legacy's monitor with Light's mode-aware dependency classifier.
 
-    The mode and sandbox selection do not control this guard. Procfs/cwd races
-    are inconclusive; never resolve a relative client in the Supervisor's cwd.
+    The monitor always retains environment-outage recovery. Leaderboard can
+    disable dependency-policy classification without disabling that recovery.
+    Procfs/cwd races are inconclusive; never resolve a relative client in the
+    Supervisor's cwd.
     """
     def classify(pid: int, argv: list[str]) -> str | None:
         try:
             cwd = Path(f"/proc/{pid}/cwd").resolve(strict=True)
         except (OSError, RuntimeError):
             cwd = None
-        return dependency_process_violation(argv, cwd=cwd)
+        return dependency_process_violation(
+            argv, cwd=cwd, enforce_dependencies=enforce_policy
+        )
 
     legacy_process.dependency_guard(
         proc, stop, violations, environment_state_file, environment_failures,
@@ -238,11 +246,12 @@ def _run_bounded(
     environment_state_file = str(
         environment_values.get("ATREX_ENVIRONMENT_STATE_FILE", "")
     )
-    # Match Legacy: every launched Agent is guarded, independent of production
-    # mode, capture, Bubblewrap or whether an outage marker is configured.
+    # Every launched Agent retains environment-outage monitoring. Dependency
+    # policy classification is mode-selectable and defaults off in Leaderboard.
     guard = threading.Thread(
         target=dependency_guard,
-        args=(proc, guard_stop, dependency_violations, environment_state_file, environment_failures),
+        args=(proc, guard_stop, dependency_violations, environment_state_file,
+              environment_failures, dependency_guard_enabled(environment_values)),
         name=f"dependency-guard-{proc.pid}",
         daemon=True,
     )

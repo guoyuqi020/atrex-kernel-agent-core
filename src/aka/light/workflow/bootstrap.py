@@ -51,6 +51,7 @@ from aka.light.execution.recovery import (
     EnvironmentUnavailable,
     environment_state_file,
 )
+from aka.light.agent.dependency_policy import DEPENDENCY_GUARD_ENV
 from aka.light.workflow.baseline_progress import (capture_unexpected_exit as capture_framework_baseline_exit)
 from aka.light.workflow.baseline_progress import (load_progress as load_framework_baseline_progress)
 from aka.light.workflow.baseline_progress import (mark_accepted as mark_framework_baseline_accepted)
@@ -181,7 +182,7 @@ class Campaign:
         "leaderboard"  # permissive contest flow or strict production gate
     )
     framework_baseline: str = (
-        "auto"  # auto = production only; always | never override it
+        "auto"  # auto runs in both modes; always | never remain explicit overrides
     )
     framework_baseline_timeout: int = FRAMEWORK_BASELINE_TIMEOUT_S
     handoff_resumes: int = DEFAULT_HANDOFF_RESUMES
@@ -232,8 +233,7 @@ class Campaign:
         """Return evaluator-only native inputs behind a generalized public problem."""
         op_dir = Path(self.kernel_demo).resolve().parent
         use_generalized = (
-            self.optimization_mode == "production"
-            and not is_sol_op(op_dir)
+            not is_sol_op(op_dir)
             and (op_dir / "shapes.json").is_file()
         )
         if not self.atrex_bench_root or not use_generalized:
@@ -248,9 +248,9 @@ class Campaign:
         return op_dir
 
     def _ensure_agent_problem(self) -> None:
-        """Materialize the public contract before any production optimization session.
+        """Materialize the public contract before any native optimization session.
 
-        A user-authored contract is copied verbatim. When production receives only detailed
+        A user-authored contract is copied verbatim. When a campaign receives only detailed
         evaluator shapes, a dedicated clean AKA session derives the public contract in a temporary
         directory; the later baseline/optimization sessions never receive ``shapes.json``.
         """
@@ -282,15 +282,9 @@ class Campaign:
                 flush=True,
             )
             return
-        if self.optimization_mode != "production":
-            raise RuntimeError(
-                "a generalized non-production campaign requires a user-provided "
-                f"{AGENT_PROBLEM_FILENAME}"
-            )
-
         timeout = self.problem_generation_timeout
         print(
-            "[orchestrator] generalized problem: production received detailed shapes only; "
+            "[orchestrator] generalized problem: campaign received detailed shapes only; "
             f"starting AKA problem-authoring session (timeout: {timeout}s per attempt, at most 2 attempts)",
             flush=True,
         )
@@ -335,7 +329,7 @@ class Campaign:
                         continue
                     detail = result.stderr_tail or result.stdout_tail
                     raise RuntimeError(
-                        "AKA could not generate a valid generalized production problem after "
+                        "AKA could not generate a valid generalized problem after "
                         f"two attempts: {validation_error}"
                         + (f"; agent output: {detail}" if detail else "")
                     ) from exc
@@ -508,7 +502,13 @@ class Campaign:
 
     def agent_environment(self) -> dict[str, str]:
         private_dir = self.private_reference_dir
-        environment = {}
+        environment = {
+            # Leaderboard is intentionally permissive. Production retains both
+            # the Claude preflight hook and live descendant-process enforcement.
+            DEPENDENCY_GUARD_ENV: (
+                "1" if self.optimization_mode == "production" else "0"
+            ),
+        }
         environment.update(self.agent_boundary_environment())
         self.start_runtime()
         from aka.light.runtime.server import OWNER_ENV
@@ -974,7 +974,7 @@ class Campaign:
             cwd=str(self.workspace.parent),
             check=True,
         )
-        # Production native tasks always expose a generalized public contract. Exact shapes and
+        # Native tasks always expose a generalized public contract. Exact shapes and
         # release metadata remain in the source operator directory and are injected only at the
         # sandbox boundary. A missing public contract is authored before the baseline session.
         generalized = self.private_reference_dir is not None
@@ -1532,11 +1532,6 @@ class Campaign:
         if not progressed and dirty_candidate:
             return "run", "resuming preserved framework-baseline work"
 
-        if self.framework_baseline == "auto" and self.optimization_mode != "production":
-            return (
-                "skip",
-                "leaderboard mode keeps the permissive V0 (use --framework-baseline always)",
-            )
         if not progressed:
             if not self.source_checks_enabled:
                 return "pin", "multi-GPU Agate source checks are disabled; retain the validated V0"
