@@ -19,8 +19,8 @@ creates the commit and decides acceptance independently.
    comparison in the `start` event's `analysis`. Reuse an existing Direction when its hypothesis is unchanged;
    propose a new one only when no visible Direction represents the intended work.
 2. Record decisive Experiments promptly. Use `hypothesis` for this change's concrete, falsifiable
-   prediction; provide the actual `change`, `gateway_record_ids`, your `analysis`, and the resulting
-   action. The cited Gateway Records are the measurement facts; use `record-read` when needed rather
+   prediction; provide the actual `change`, `gateway_record_ids`, and your `analysis`. The cited
+   Gateway Records are the measurement facts; use `record-read` when needed rather
    than copying their results into the Experiment.
 3. If work reveals a distinct promising idea, refresh `list-directions`, load likely name/scope
    matches, and compare their hypotheses. Reuse an existing Direction for the same hypothesis and

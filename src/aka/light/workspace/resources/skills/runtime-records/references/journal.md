@@ -110,8 +110,7 @@ Use the Gateway ID in `scratch/experiment.json`:
   "hypothesis": "Removing the intermediate reduces traffic",
   "change": "Replaced the two stages with one fused implementation",
   "gateway_record_ids": ["gateway-11111111111111111111111111111111"],
-  "analysis": "Keep this candidate for independent verification; the result supports the hypothesis",
-  "action": "keep_after"
+  "analysis": "The result supports the hypothesis and this candidate remains the measured best"
 }
 ```
 
@@ -176,18 +175,9 @@ For a path-based provider, use its emitted `cite`, such as `gpu@v1 docs/a.md:3-5
 instead of inventing a `wiki_id`. Choose the disposition from the actual experiment,
 not from whether the query returned records. Omit attribution entirely if not recording research.
 
-| Experiment `action` | Meaning |
-| --- | --- |
-| `baseline` | First measured anchor; at most once per Episode, not a request to register V0 |
-| `keep_after` | Keep the tested implementation |
-| `restore_before` | Restore an earlier implementation |
-| `adopt` | Reuse an existing implementation |
-| `abandon_direction` | Document an investigation or blocker using actual Gateway records; no performance claim is required |
-
-No action permits an empty record list. Failed diagnostics may document an unresolved blocker;
+An Experiment does not change source or Direction lifecycle. Failed diagnostics may document an unresolved blocker;
 Env/Health/Wiki responses, unbound Dev outputs and transport errors without a saved Gateway Record
-are not Experiment evidence. An Experiment action records your decision;
-it does not copy source or update Direction lifecycle. Restore source yourself through the Kernel
+are not Experiment evidence. Restore source yourself through the Kernel
 reader when needed, and call `update-direction` separately to close the Direction.
 
 ## Close the Direction
@@ -250,8 +240,8 @@ Response:
 {"status":"accepted","message":"Report accepted; Supervisor committed the measured Kernel for verification"}
 ```
 
-The selected Experiment must belong to this Episode, use `baseline`, `keep_after`, or `adopt`, and
-cite a passing Evaluate record for byte-identical current `kernel.py`. Profile/Dev/Check/Disassemble
+The selected Experiment must belong to this Episode and cite a passing Evaluate record for
+byte-identical current `kernel.py`. Profile/Dev/Check/Disassemble
 or ABBA alone cannot satisfy this report binding; custom-input or correctness-only diagnostics are
 not substitutes for standard performance evidence. Before accepting `candidate_ready`, the Supervisor
 reuses a matching successful full or correctness-only Evaluate with the base case plus five additional
@@ -318,7 +308,7 @@ current and visible earlier Episodes, not just this Episode. A Direction index e
 only `direction_id`, `name`, `change_scope`, and `status`. Historical Directions recorded before
 `change_scope` read as `unspecified`. Use `load-direction` for the hypothesis, rationale, plan,
 latest analysis, assessment, experiment associations, and ancestry. An Experiment index entry has
-only `experiment_id`, `direction_id`, `name`, and `action`. Use `load-experiment` for its hypothesis,
+only `experiment_id`, `direction_id`, and `name`. Use `load-experiment` for its hypothesis,
 change, Gateway Record IDs, analysis, timestamp, and optional Wiki attribution.
 These exports do not update automatically; invoke list again when you need a fresh snapshot.
 

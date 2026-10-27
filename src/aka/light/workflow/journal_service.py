@@ -68,14 +68,6 @@ EXPERIMENT_FIELDS = {
     "change",
     "gateway_record_ids",
     "analysis",
-    "action",
-}
-EXPERIMENT_ACTIONS = {
-    "baseline",
-    "keep_after",
-    "restore_before",
-    "abandon_direction",
-    "adopt",
 }
 
 
@@ -718,7 +710,7 @@ def _validate_record_ids(campaign_root: Path, raw: object, *, label: str = "Expe
             raise field_error("gateway_record_ids", "candidate_ready requires non-empty gateway_record_ids citing a passing full Evaluate")
         raise AgentRequestError(
             "Every Experiment requires at least one real Kernel-bound Gateway Record in "
-            "gateway_record_ids, including abandon_direction; historical unmeasured notes "
+            "gateway_record_ids; historical unmeasured notes "
             "cannot support a new Direction closure.",
             code="experiment_evidence_required",
             next_action=(
@@ -833,14 +825,7 @@ def record_experiment(
             "Experiment Direction must be in progress or closed; start a proposed Direction "
             "before recording evidence. Late evidence does not reopen exploration"
         )
-    action = value.get("action")
-    if not isinstance(action, str) or action not in EXPERIMENT_ACTIONS:
-        raise ValueError(f"Experiment action must be one of {sorted(EXPERIMENT_ACTIONS)}")
     record_ids = _validate_record_ids(campaign_root, value["gateway_record_ids"])
-    if action == "baseline" and any(
-        item.get("action") == "baseline" for item in current["experiments"]
-    ):
-        raise ValueError("an Episode may record baseline only once")
     experiment = {
         "experiment_id": f"experiment_{uuid.uuid4().hex}",
         "direction_id": direction_id,
@@ -851,7 +836,6 @@ def record_experiment(
         "change": _text(value["change"], "Experiment change"),
         "gateway_record_ids": record_ids,
         "analysis": _text(value["analysis"], "Experiment analysis"),
-        "action": action,
     }
     if any(key in value for key in ("wiki_usage", "wiki_query_ids", "wiki_usage_status")):
         from aka.light.workflow.journal_projection import normalize_wiki_attribution
@@ -989,9 +973,6 @@ def validate_report_evidence(
             "selected_experiment_id must identify exactly one Experiment in the current Episode"
         )
     selected = matches[0]
-    action = selected.get("action")
-    if not isinstance(action, str) or action not in {"keep_after", "adopt", "baseline"}:
-        raise ValueError("selected Experiment must use baseline, keep_after, or adopt")
     direction_id = selected.get("direction_id")
     if not isinstance(direction_id, str) or direction_id not in directions:
         raise ValueError("selected Experiment Direction is outside visible history")
@@ -1090,7 +1071,6 @@ class SupervisorJournalService:
                         "experiment_id",
                         "direction_id",
                         "name",
-                        "action",
                     )
                 }
                 for item in _visible_experiments(self.path, self.campaign_root)
@@ -1115,6 +1095,7 @@ class SupervisorJournalService:
             # Older Journals may contain the former duplicated summary. Gateway
             # Records remain the only public source of measurement facts.
             visible.pop("evidence", None)
+            visible.pop("action", None)
             return visible
         if operation == "episode_report":
             body = request.get("request")
@@ -1206,12 +1187,16 @@ class SupervisorJournalService:
         projection["outcome"] = dict(current["outcome"])
         for index, item in enumerate(current["experiments"], 1):
             row = dict(
-                {key: value for key, value in item.items() if key != "evidence"},
+                {
+                    key: value
+                    for key, value in item.items()
+                    if key not in {"evidence", "action"}
+                },
                 result=item["analysis"],
                 timestamp=item["recorded_at"],
-                decision="keep_as_best"
-                if item["action"] in {"baseline", "keep_after", "adopt"}
-                else "discard",
+                decision=(
+                    "keep_as_best" if item["experiment_id"] == selected else "discard"
+                ),
             )
             # Legacy reports retain the IDs and analysis. Measurement truth is
             # read from the private store, never parsed from the Agent's prose.
@@ -1396,4 +1381,4 @@ class SupervisorJournalService:
 
 
 __all__ = ["SupervisorJournalService", "initialize_journal", "journal_lock", "load_journal", "selected_evaluation", "sealed_candidate_source",
-           "DIRECTION_PROPOSAL_FIELDS", "DIRECTION_CHANGE_SCOPES", "DIRECTION_UPDATE_FIELDS", "DIRECTION_CLOSURE_FIELDS", "EXPERIMENT_FIELDS", "EXPERIMENT_ACTIONS"]
+           "DIRECTION_PROPOSAL_FIELDS", "DIRECTION_CHANGE_SCOPES", "DIRECTION_UPDATE_FIELDS", "DIRECTION_CLOSURE_FIELDS", "EXPERIMENT_FIELDS"]

@@ -33,7 +33,7 @@ Use this as a working guide when useful, not as additional mandatory stages:
    correctness and performance, reusing a matching saved result instead of repeating the measurement.
 5. **Record and decide.** Record each decisive result as an Experiment. Its `hypothesis` is the
    concrete, falsifiable prediction for this change, not a repetition of the Direction's broader
-   hypothesis. Supply the actual `change`, Gateway Record IDs, `analysis`, and decision. The cited
+   hypothesis. Supply the actual `change`, Gateway Record IDs, and `analysis`. The cited
    Gateway Records are the measurement facts; use `record-read` when you need their results instead
    of copying measurement values into the Experiment. Use those facts to continue, repair, restore a
    measured Kernel, or change Direction.

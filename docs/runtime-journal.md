@@ -42,7 +42,7 @@ flowchart TD
 | Object | Content | Ownership |
 | --- | --- | --- |
 | Direction | Hypothesis, rationale, local/major-redesign scope, plan, lifecycle, explicit assessment and ancestry | Agent proposes/interprets; Runtime validates and persists |
-| Experiment | Concrete per-change prediction, change, Gateway Record IDs, Agent analysis and action | Agent supplies intent/interpretation; Runtime validates the cited records |
+| Experiment | Concrete per-change prediction, change, Gateway Record IDs and Agent analysis | Agent supplies intent/interpretation; Runtime validates the cited records |
 | Gateway Record | Exact request/Kernel binding and saved projected response | Existing Measurement Store |
 | Episode Report | Terminal status, summary, selected Experiment or blocker | Agent submits; Runtime validates; Supervisor independently decides acceptance |
 
@@ -77,8 +77,8 @@ is a compact catalog containing only ID, name, change scope and status. The Agen
 Direction before choosing the most important one rather than the easiest local edit, and records the
 comparative rationale in the `start` event's `analysis`.
 
-The Experiment list is likewise a compact catalog containing only Experiment ID, Direction ID, name
-and action. Full hypothesis, change, Gateway Record references, analysis and attribution require an
+The Experiment list is likewise a compact catalog containing only Experiment ID, Direction ID and
+name. Full hypothesis, change, Gateway Record references, analysis and attribution require an
 explicit Experiment load.
 
 ### Reports and old consumers

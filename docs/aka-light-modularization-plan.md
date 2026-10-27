@@ -42,7 +42,7 @@
 两个容易混淆的概念应明确分开：
 
 - **测量 Experiment** 是宿主执行并持久化的事实，包含源码、请求、执行结果和公共投影。
-- **Journal 中的 `record-experiment`** 是 Agent 对研究工作的陈述，包含 hypothesis/change/analysis/action，并用 Gateway Record ID 引用一个或多个测量事实。两者可以沿用现有外部命名和 ID，但不能混成同一份可信度相同的数据。
+- **Journal 中的 `record-experiment`** 是 Agent 对研究工作的陈述，包含 hypothesis/change/analysis，并用 Gateway Record ID 引用一个或多个测量事实。两者可以沿用现有外部命名和 ID，但不能混成同一份可信度相同的数据。
 
 ```mermaid
 flowchart TB

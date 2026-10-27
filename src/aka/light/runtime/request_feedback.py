@@ -41,7 +41,6 @@ def journal_schema(operation, body, *, research_records=False, supervisor_git=Tr
         DIRECTION_UPDATE_FIELDS,
         DIRECTION_CLOSURE_FIELDS,
         EXPERIMENT_FIELDS,
-        EXPERIMENT_ACTIONS,
     )
     from aka.light.workflow.direction_lifecycle import DIRECTION_STATUS, CLOSURES
     from aka.light.workflow.direction_genealogy import RELATIONSHIPS
@@ -89,7 +88,7 @@ def journal_schema(operation, body, *, research_records=False, supervisor_git=Tr
         usage["anyOf"] = [{"required": ["wiki_id"]}, {"required": ["cite"]}]
         properties = {key: _text() for key in EXPERIMENT_FIELDS}
         properties.update(direction_id={"type": "string", "pattern": "^direction_[0-9a-f]{32}$"},
-                          gateway_record_ids=_ids("gateway-", minimum=1), action={"enum": sorted(EXPERIMENT_ACTIONS)},
+                          gateway_record_ids=_ids("gateway-", minimum=1),
                           wiki_usage={"type": "array", "maxItems": 64, "items": usage},
                           wiki_query_ids={"type": "array", "maxItems": 64, "items": query_id},
                           wiki_usage_status={"type": "string", "enum": sorted(WIKI_USAGE_STATUSES)})
