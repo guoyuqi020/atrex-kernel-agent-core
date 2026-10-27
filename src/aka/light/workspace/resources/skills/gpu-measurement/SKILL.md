@@ -55,7 +55,7 @@ the original call may return a timeout after cleanup. A null value means no esti
 
 `result.error.code: "candidate_source_rejected"` is a source
 repair, not an infrastructure blocker. Fix the listed forbidden imports,
-attribute accesses or string literals in `kernel.py`, then rerun the operation.
+attribute accesses or string literals in the Kernel source tree, then rerun the operation.
 No GPU job was submitted by that rejected request. Do not switch to Dev to bypass
 the source validator.
 

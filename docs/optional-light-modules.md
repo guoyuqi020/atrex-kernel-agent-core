@@ -68,7 +68,8 @@ authority boundary. Verified remote requests do not trigger local-policy termina
 
 ### Shared production policy
 
-Light reuses Legacy's production prompt rules, single-file structural checks,
+Light reuses Legacy's production prompt rules and fail-closed review policy, with
+whole-tree structural checks for managed Kernels,
 fail-closed reviewer gate, reviewer prompt and verdict validation. Production
 still requires self-authored computation in the selected framework: a prebuilt
 FlashInfer operator is not an acceptable replacement, while toolchain/header/ABI/
@@ -288,7 +289,7 @@ Patches replace a module's whole configuration; omitted fields receive that prov
 | `aka.light.agent.plugin` | `sandbox: none`, `capture: false`, `bwrap_executable: bwrap`, `read_only_paths: []`, `proc_mode: private`, `timeout_seconds: 28800` |
 | `aka.light.runtime.plugin` | `measurement_repetitions: 1` (or `3`), `pause_agent_during_requests: true`, `wiki: true`, `queue_timeout: 60`; omitted `request_timeout` preserves the controller's queue/execution deadline policy; `wiki_options` independently controls Wiki execution (above) |
 | `aka.light.wiki.plugin` | `root: ""` (the selected checkout's `gpu-wiki`); see [Wiki providers](#wiki-providers) |
-| `aka.light.workflow.plugin` | `numerical_validation: true`, `goal_episodes: false`, `generate_memory: false`, `output_limit_recovery_retries: 2`, `episode_timeout_seconds: 14400`; optional `search` and `source_tree` |
+| `aka.light.workflow.plugin` | `numerical_validation: true`, `goal_episodes: false`, `generate_memory: false`, `output_limit_recovery_retries: 2`; optional `episode_timeout_seconds`, `search` and `source_tree` |
 | `aka.light.workspace.plugin` | `inherit_state: true`; carry custom Skills/tools across Episodes independently of Kernel promotion |
 | `aka.light.execution.plugin` | No options; endpoint/timeouts remain prepared Execution request values |
 | `aka.light.evaluation.plugin` | No options; constructs measurement plans and projects/aggregates results |
@@ -312,25 +313,23 @@ are not evidence that this execution container has a working compiler.
 
 ### Agent active-time limit and blocking Runtime calls
 
-Light defaults to **14,400 seconds (4 hours) of Agent active time per optimization Episode**.
-The preceding Framework Bootstrap session has its own 28,800-second (8-hour)
-wall-clock budget. Configure `workflow.config.episode_timeout_seconds` with a
-finite positive number of seconds, for example:
+Optimization Episodes have **no active-time limit by default**. To impose one, configure
+`workflow.config.episode_timeout_seconds` with a finite positive number of seconds, for example:
 
 ```json
 {"api_version":1,"patches":[{"id":"workflow","config":{"episode_timeout_seconds":14400}}]}
 ```
 
 Report-repair continuations and fresh output-limit recovery sessions share that
-Episode budget within the running controller; they do not reset it. The budget
-is in memory, not a persisted allowance across controller restarts. Separately,
+Episode budget when configured; they do not reset it. The budget is in memory,
+not a persisted allowance across controller restarts. Omitting the field disables the
+Episode-level limit. Separately,
 `agent.config.timeout_seconds` sets the default per-invocation active-time ceiling
 (28,800 seconds); explicit auxiliary-session timeouts, including Framework
 Bootstrap, remain in force. An
-invocation uses the smaller of its ceiling and the remaining Episode budget. To
-allow an optimization invocation longer than 4 hours, increase the Workflow
-Episode budget; to exceed the Agent provider's 8-hour ceiling, increase both
-options.
+invocation uses the smaller of its ceiling and the remaining Episode budget when one is configured.
+To exceed the Agent provider's 8-hour per-invocation ceiling, increase the Agent option; this is
+independent of the optional Episode-wide limit.
 
 After receiving a complete authenticated GPU, Wiki, Journal or plugin request,
 the independent Supervisor HTTP handler uses `SIGSTOP` to suspend only the
@@ -374,10 +373,10 @@ before resubmission, and disabled Journal tools remain disabled.
 All invocations contribute to the same Episode's Token total and usage receipt.
 When a remaining campaign Token budget is supplied, it is checked before starting
 another invocation; an in-flight invocation can still cross that limit. This does
-not change the pooled-search scheduling policy. The active-time budget above is
-shared by all these invocations. `attempt.json` records `output_limit_recoveries`;
+not change the pooled-search scheduling policy. `attempt.json` records `output_limit_recoveries`;
 invocation telemetry records the provider session ID, purpose, failure kind and
-provider error code. Exhaustion retains a specific `max_output_tokens` diagnosis.
+provider error code. A configured active-time limit is shared by all invocations; without one,
+only the provider invocation ceiling and other explicit budgets apply.
 
 Claude billing totals still use **`result.usage`**, not `modelUsage` or an added
 sum of child transcripts. With capture enabled, native final response counters
@@ -476,10 +475,18 @@ separate tool inheritance, scratch reset, historical Conversation visibility and
 without replay. No real model/GPU campaign or new Bubblewrap
 end-to-end run was performed for pooled search.
 
-### Single-file and contracted source-tree Kernels
+### Unified and imported source-tree Kernels
 
-Single-file tasks still use `kernel.py`, with unchanged source IDs and tool commands.
-For a multi-file task, select the Workflow's optional source contract. Either
+Every fresh native Light task enters its optimization Episodes with one source-tree
+representation. The original one-file implementation becomes editable `adapter.py`, the required
+evaluator entry point. The Agent may keep the complete implementation there or add, modify, and
+remove files below `implementation/` and import them from `adapter.py`.
+The tree is created before V0 is committed or measured, so V0, Framework Baseline and every
+optimization Episode use exactly the same source identity. Native Kernel workspaces do not carry
+a source manifest: the directory layout is the contract.
+
+For a task that already has multiple files or needs a custom adapter, select the Workflow's
+optional imported source contract. Either
 snapshot a plain local directory (no Git required):
 
 ```json
@@ -497,7 +504,7 @@ snapshot a plain local directory (no Git required):
 Or use `"repository": "/absolute/path/to/git-checkout"` instead of `directory`
 to import an exact Git revision. These options are mutually exclusive.
 
-The manifest keeps Runtime's fixed-adapter and editable-root contract:
+The import manifest selects the source snapshot and supplies the initial adapter:
 
 ```json
 {
@@ -508,20 +515,18 @@ The manifest keeps Runtime's fixed-adapter and editable-root contract:
     "name": "package",
     "archive_paths": ["LICENSE", "package"],
     "package_root": "."
-  },
-  "editable_roots": ["package/kernels"],
-  "runtime_requirements": []
+  }
 }
 ```
 
-`adapter.py` is resolved beside the manifest and copied unchanged as the fixed
-`kernel.py` entry point. `source.archive_paths` selects files/directories relative
+`adapter.py` is resolved beside the manifest and copied as the initial editable
+root `adapter.py` entry point. Every selected source is installed below `implementation/`;
+the adapter must import it through that package. `source.archive_paths` selects files/directories relative
 to the supplied directory or repository. In **directory mode**, the Supervisor
 captures the current working bytes, including uncommitted and untracked files in
 those paths; it does not run Git or modify the original directory. No
 `source.revision` is required. If an existing manifest contains one, it is not used
-in directory mode; the sealed contract records `source_revision: null` and a
-content-based `seed_digest`, not a misleading Git identity. Avoid concurrent edits
+in directory mode. Avoid concurrent edits
 while the initial snapshot is being captured; a file changing during its read is
 rejected.
 
@@ -535,17 +540,15 @@ it never silently recaptures a different seed. Use a new Campaign to select a ne
 seed. The controller may still use its own Git repository for candidate sealing;
 the supplied source directory does not need to be one.
 
-The imported seed and immutable-file hashes are pinned in the controller's
-`.atrex_source.json`; the Agent copy cannot change the authority.
-Only declared directories allow additions, modifications and deletions. Other
-imported files, including the adapter, must remain byte-identical. Source validation
+There is no `.atrex_source.json`. Runtime derives the boundary directly from the fixed layout:
+root `adapter.py` may be modified but must remain present, and `implementation/**` allows additions,
+modifications and deletions. Source validation
 rejects symlinks, special/binary files, new build artifacts and protected import
 shadowing. Limits: 4096 files, 16 MiB/file, 64 MiB total.
 
-The Agent sees the fixed adapter and package directories alongside `skills/`,
-`tools/` and `scratch/`. `WORKSPACE.md` explains the exact editable roots.
-Bubblewrap protects the policy and fixed files read-only; native mode is cooperative,
-but submission and sealing still validate the controller-owned contract.
+The Agent sees editable `adapter.py` and optional Kernel/package sources alongside `skills/`,
+`tools/` and `scratch/`. `WORKSPACE.md` explains the source boundary. Submission and sealing
+validate the complete source tree and require the adapter entry point.
 Light reserves its root-level workspace names (public inputs, `README.md`, tools,
 Skills, scratch and controller metadata); a manifest colliding with them is rejected
 explicitly. Put package documentation inside its imported package directory.
@@ -553,8 +556,8 @@ explicitly. Put package documentation inside its imported package directory.
 The complete source snapshot, not only the adapter, determines the Kernel ID,
 measurement identity, report binding, sealed commit, promotion and Epoch broadcast.
 A rejected/pivoted source tree is not broadcast. Custom tools/Skills keep their
-independent inheritance policy. Source-tree tasks retain the pinned initial package
-as their framework baseline instead of asking a V1 Agent to rewrite the adapter.
+independent inheritance policy. Framework Baseline receives the same tree as V0 and may keep its
+implementation in `adapter.py` or split it into any number of files below `implementation/`.
 
 Evaluate and ABBA upload exact source archives to native Agate Eval, using persisted
 upload references and idempotency keys across recovery. There is no Eval-to-Dev
@@ -565,18 +568,18 @@ supplemental numerical probes also receive the full candidate. Tree diagnostic
 payloads above 4 MiB use OSS with Runtime's digest-verified unpacker. HTTP uses Supervisor
 credentials from the Agate environment or operator CLI config, never Agent files.
 
-Historical `kernel-read` writes a **directory** for a tree Kernel. Use that directory
+Historical `kernel-read` writes a **directory** for every managed native Kernel. Use that directory
 as `--baseline-path`; a repeated read is safe if its contents are still identical.
-Single-file reads continue to write a file. `record-read` keeps the existing result
-format and Kernel binding. Changed files, removed files and fixed-file tampering
+`record-read` keeps the existing result format and Kernel binding. Changed files, removed files and fixed-file tampering
 cannot reuse an unrelated measurement.
 
-This option currently requires native Atrex-Bench and `package_root: "."`,
+Unified/generated trees and imported sources currently require native Atrex-Bench and
+`package_root: "."`,
 matching Runtime's native Eval archive limitation. Tree diagnostics currently
-require NVIDIA NCU (auto/sass/ptx disassembly). SOL/SSH
-tree tasks and runtime-support uploads are rejected, not silently degraded.
+require NVIDIA NCU (auto/sass/ptx disassembly). SOL/SSH tree tasks are rejected, not silently
+degraded. Dependencies belong to the task/evaluator configuration rather than a Kernel workspace manifest.
 It composes with Epoch/Trajectory search; one Light Episode remains one Runtime
-Attempt. Use a new Campaign workspace when changing a source contract.
+Attempt. Use a new Campaign workspace when changing the initial source selection.
 
 48 source-tree checks cover fixed/editable boundaries, whole-tree IDs and records, native
 Eval/ABBA archive requests, diagnostic transport, source retrieval, report evidence,
@@ -593,7 +596,7 @@ on macOS. The Light sdist and wheel build successfully with the source/worker as
 
 ### Reusable workspace
 
-Managed Episodes expose `kernel.py`, writable `skills/` and `tools/`, temporary `scratch/`,
+Managed Episodes expose writable `adapter.py`, optional writable `implementation/`, `skills/` and `tools/`, temporary `scratch/`,
 optional Supervisor-owned `memory/v*.json`, and public contracts/instructions. `WORKSPACE.md` states
 the selected inheritance policy. Each reusable directory has a writable README index; Agents
 must update it when adding, modifying or deleting custom contents. Store reusable methods in

@@ -530,7 +530,7 @@ def supplemental_feedback(campaign, workspace, *, state_root, standard_correctne
     elif status == "needs_repair":
         if flow == "framework_baseline":
             next_step = (
-                "Repair kernel.py, rerun the bounded V1 smoke command, then stop. "
+                "Repair the editable Kernel implementation, rerun the bounded V1 smoke command, then stop. "
                 "Do not submit episode-report. "
             )
         elif research_records:

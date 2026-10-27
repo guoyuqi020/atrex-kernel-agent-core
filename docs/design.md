@@ -129,7 +129,7 @@ runtime-detected GPU vendor.
    full evidence loop. The primary Agent uses maximum reasoning effort in both modes.
 4. Validate its structured journal and `candidate_ready`, `pivot`, or `blocked` handoff, with
    bounded same-thread recovery for Claude and Codex.
-5. Check protected paths, the exact committed `kernel.py`, and production policy while allowing
+5. Check protected paths, the exact committed Kernel source tree, and production policy while allowing
    uncommitted intermediate artifacts to remain in the episode worktree.
 6. Select the fastest passing hash-matched result from each fast episode's five trials and compare it
    with canonical incumbent memory; compare full-mode candidates in one independent ABBA allocation.
@@ -352,10 +352,11 @@ third-party libraries. `optimization_mode=production` is fail-closed:
   allowlists or package-name rejection; toolchain/launch plumbing may be accepted, while prebuilt
   compute, alternate frameworks, PyTorch compute fallbacks, hidden dispatch, and external code are
   rejected;
-- deterministic checks retain only syntax, self-containment, single-file versioning, immutable
-  campaign state, and the Triton-to-Gluon phase latch;
-- `kernel.py` and `solution.json` are copied into a bounded temporary workspace for every complete
-  production-candidate review;
+- deterministic checks retain only whole-tree syntax and source boundaries, self-containment,
+  immutable campaign state, and the Triton-to-Gluon phase latch;
+- the editable `adapter.py` entry point, the complete optional implementation tree, its source
+  contract, and `solution.json` when applicable are copied into a bounded temporary workspace for
+  every complete production-candidate review;
 - a missing, malformed, incomplete, or evidence-mutating Agent verdict fails closed;
 - violating episode candidates are rejected before promotion and recorded as failed memory.
 
@@ -371,9 +372,9 @@ an isolated branch and Git worktree from the incumbent for each episode. The Age
 structured experiments in a journal and publishes one terminal handoff: `candidate_ready`,
 `pivot`, or `blocked`.
 
-A candidate must commit a `kernel.py` that still matches the worktree, preserve protected paths, and
+A candidate must seal a complete Kernel source tree that still matches the worktree, preserve protected paths, and
 satisfy production policy. Other uncommitted intermediate artifacts may remain in the worktree.
-Fast candidates must have one complete passing evaluator record whose `kernel.py` hash matches the
+Fast candidates must have one complete passing evaluator record whose source-tree digest matches the
 final candidate and whose latency strictly improves on canonical incumbent memory. Full candidates
 must pass the exact same-allocation ABBA schedule. Accepted candidates are squash-promoted with
 canonical memory; rejected and non-candidate episodes advance memory without changing the incumbent.
@@ -437,7 +438,7 @@ select fastest passing hash-matched trial -> handoff
 Fast mode uses the normal `gen-plan` synthesis with the reviewers enabled for fast episodes inside its
 planning phase. Those reviewers default off. Fast mode does not run a separate research phase,
 profile, run multi-seed correctness, or run ABBA. The
-sandbox records the evaluator result with the final `kernel.py` hash. The supervisor uses that result
+sandbox records the evaluator result with the final source-tree digest. The supervisor uses that result
 for correctness and compares it with the latest complete passing canonical incumbent measurement.
 `--fast-episodes 0` disables this path; another non-negative value changes its window.
 
@@ -450,7 +451,7 @@ profile -> research -> plan -> edit/compile/repair
 
 GPU commands run remotely while plans, source edits, journals, and Git remain local. A
 `candidate_ready` handoff is not authoritative: the supervisor validates protected paths, policy,
-the worktree's exact committed `kernel.py`, and the candidate commit, then applies the current mode's
+the worktree's exact committed source tree, and the candidate commit, then applies the current mode's
 fast comparison or incumbent/candidate ABBA gate. A rejected candidate, `pivot`, or `blocked` outcome
 advances canonical memory without changing the incumbent. Active episode state is restart-safe and
 reuses the registered worktree with its intermediate files after a supervisor restart.
@@ -469,7 +470,8 @@ output.
 
 ```text
 kernel_opt_<name>_<framework>_<platform>[_production]/
-├── kernel.py
+├── adapter.py                         # Required editable evaluator entry point
+├── implementation/                    # Optional editable Kernel source tree
 ├── test_kernel.py
 ├── README.md
 ├── memory/v<N>.json
@@ -479,6 +481,11 @@ kernel_opt_<name>_<framework>_<platform>[_production]/
 ├── framework_baseline.json
 └── .atrex_long_horizon/               # Episode state, journals, telemetry, verification
 ```
+
+Native Campaigns create this tree before the V0 commit and first measurement. Framework Baseline
+therefore receives the same editable adapter and may keep a single-file implementation there or
+freely add, edit, or delete files below `implementation/`; V0, Framework Baseline, and later
+Episodes share one source identity.
 
 Not every campaign uses every artifact. Git plus unmasked `memory/v<N>.json` files are the durable
 optimization history. `.atrex_long_horizon/` and temporary verification payloads are excluded

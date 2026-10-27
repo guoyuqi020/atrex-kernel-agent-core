@@ -18,7 +18,9 @@ import tarfile
 import urllib.parse
 import zipfile
 
-from aka.light.workspace.sources import snapshot, unpack, relative
+from aka.light.workspace.sources import (
+    entrypoint, snapshot, unpack, relative, requires_archive,
+)
 
 ARCHIVES = "__atrex_eval_archives"
 DIAGNOSTIC = "__atrex_source_diagnostic"
@@ -35,13 +37,16 @@ class SourceUploadError(RuntimeError):
 
 def attach(request, workspace, *, side="candidate", source=None):
     policy, files = unpack(source if source is not None else snapshot(workspace))
-    if policy is None:
+    # Legacy raw kernel.py snapshots retain the native inline transport. Every
+    # managed adapter tree carries its implementation and therefore uses the
+    # exact source-archive contract.
+    if not requires_archive(policy, files):
         return request
     if policy["package_root"] != ".":
         raise ValueError("Native Eval archives require package_root='.'; no Dev fallback")
     archive = f"archives/{side}.tar.gz"
     request.setdefault(ARCHIVES, {})[archive] = {k: v.decode() for k, v in files.items()}
-    descriptor = {"archive": archive, "entry_point": "kernel.py"}
+    descriptor = {"archive": archive, "entry_point": entrypoint(policy)}
     if side == "candidate":
         request["candidate"] = descriptor
     else:
@@ -165,7 +170,7 @@ def upload_bytes(url, data):
 
 def diagnostic_request(request, workspace, kind, *, timeout=600):
     policy, files = unpack(snapshot(workspace))
-    if policy is None:
+    if not requires_archive(policy, files):
         return request
     if request.get("profiler", "ncu") != "ncu" or request.get("fmt") == "isa":
         raise ValueError("Source-tree diagnostics currently support NVIDIA NCU and auto/sass/ptx")
@@ -173,7 +178,7 @@ def diagnostic_request(request, workspace, kind, *, timeout=600):
     parameters = {key: request[key] for key in ("profiler", "level", "counters", "kernel_regex", "kernel_name",
                   "source", "launch_skip", "launch_count", "top_kernels", "arch", "sanitize", "fmt") if key in request}
     timeout = min(10800, timeout + 30)
-    diagnostic = {"operation": kind, "entrypoint": "kernel.py", "package_root": policy["package_root"],
+    diagnostic = {"operation": kind, "entrypoint": entrypoint(policy), "package_root": policy["package_root"],
                   "runtime_requirements": policy["runtime_requirements"], "requirements": request.get("requirements", []),
                   "shapes": reference["shapes"], "parameters": parameters, "lock_clocks": True,
                   "timeout_s": max(1, timeout - 30)}

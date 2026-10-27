@@ -1,5 +1,4 @@
 """Task provider owns draft reset, snapshots and sealed Git promotion."""
-from pathlib import Path
 from dataclasses import replace
 import subprocess
 
@@ -9,7 +8,6 @@ from aka.contracts.workspace import CandidateHandle
 from aka.contracts.content import WorkspaceFile
 from aka.light.workspace.files import publish
 from aka.light.workspace.resource_catalog import resource
-
 
 class ManagedCandidateWorkspace(GitCandidateWorkspace):
     managed_drafts = True
@@ -52,6 +50,12 @@ class ManagedCandidateWorkspace(GitCandidateWorkspace):
         publish(workspace, "README.md", b"# Kernel optimization workspace\n")
         publish(workspace, ".gitignore", b"__pycache__/\n*.pyc\n/scratch\n")
         (workspace / "memory").mkdir(exist_ok=True)
+        # Native Campaigns arrive in the only supported source-tree layout.
+        # adapter.py may contain the complete Kernel or import files below
+        # implementation/. No workspace manifest or migration is needed.
+        paths = {item.path for item in content.files}
+        if "adapter.py" not in paths:
+            raise ValueError("Native initial source requires adapter.py")
         if not (workspace / ".git").exists():
             subprocess.run(["git", "init", "-q", str(workspace)], check=True)
             subprocess.run(["git", "-C", str(workspace), "config", "user.name", "GPU Kernel Optimizer"], check=True)

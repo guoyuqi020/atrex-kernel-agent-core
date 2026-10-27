@@ -22,7 +22,7 @@ TERMINAL_STATUSES = {"completed", "interrupted", "failed"}
 MEMORY_RE = re.compile(r"v[0-9]+\.json")
 LONG_MEMORY_RE = re.compile(r"long_horizon_e[0-9]+\.json")
 PROFILE_RE = re.compile(r"v[0-9]+(?:[_-].+)?")
-ROOT_FILES = ("kernel.py", "definition.json", "solution.json", "workload.jsonl")
+ROOT_FILES = ("adapter.py", "kernel.py", "definition.json", "solution.json", "workload.jsonl")
 PROFILE_FILES = (
     "summary.txt", "REPORT.md", "iteration_report.md", "evidence.md",
     "analysis/metrics_key_run.json",
@@ -84,6 +84,15 @@ def collect_evidence_files(workspace: Path) -> list[dict[str, str]]:
 
     for name in ROOT_FILES:
         add(workspace / name, "extraction-core")
+    try:
+        from aka.light.workspace.sources import collect, policy_at
+        source_policy = policy_at(workspace)
+        if source_policy is not None:
+            for relative in collect(workspace, source_policy):
+                add(workspace / relative, "candidate-source")
+    except (OSError, ValueError):
+        # Retention remains best-effort and cannot change campaign outcome.
+        pass
     for relative in _solution_sources(workspace):
         add(workspace / relative, "candidate-source")
 

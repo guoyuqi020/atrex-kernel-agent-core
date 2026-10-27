@@ -31,7 +31,7 @@ shell timeout or `&`, and use the backend's wait/output facility if it backgroun
 Do not change the measured source or launch unrelated work while waiting.
 `--no-sync` disables output-file synchronization; it does **not** make execution asynchronous.
 The session Prompt states whether Runtime request suspension is enabled. When enabled, waits
-pause the Agent/subagents and do not consume the Agent active-time budget; when disabled, they
+pause the Agent/subagents and do not consume any configured Agent active-time budget; when disabled, they
 remain active time. Every request remains subject to its own deadline. A quiet CLI is not a failure.
 
 Save JSON stdout and stderr separately if needed:
@@ -179,7 +179,7 @@ returned by the Runtime; these queries do not submit GPU jobs:
 
 ```bash
 python3 tools/sandbox.py --kind record-read --record-id gateway-0123456789abcdef0123456789abcdef
-python3 tools/sandbox.py --kind kernel-read --kernel-id kernel-0123456789abcdef0123456789abcdef --output-path scratch/previous.py
+python3 tools/sandbox.py --kind kernel-read --kernel-id kernel-0123456789abcdef0123456789abcdef --output-path scratch/previous-kernel
 python3 tools/sandbox.py --kind kernel-records --kernel-id kernel-0123456789abcdef0123456789abcdef
 python3 tools/sandbox.py --kind kernel-pareto-frontier
 ```

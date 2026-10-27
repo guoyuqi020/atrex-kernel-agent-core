@@ -25,8 +25,9 @@ scratch/episode_N/timeline/attempt-N/
 └── evidence/
 ```
 
-The source entries may be files instead of directories for a single-file kernel. The harness must
-open only declared attempt files and skill resources; do not depend on an undeclared local checkout.
+Legacy raw Campaigns may use files instead of directories; new managed Kernels use source-tree
+directories. The harness must open only declared attempt files and skill resources; do not depend on
+an undeclared local checkout.
 Artifact descriptors must use paths relative to their containing JSON file, not remote absolute
 paths. Keep all transitive evidence in this tree so the synchronized files remain verifiable after
 the Supervisor publishes `scratch/` to the controller workspace.

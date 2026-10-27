@@ -145,7 +145,7 @@ def production_structure_violations(
     *,
     require_gluon: bool = False,
 ) -> list[str]:
-    """Delegate single-file checks; retain the controller-pinned tree boundary."""
+    """Validate the editable adapter and the fixed source-tree boundary."""
     from aka.light.workspace.sources import policy_at, collect
 
     policy = policy_at(workspace)
@@ -155,19 +155,21 @@ def production_structure_violations(
         )
     if framework_key(framework) not in legacy_policy.SUPPORTED_PRODUCTION_FRAMEWORKS:
         return [f"unsupported production framework: {framework}"]
-    kernel_path = workspace / "kernel.py"
-    if not kernel_path.is_file():
-        return ["kernel.py is missing"]
-    source = kernel_path.read_text(encoding="utf-8", errors="replace")
     try:
-        ast.parse(source, filename=str(kernel_path))
-    except SyntaxError as exc:
-        return [f"kernel.py is not valid Python: {exc.msg} (line {exc.lineno})"]
-    try:
-        collect(workspace, policy)
+        files = collect(workspace, policy)
     except (OSError, ValueError) as exc:
         return [f"Invalid candidate source tree: {exc}"]
-    if require_gluon and not source_uses_gluon(source):
+    for name, data in files.items():
+        if Path(name).suffix != ".py":
+            continue
+        try:
+            ast.parse(data.decode("utf-8"), filename=name)
+        except SyntaxError as exc:
+            return [f"{name} is not valid Python: {exc.msg} (line {exc.lineno})"]
+    if require_gluon and not any(
+        source_uses_gluon(data.decode("utf-8", errors="ignore"))
+        for data in files.values()
+    ):
         return ["switching back from the accepted Gluon phase to Triton is forbidden"]
     return []
 
@@ -179,7 +181,7 @@ def production_kernel_violations(
     require_gluon: bool = False,
     production_reviewer: ProductionReviewer | None = None,
 ) -> list[str]:
-    """Share Legacy's fail-closed reviewer gate for single-file and tree candidates."""
+    """Share Legacy's fail-closed reviewer gate for raw and tree candidates."""
     return legacy_policy.production_kernel_violations(
         workspace, framework, require_gluon=require_gluon,
         production_reviewer=production_reviewer,

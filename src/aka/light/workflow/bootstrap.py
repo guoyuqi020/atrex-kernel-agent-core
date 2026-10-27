@@ -95,7 +95,6 @@ from aka.light.workflow.session_io import (
 from aka.light.workspace.assets import (_agent_runtime_directive, link_runtime)
 from aka.light.workspace.state import (
     git_head,
-    git_kernel_blob,
     git_path_blob,
     git_worktree_blob,
     head_kernel_is_initial_baseline,
@@ -974,6 +973,14 @@ class Campaign:
             cwd=str(self.workspace.parent),
             check=True,
         )
+        # Normalize before any commit, Agent session or V0 measurement. The
+        # shell initializer's kernel.py is only a transient copy boundary.
+        from aka.light.workspace.sources import default_tree, install, pack
+        raw = (self.workspace / "kernel.py").read_bytes()
+        source_policy, source_files = default_tree({"kernel.py": raw})
+        self._selected_initial_source = pack(source_files, source_policy)
+        install(self.workspace, self._selected_initial_source)
+        (self.workspace / "kernel.py").unlink()
         # Native tasks always expose a generalized public contract. Exact shapes and
         # release metadata remain in the source operator directory and are injected only at the
         # sandbox boundary. A missing public contract is authored before the baseline session.
@@ -985,7 +992,7 @@ class Campaign:
         self._ensure_agent_problem()
         if generalized:
             # Seed the immutable public contract into the eventual V0 commit even when the
-            # baseline agent stages only its own implementation files.
+            # baseline agent stages only its own Kernel source files.
             subprocess.run(
                 ["git", "add", AGENT_PROBLEM_FILENAME],
                 cwd=str(self.workspace),
@@ -1195,14 +1202,23 @@ class Campaign:
 
     def _setup_baseline_native(self, op_dir: Path, *, generalized: bool) -> None:
         """Seed native Atrex-Bench V0 without launching a coding Agent."""
-        kernel_path = self.workspace / "kernel.py"
+        from aka.light.workspace.sources import (
+            entrypoint as source_entrypoint,
+            policy_at,
+            snapshot as source_snapshot,
+            unpack,
+        )
+        policy = policy_at(self.workspace)
+        entry = source_entrypoint(policy)
+        kernel_path = self.workspace / entry
         reference_path = self.workspace / "reference.py"
         if not kernel_path.is_file() or not reference_path.is_file():
-            raise RuntimeError("native V0 requires workspace kernel.py and reference.py")
-        selected = getattr(self, "_selected_initial_kernel", reference_path.read_bytes())
-        if kernel_path.read_bytes() != selected:
+            raise RuntimeError(f"native V0 requires workspace {entry} and reference.py")
+        selected = getattr(self, "_selected_initial_source", reference_path.read_bytes())
+        current_source = source_snapshot(self.workspace, policy=policy)
+        if current_source != selected:
             raise RuntimeError(
-                "native V0 kernel.py does not match the selected initial source; refusing "
+                "native V0 source tree does not match the selected initial source; refusing "
                 "mechanical baseline generation"
             )
         (self.workspace / "README.md").write_text(
@@ -1212,15 +1228,14 @@ class Campaign:
             ".gitignore",
             "CLAUDE.md",
             "README.md",
-            "kernel.py",
+            entry,
             "test_kernel.py",
             "profile_driver.py",
             *agent_visible_operator_files(op_dir, generalized=generalized),
         ]
-        from aka.light.workspace.sources import snapshot as source_snapshot, unpack, POLICY
-        policy, files = unpack(source_snapshot(self.workspace))
+        policy, files = unpack(current_source)
         if policy is not None:
-            source_paths += [POLICY, *files]
+            source_paths += list(files)
         source_paths = list(
             dict.fromkeys(
                 path for path in source_paths if (self.workspace / path).is_file()
@@ -1245,7 +1260,7 @@ class Campaign:
             )
         source_commit = v0_baseline_commit(self.workspace)
         if not source_commit:
-            raise RuntimeError("native V0 has no committed kernel.py")
+            raise RuntimeError(f"native V0 has no committed {entry}")
         from aka.light.workspace.sources import from_git
         if from_git(self.workspace, source_commit) != source_snapshot(self.workspace):
             raise RuntimeError("native V0 source history does not match the selected source")
@@ -1327,7 +1342,8 @@ class Campaign:
 
         n = FRAMEWORK_BASELINE_VERSION
         baseline_commit = self._v0_baseline_commit()
-        v0_blob = git_path_blob(self.workspace, baseline_commit, "kernel.py")
+        from aka.light.workspace.sources import from_git
+        v0_blob = from_git(self.workspace, baseline_commit)
         pre_head = git_head(self.workspace)
         self._ensure_framework_baseline_solution_manifest()
 
@@ -1345,7 +1361,7 @@ class Campaign:
                     label="framework baseline",
                 )
             finally:
-                self._warn_restored_baseline_paths(baseline_commit)
+                self._warn_restored_baseline_paths(pre_head)
             if res.exit_status != 0 and res.tokens == 0:
                 raise RuntimeError(
                     "the framework baseline Agent exited without usable output; "
@@ -1353,23 +1369,21 @@ class Campaign:
                 )
             recovery_used = False
             problem = self._framework_baseline_problem(
-                v0_blob, baseline_commit, include_policy_review=False
+                v0_blob, pre_head, include_policy_review=False
             )
             if problem:
-                self._recover_framework_baseline(
-                    problem, v0_blob, baseline_commit, pre_head
-                )
+                self._recover_framework_baseline(problem, pre_head)
                 recovery_used = True
-                self._warn_restored_baseline_paths(baseline_commit)
+                self._warn_restored_baseline_paths(pre_head)
                 problem = self._framework_baseline_problem(
-                    v0_blob, baseline_commit, include_policy_review=False
+                    v0_blob, pre_head, include_policy_review=False
                 )
         else:  # adopt: our own interrupted run already committed the kernel
             recovery_used = False
             self._sync_framework_baseline_live(phase="framework_baseline")
-            self._warn_restored_baseline_paths(baseline_commit)
+            self._warn_restored_baseline_paths(pre_head)
             problem = self._framework_baseline_problem(
-                v0_blob, baseline_commit, include_policy_review=False
+                v0_blob, pre_head, include_policy_review=False
             )
         result: Optional[dict] = None
         if not problem:
@@ -1383,13 +1397,11 @@ class Campaign:
             # full-domain or policy problem, then rerun the independent gates once.
             if problem.startswith(SUPPLEMENTAL_REPAIR_PREFIX):
                 numerical_repairs += 1
-            self._recover_framework_baseline(
-                problem, v0_blob, baseline_commit, pre_head
-            )
+            self._recover_framework_baseline(problem, pre_head)
             recovery_used = True
-            self._warn_restored_baseline_paths(baseline_commit)
+            self._warn_restored_baseline_paths(pre_head)
             problem = self._framework_baseline_problem(
-                v0_blob, baseline_commit, include_policy_review=False
+                v0_blob, pre_head, include_policy_review=False
             )
             if not problem:
                 result, problem = self._framework_baseline_external_gates(n)
@@ -1404,7 +1416,7 @@ class Campaign:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-            self._warn_restored_baseline_paths(baseline_commit)
+            self._warn_restored_baseline_paths(pre_head)
             self._record_framework_baseline_failure(problem)
             self._sync_framework_baseline_live(
                 phase="failed",
@@ -1503,7 +1515,13 @@ class Campaign:
 
     def _framework_baseline_decision(self) -> tuple[str, str]:
         """Resolve what the stage should do: skip | pin | run | adopt, with the reason."""
-        from aka.light.workspace.sources import policy_at
+        from aka.light.workspace.sources import (
+            from_git,
+            implementation_entry,
+            policy_at,
+            snapshot as source_snapshot,
+            unpack,
+        )
         if self.framework_baseline == "never":
             return "skip", ""
         if latest_version(self.workspace) < 0 or not git_head(self.workspace):
@@ -1517,13 +1535,11 @@ class Campaign:
         if pinned_commit:
             return "skip", f"already pinned at {pinned_commit[:8]} (v{pinned_version})"
 
-        if policy_at(self.workspace, committed=True) is not None:
-            return "pin", "source-tree task keeps the pinned package/adapter as its Framework baseline"
-
         progressed = not head_kernel_is_initial_baseline(self.workspace)
-        dirty_candidate = git_worktree_blob(
-            self.workspace, "kernel.py"
-        ) != git_path_blob(self.workspace, "HEAD", "kernel.py")
+        try:
+            dirty_candidate = source_snapshot(self.workspace) != from_git(self.workspace, "HEAD")
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            dirty_candidate = True
         restart_journal = framework_baseline_progress_path(self.workspace).is_file()
         # A compliant dirty candidate must never cause V0 itself to be pinned.  It is an
         # interrupted V1 worktree and needs validation/recovery first.
@@ -1547,10 +1563,10 @@ class Campaign:
             reference_blob = git_path_blob(
                 self.workspace, baseline_commit, "reference.py"
             )
+            baseline_policy, baseline_files = unpack(from_git(self.workspace, baseline_commit))
             known_reference_wrapper = bool(
                 reference_blob
-                and reference_blob
-                == git_path_blob(self.workspace, baseline_commit, "kernel.py")
+                and reference_blob == baseline_files.get(implementation_entry(baseline_policy))
             ) or is_sol_op(Path(self.kernel_demo).resolve().parent)
             if known_reference_wrapper:
                 return (
@@ -1575,7 +1591,7 @@ class Campaign:
     def _v0_baseline_commit(self) -> str:
         commit = v0_baseline_commit(self.workspace)
         if not commit:
-            raise RuntimeError("framework baseline requires a committed V0 kernel.py")
+            raise RuntimeError("framework baseline requires a committed V0 Kernel source tree")
         return commit
 
     def _framework_baseline_supervisor_order(self) -> tuple[str, ...]:
@@ -1981,7 +1997,7 @@ class Campaign:
         sections = [
             "## Mandatory external pre-implementation correctness guidance\n",
             " and ".join(reviewer_labels)
-            + " reviewed the bounded public packet. Before editing `kernel.py`, reconcile the "
+            + " reviewed the bounded public packet. Before editing the Kernel implementation, reconcile the "
             "available guidance against the immutable reference. Shared requirements are "
             "mandatory; reviewer suggestions never override the public contract.\n",
         ]
@@ -2067,8 +2083,8 @@ class Campaign:
                 stage_name="Framework baseline",
                 initial_purpose="framework_baseline",
                 completion_instruction=(
-                    "Finish the preserved V1 implementation in kernel.py and its declared source "
-                    "tree. Leave the candidate ready for the Supervisor's framework-baseline "
+                    "Finish the preserved V1 implementation inside adapter.py and, if useful, "
+                    "implementation/. Leave the complete candidate ready for the Supervisor's framework-baseline "
                     "gates; do not create Git commits or submit an episode-report."
                 ),
                 reasoning_effort="max",
@@ -2129,7 +2145,11 @@ class Campaign:
 
     def _restore_framework_baseline_candidate(self, v0_blob: str) -> None:
         """Restore an ignored snapshot only when the worktree fell back to the V0 wrapper."""
-        if git_worktree_blob(self.workspace, "kernel.py") != v0_blob:
+        from aka.light.workspace.sources import snapshot as source_snapshot
+        try:
+            if source_snapshot(self.workspace) != v0_blob:
+                return
+        except (OSError, ValueError):
             return
         try:
             progress = load_framework_baseline_progress(self.workspace)
@@ -2140,7 +2160,11 @@ class Campaign:
         if not isinstance(snapshot, dict):
             return
         restored = restore_latest_framework_baseline_candidate(self.workspace)
-        if restored and git_worktree_blob(self.workspace, "kernel.py") != v0_blob:
+        try:
+            changed = source_snapshot(self.workspace) != v0_blob
+        except (OSError, ValueError):
+            changed = bool(restored)
+        if restored and changed:
             print(
                 "[orchestrator] restored interrupted V1 candidate from local checkpoint: "
                 + ", ".join(restored),
@@ -2199,26 +2223,35 @@ class Campaign:
             else ""
         )
         entry_symbol = "Model" if "class Model" in reference_source else "run"
+        from aka.light.workspace.sources import collect, entrypoint, policy_at
+        source_policy = policy_at(self.workspace)
+        candidate_entry = entrypoint(source_policy)
+        candidate_files = (
+            sorted(collect(self.workspace, source_policy))
+            if source_policy is not None
+            else [candidate_entry]
+        )
         manifest = {
             "name": f"{self.campaign_name}_v1_{language}",
             "spec": {
                 "languages": ["python", language],
                 "dependencies": dependencies,
-                "entry_point": f"kernel.py::{entry_symbol}",
+                "entry_point": f"{candidate_entry}::{entry_symbol}",
             },
             "sources": [
                 {
-                    "path": "kernel.py",
+                    "path": source_path,
                     "role": (
-                        "Single self-contained candidate file. Update this description and "
-                        "dependency roles to match the implemented framework loader exactly."
+                        "Self-contained candidate source. Update this description and dependency "
+                        "roles to match the implemented framework loader exactly."
                     ),
                 }
+                for source_path in candidate_files
             ],
             "dependency_roles": {
                 dependency: (
                     "candidate framework/runtime plumbing; update with the exact non-compute "
-                    "role used by kernel.py"
+                    f"role used by {candidate_entry} and its implementation tree"
                 )
                 for dependency in dependencies
             },
@@ -2267,6 +2300,15 @@ class Campaign:
 
     def _framework_baseline_prompt(self, n: int) -> str:
         smoke_command, smoke_scope = self._framework_baseline_smoke_command(n)
+        from aka.light.workspace.sources import policy_at
+        source_policy = policy_at(self.workspace)
+        source_instructions = (
+            "Keep the required evaluator entry point at editable root `adapter.py`. "
+            "You may implement the whole Kernel there or add, modify, and remove files "
+            "inside `implementation/` and import them from `adapter.py`."
+            if source_policy is not None
+            else "This SOL Framework Baseline edits the candidate `kernel.py`."
+        )
         return _render(
             PROMPTS_DIR / "framework_baseline.md",
             PLUGINS=self.plugin_directive("framework_baseline"),
@@ -2277,6 +2319,7 @@ class Campaign:
             FRAMEWORK=self.framework,
             ARCH=self.arch or "the runtime GPU arch",
             NOTES=self.notes,
+            SOURCE_INSTRUCTIONS=source_instructions,
             AGENT_RUNTIME=_agent_runtime_directive(
                 self.agent_cli,
                 is_ppu=hardware_vendor(self.platform, self.arch) == "ppu",
@@ -2302,7 +2345,7 @@ class Campaign:
             MODE_POLICY=self._mode_directive(),
         )
 
-    def _restore_immutable_baseline_paths(self, baseline_commit: str) -> list[str]:
+    def _restore_immutable_baseline_paths(self, immutable_commit: str) -> list[str]:
         """Put back any ground-truth file the session edited, and report what was restored.
 
         A session that "fixes" the harness or memory/v0.json is a compliance problem, but a
@@ -2311,11 +2354,11 @@ class Campaign:
         """
         restored: list[str] = []
         for path in IMMUTABLE_BASELINE_PATHS:
-            original = git_path_blob(self.workspace, baseline_commit, path)
+            original = git_path_blob(self.workspace, immutable_commit, path)
             if not original or original == git_worktree_blob(self.workspace, path):
                 continue
             checkout = subprocess.run(
-                ["git", "checkout", baseline_commit, "--", path],
+                ["git", "checkout", immutable_commit, "--", path],
                 cwd=str(self.workspace),
                 check=False,
                 stdout=subprocess.DEVNULL,
@@ -2328,7 +2371,7 @@ class Campaign:
     def _framework_baseline_problem(
         self,
         v0_blob: str,
-        baseline_commit: str,
+        immutable_commit: str,
         *,
         include_policy_review: bool = True,
     ) -> str:
@@ -2337,9 +2380,13 @@ class Campaign:
         Everything is judged from the worktree: that is what the gateway uploads, and it lets a
         session that wrote the kernel but never committed it still be accepted.
         """
-        candidate_blob = git_worktree_blob(self.workspace, "kernel.py")
-        if not candidate_blob or candidate_blob == v0_blob:
-            return "the session left the V0 kernel unchanged; no framework implementation was produced"
+        from aka.light.workspace.sources import snapshot as source_snapshot
+        try:
+            candidate_blob = source_snapshot(self.workspace)
+        except (OSError, ValueError) as exc:
+            return f"the candidate Kernel source tree is invalid: {exc}"
+        if candidate_blob == v0_blob:
+            return "the session left the V0 Kernel source tree unchanged; no framework implementation was produced"
         violations = [] if not self.source_checks_enabled else (
             self._production_kernel_violations()
             if include_policy_review
@@ -2358,8 +2405,8 @@ class Campaign:
         mutated = [
             path
             for path in IMMUTABLE_BASELINE_PATHS
-            if git_path_blob(self.workspace, baseline_commit, path)
-            and git_path_blob(self.workspace, baseline_commit, path)
+            if git_path_blob(self.workspace, immutable_commit, path)
+            and git_path_blob(self.workspace, immutable_commit, path)
             != git_worktree_blob(self.workspace, path)
         ]
         if mutated:
@@ -2485,8 +2532,8 @@ class Campaign:
             )
         return result, ""
 
-    def _warn_restored_baseline_paths(self, baseline_commit: str) -> None:
-        restored = self._restore_immutable_baseline_paths(baseline_commit)
+    def _warn_restored_baseline_paths(self, immutable_commit: str) -> None:
+        restored = self._restore_immutable_baseline_paths(immutable_commit)
         if restored:
             print(
                 "[orchestrator] framework baseline session edited immutable ground truth; "
@@ -2495,9 +2542,7 @@ class Campaign:
                 flush=True,
             )
 
-    def _recover_framework_baseline(
-        self, problem: str, v0_blob: str, baseline_commit: str, pre_head: str
-    ) -> None:
+    def _recover_framework_baseline(self, problem: str, pre_head: str) -> None:
         """Run one recovery session; unexpected exits invoke the progress supervisor."""
         print(
             f"[orchestrator] WARNING: framework baseline rejected ({problem}); "
@@ -2521,7 +2566,7 @@ class Campaign:
                 rejection=problem,
             )
         finally:
-            self._warn_restored_baseline_paths(baseline_commit)
+            self._warn_restored_baseline_paths(pre_head)
 
     def _record_framework_baseline_failure(self, problem: str) -> None:
         """Persist why the framework baseline was rejected, uncommitted so a reset cannot lose it."""
@@ -2562,11 +2607,28 @@ class Campaign:
         save_version_record(self.workspace, n, memory, generate_memory=self.generate_memory)
 
     def _commit_framework_baseline(self, n: int, result: dict) -> str:
-        """Commit the accepted kernel (C1) and then pin it in a metadata-only commit (C2)."""
+        """Commit the accepted source tree (C1), then pin it in metadata-only C2."""
+        from aka.light.workspace.sources import (
+            from_git,
+            policy_at,
+            snapshot as source_snapshot,
+        )
+        source_policy = policy_at(self.workspace, committed=True)
+        source_paths = (
+            source_policy["editable_paths"]
+            if source_policy is not None
+            else ["kernel.py"]
+        )
+        subprocess.run(
+            ["git", "add", "-A", "--", *dict.fromkeys(source_paths)],
+            cwd=str(self.workspace),
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         staged = [
             path
             for path in (
-                "kernel.py",
                 "solution.json",
                 "CLAUDE.md",
                 "README.md",
@@ -2604,18 +2666,10 @@ class Campaign:
                 check=True,
                 stdout=subprocess.DEVNULL,
             )
-        kernel_commit = subprocess.run(
-            ["git", "rev-list", "-1", "HEAD", "--", "kernel.py"],
-            cwd=str(self.workspace),
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        if git_kernel_blob(self.workspace) != git_worktree_blob(
-            self.workspace, "kernel.py"
-        ):
+        kernel_commit = git_head(self.workspace)
+        if from_git(self.workspace, kernel_commit) != source_snapshot(self.workspace):
             raise RuntimeError(
-                "framework baseline kernel.py differs between the worktree and the commit"
+                "framework baseline source tree differs between the worktree and the commit"
             )
 
         _record_local_test_result(
@@ -2643,8 +2697,12 @@ class Campaign:
 
         Deliberately a separate commit rather than an amend: amending would rewrite the very
         commit whose sha the marker records, leaving a dangling pointer. This commit does not
-        touch kernel.py, so it never registers as an optimization win.
+        touch Kernel source, so it never registers as an optimization win.
         """
+        from aka.light.workspace.sources import entrypoint as source_entrypoint, policy_at
+        entry = source_entrypoint(policy_at(self.workspace, committed=True))
+        source_blob = git_path_blob(self.workspace, commit, entry)
+        from aka.light.workspace.sources import from_git
         marker = {
             "schema_version": 1,
             "version": f"v{version}",
@@ -2652,9 +2710,13 @@ class Campaign:
             "platform": self.platform,
             "arch": self.arch,
             "commit": commit,
-            "kernel_blob": git_path_blob(self.workspace, commit, "kernel.py"),
+            "source_entry": entry,
+            "source_blob": source_blob,
+            "source_digest": hashlib.sha256(from_git(self.workspace, commit)).hexdigest(),
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         }
+        if entry == "kernel.py":
+            marker["kernel_blob"] = source_blob
         (self.workspace / FRAMEWORK_BASELINE_FILE).write_text(
             json.dumps(marker, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )

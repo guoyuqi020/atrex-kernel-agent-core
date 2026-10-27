@@ -93,7 +93,7 @@ same hypothesis; propose a derived Direction when the hypothesis changes.
 
 ## Measure and record an Experiment
 
-Edit `kernel.py`, then run the evaluator prescribed by the current phase. For an ordinary full
+Edit the implementation files declared by `WORKSPACE.md`, then run the evaluator prescribed by the current phase. For an ordinary full
 evaluation where no additional options are required:
 
 ```bash
@@ -218,7 +218,7 @@ proposed/deferred Directions may remain for later exploration.
 
 ## Candidate report
 
-Leave the selected measurement's exact source in `kernel.py`. The Supervisor reuses matching six-case correctness evidence, or performs the missing check, before sealing that source into a candidate Commit. Do not run Git or supply a Commit ID. Save as `scratch/episode-report.json`:
+Leave the selected measurement's complete source tree in place. The Supervisor reuses matching six-case correctness evidence, or performs the missing check, before sealing that tree into a candidate Commit. Do not run Git or supply a Commit ID. Save as `scratch/episode-report.json`:
 
 ```json
 {
@@ -238,8 +238,8 @@ Response:
 {"status":"accepted","message":"Report accepted; Supervisor committed the measured Kernel for verification"}
 ```
 
-The selected Experiment must belong to this Episode and cite a passing Evaluate record for
-byte-identical current `kernel.py`. Profile/Dev/Check/Disassemble
+The selected Experiment must belong to this Episode and cite a passing Evaluate record for the
+byte-identical current Kernel source tree. Profile/Dev/Check/Disassemble
 or ABBA alone cannot satisfy this report binding; custom-input or correctness-only diagnostics are
 not substitutes for standard performance evidence. Before accepting `candidate_ready`, the Supervisor
 reuses a matching successful full or correctness-only Evaluate with the base case plus five additional

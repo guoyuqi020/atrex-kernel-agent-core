@@ -11,8 +11,8 @@ Framework Baseline has its own smoke-and-exit procedure, not an Episode report.
 All Episode outcomes require valid report fields and no in-progress Directions.
 
 New Long Horizon Episodes use Runtime Journal. Do not call legacy append/finalize, manage Git,
-or write control handoffs. Leave the selected measured source in `kernel.py`; the Supervisor
-creates the commit and decides acceptance independently.
+or write control handoffs. Leave the selected measured source tree in place, including the
+editable `adapter.py` entry point; the Supervisor creates the commit and decides acceptance independently.
 
 1. At the beginning of each Episode, call `list-directions` for the compact catalog, then call
    `load-direction` for every visible Direction. Choose the most important Direction and explain the

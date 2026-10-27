@@ -696,10 +696,10 @@ def _make_input_bundle(
 
 def _declared_candidate_sources(workspace: Path) -> set[str]:
     """Return the complete contracted tree or legacy solution sources."""
-    from aka.light.workspace.sources import policy_at, collect, POLICY
+    from aka.light.workspace.sources import policy_at, collect
     policy = policy_at(workspace)
     if policy is not None:
-        return set(collect(workspace, policy)) | {POLICY}
+        return set(collect(workspace, policy))
     selected: set[str] = set()
     solution_path = workspace / "solution.json"
     if solution_path.is_file():
@@ -1150,9 +1150,11 @@ def _typed_workspace_limitation(
     workspace: Path, command: list[str], kind: str
 ) -> str | None:
     """Explain why the typed run/profile source contract cannot represent a workspace."""
-    from aka.light.workspace.sources import policy_at
-    source_tree = policy_at(workspace) is not None
-    required = ("kernel.py", "reference.py", "input.py")
+    from aka.light.workspace.sources import entrypoint, policy_at
+    source_policy = policy_at(workspace)
+    source_tree = source_policy is not None
+    candidate_entry = entrypoint(source_policy)
+    required = (candidate_entry, "reference.py", "input.py")
     missing = [name for name in required if not (workspace / name).is_file()]
     if missing:
         return "missing " + ", ".join(missing)
@@ -1183,7 +1185,7 @@ def _typed_workspace_limitation(
                 return "solution.json declares auxiliary candidate sources"
 
     try:
-        tree = ast.parse((workspace / "kernel.py").read_text(encoding="utf-8"))
+        tree = ast.parse((workspace / candidate_entry).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, SyntaxError):
         tree = None
     if tree is not None:
@@ -1303,6 +1305,9 @@ def build_typed_request(
     evaluation_mode: str | None = None,
 ) -> dict[str, Any]:
     """Build a Gateway typed request without importing the agate package."""
+    from aka.light.workspace.sources import entrypoint, policy_at
+    candidate_entry = entrypoint(policy_at(workspace))
+    candidate_source = (workspace / candidate_entry).read_text(encoding="utf-8")
     dependency_specs = list(requirements)
     if len(dependency_specs) > 128:
         raise ValueError("at most 128 --requirement values are allowed")
@@ -1391,7 +1396,7 @@ def build_typed_request(
             raise ValueError(f"shape {selected_shape_id!r} init_kwargs must be an object or null")
         request: dict[str, Any] = {
             "spec": {"target_hardware": [hardware]},
-            "candidate": (workspace / "kernel.py").read_text(encoding="utf-8"),
+            "candidate": candidate_source,
             "env_vars": _parse_env_items(env_items),
             "init_kwargs": dict(init_value or {}),
             # Local Gateway uses this evaluator-owned input to perform a real
@@ -1479,7 +1484,7 @@ def build_typed_request(
     request: dict[str, Any] = {
         "name": f"{workspace.name}_{kind}",
         "spec": spec,
-        "candidate": (workspace / "kernel.py").read_text(encoding="utf-8"),
+        "candidate": candidate_source,
         "reference": reference,
         "options": {
             "num_correctness_cases": 1 + multi_seed,
@@ -5003,13 +5008,14 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
     evaluator = kind == "run" or bool(baseline_path) or _is_numerical_probe_command(command)
     selected = set(_evaluation_input_paths(workspace, command) if evaluator else
                    _command_input_paths(workspace, command, args.input))
-    selected.add("kernel.py")
-    from aka.light.workspace.sources import policy_at, collect, snapshot as source_snapshot, POLICY
+    from aka.light.workspace.sources import (
+        collect, entrypoint, policy_at, snapshot as source_snapshot,
+    )
     source_policy = policy_at(workspace)
+    selected.add(entrypoint(source_policy))
     source_snapshots = {}
     if source_policy is not None:
         selected.update(collect(workspace, source_policy))
-        selected.add(POLICY)
         source_snapshots["candidate"] = hashlib.sha256(source_snapshot(workspace)).hexdigest()
     for value in args.input or []:
         selected.update(_expand_workspace_input(workspace, value))
@@ -5019,7 +5025,6 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
             if source_policy is None or baseline_policy != source_policy:
                 raise ValueError("ABBA tree baseline must carry the same task-owned source contract")
             selected.update(baseline_path + "/" + name for name in collect(workspace / baseline_path, baseline_policy))
-            selected.add(baseline_path + "/" + POLICY)
             source_snapshots["baseline"] = hashlib.sha256(source_snapshot(workspace / baseline_path)).hexdigest()
         else:
             if source_policy is not None:
@@ -5118,8 +5123,9 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
         options.pop("comparison_run_timeout", None)
     if baseline_path and baseline_path not in files and "baseline" not in source_snapshots:
         raise ValueError("--baseline-path must name an existing regular workspace file")
-    if "kernel.py" not in files and operation != "dev":
-        raise ValueError("Measurement requires an existing kernel.py")
+    candidate_entry = entrypoint(source_policy)
+    if candidate_entry not in files and operation != "dev":
+        raise ValueError(f"Measurement requires an existing {candidate_entry}")
     gateway_environment = {name: environment[name] for name in (
         "AGATE_URL", "ATREX_SANDBOX_PROFILE", *PROFILE_ENVIRONMENT_KEYS,
     ) if name in environment}

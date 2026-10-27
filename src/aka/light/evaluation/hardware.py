@@ -90,23 +90,28 @@ def _is_triton_family(framework: str) -> bool:
 
 
 def kernel_is_gluon(workspace: Path) -> bool:
-    """True once the working-tree kernel.py has a real Gluon import."""
-    k = workspace / "kernel.py"
-    return k.exists() and source_uses_gluon(
-        k.read_text(encoding="utf-8", errors="ignore")
-    )
+    """True once any working-tree Kernel source has a real Gluon import."""
+    try:
+        from aka.light.workspace.sources import collect, policy_at
+        policy = policy_at(workspace)
+        files = collect(workspace, policy) if policy is not None else {
+            "kernel.py": (workspace / "kernel.py").read_bytes()
+        }
+    except (OSError, ValueError):
+        return False
+    return any(source_uses_gluon(data.decode("utf-8", errors="ignore"))
+               for data in files.values())
 
 
 def head_kernel_is_gluon(workspace: Path) -> bool:
-    """True when the COMMITTED HEAD kernel.py is Gluon. Authoritative accept signal for a convert
-    session — more reliable than memory's git_commit_hash, which a session may leave unset even after
-    committing."""
+    """True when any source in the committed HEAD Kernel is Gluon."""
     try:
-        out = subprocess.run(["git", "show", "HEAD:kernel.py"], cwd=str(workspace),
-                             capture_output=True, text=True)
-    except OSError:
+        from aka.light.workspace.sources import from_git, unpack
+        _, files = unpack(from_git(workspace, "HEAD"))
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
         return False
-    return out.returncode == 0 and source_uses_gluon(out.stdout)
+    return any(source_uses_gluon(data.decode("utf-8", errors="ignore"))
+               for data in files.values())
 
 
 def should_convert_to_gluon(

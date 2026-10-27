@@ -221,9 +221,14 @@ def _latest_complete_episode_performance(
     path = episode_workspace / EPISODE_EVALUATIONS_PATH
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-        kernel_path = episode_workspace / "kernel.py"
-        from aka.light.workspace.sources import snapshot as source_snapshot
-        kernel_bytes = source_snapshot(episode_workspace)
+        from aka.light.workspace.sources import (
+            entrypoint as source_entrypoint,
+            policy_at,
+            snapshot as source_snapshot,
+        )
+        policy = policy_at(episode_workspace)
+        kernel_path = episode_workspace / source_entrypoint(policy)
+        kernel_bytes = source_snapshot(episode_workspace, policy=policy)
         kernel_sha256 = hashlib.sha256(kernel_bytes).hexdigest()
         kernel_mtime = kernel_path.stat().st_mtime
     except (OSError, ValueError):

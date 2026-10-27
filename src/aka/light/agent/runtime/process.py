@@ -178,13 +178,13 @@ def _run_bounded(
     budget = current_budget()
     default_timeout = float((env or {}).get("ATREX_AGENT_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
     limit = validate_timeout(timeout if timeout is not None else default_timeout, "Agent timeout_seconds")
-    if budget is not None:
+    if budget is not None and budget.limited:
         limit = min(limit, budget.remaining)
     if limit <= 0:
         control.close()
         return "", "Agent active-time budget exhausted", -signal.SIGKILL, True
     budget_state_path = cwd / ".atrex_long_horizon" / "agent-active-budget.json"
-    if budget is not None:
+    if budget is not None and budget.limited:
         control.configure_budget(
             budget_state_path,
             budget_id=budget.id,
@@ -206,7 +206,7 @@ def _run_bounded(
             limit,
             budget_state_path=(
                 Path(".atrex_long_horizon/agent-active-budget.json")
-                if budget is not None else None
+                if budget is not None and budget.limited else None
             ),
         )
     launch, view = wrap_agent_command(

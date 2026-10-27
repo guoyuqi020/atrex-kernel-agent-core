@@ -30,8 +30,8 @@ def validate_timeout(value, name="episode_timeout_seconds"):
 
 
 class ActiveBudget:
-    def __init__(self, seconds=DEFAULT_TIMEOUT_SECONDS):
-        self.seconds = validate_timeout(seconds)
+    def __init__(self, seconds=None):
+        self.seconds = None if seconds is None else validate_timeout(seconds)
         self.used = 0.0
         # Recovery sessions within one stage share the same budget identity so
         # Claude's reminder hook does not repeat already delivered thresholds.
@@ -39,12 +39,16 @@ class ActiveBudget:
 
     @property
     def remaining(self):
-        return max(0.0, self.seconds - self.used)
+        return math.inf if self.seconds is None else max(0.0, self.seconds - self.used)
+
+    @property
+    def limited(self):
+        return self.seconds is not None
 
 
 @contextmanager
 def episode_budget(seconds):
-    """One budget across report repair and fresh output-limit recovery sessions."""
+    """One optional budget across report repair and fresh recovery sessions."""
     budget = ActiveBudget(seconds)
     token = _BUDGET.set(budget)
     try:

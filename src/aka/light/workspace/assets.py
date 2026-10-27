@@ -32,10 +32,10 @@ def _agent_runtime_directive(
     knowledge = "".join(f", `{name}`" for name in knowledge_skills) if wiki else ""
     suspension = (
         "Authenticated Runtime requests pause this Agent and its subagents; that wait is excluded "
-        "from the Agent active-time budget."
+        "from any configured Agent active-time budget."
         if pause_agent_during_requests
         else "Runtime request suspension is disabled; request time remains part of the Agent "
-        "active-time budget. Keep each request in the foreground and wait for it to finish."
+        "configured active-time budget. Keep each request in the foreground and wait for it to finish."
     )
     return (
         f"- `skills/` (also discoverable under `{root}/skills/`): `gpu-measurement`, "

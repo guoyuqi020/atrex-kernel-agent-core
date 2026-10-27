@@ -19,13 +19,14 @@ class WorkflowOptions:
     generate_memory: bool = False
     output_limit_recovery_retries: int = 2
     dependency_policy_recovery_retries: int = 2
-    episode_timeout_seconds: float = 14400
+    episode_timeout_seconds: float | None = None
     search: SearchOptions | dict | None = None
     source_tree: dict | None = None
 
     def __post_init__(self):
         from aka.light.agent.execution_clock import validate_timeout
-        validate_timeout(self.episode_timeout_seconds)
+        if self.episode_timeout_seconds is not None:
+            validate_timeout(self.episode_timeout_seconds)
         if (type(self.output_limit_recovery_retries) is not int
                 or not 0 <= self.output_limit_recovery_retries <= 10):
             raise ValueError("output_limit_recovery_retries must be an integer from 0 to 10")

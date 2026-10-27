@@ -77,7 +77,7 @@ def warn_kernel_mismatch(workspace: Path, sealed_source: bytes) -> bool:
         mismatch = True
     if mismatch:
         logging.getLogger(__name__).warning(
-            "Candidate Kernel integrity warning: %s/kernel.py is unreadable or differs from the sealed commit; "
+            "Candidate Kernel integrity warning: source at %s is unreadable or differs from the sealed commit; "
             "acceptance uses the sealed commit", workspace,
         )
     return mismatch

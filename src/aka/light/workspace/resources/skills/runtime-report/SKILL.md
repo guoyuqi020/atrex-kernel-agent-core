@@ -12,8 +12,8 @@ This does not disable automatic measurement persistence, duplicate detection, co
 or independent ABBA promotion. Framework Baseline has its own smoke-and-exit procedure.
 
 Inspect saved measurement evidence and optional canonical `memory/v*.json` summaries when present.
-Implement and measure a candidate, then leave its exact source in place (`kernel.py` or the
-contracted source tree from `WORKSPACE.md`) and cite real Gateway Record IDs in `episode-report`.
+Implement and measure a candidate, then leave its complete source tree in place as declared by
+`WORKSPACE.md` and cite real Gateway Record IDs in `episode-report`.
 No synthetic Direction, Experiment, separate plan/profile document, or Git operation is required.
 
 - [Episode report and examples](references/journal.md): direct evidence selection and repair.

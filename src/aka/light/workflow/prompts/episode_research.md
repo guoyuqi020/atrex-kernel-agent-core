@@ -39,7 +39,7 @@ Use this as a working guide when useful, not as additional mandatory stages:
    measured Kernel, or change Direction.
    Prepare the report as work proceeds, but do not submit it merely because one candidate is already
    promotable. Submit an evidence-backed candidate, pivot, or blocker using the terminal contract
-   below only after no remaining concrete high-value step fits the active-time budget. When deferring
+   below only after no remaining concrete high-value step fits an explicitly configured active-time budget. When deferring
    a Direction, record the smallest next probe and the exact evidence or budget constraint that stopped
    it. If the same high-value Direction was previously deferred without new contrary evidence, test its
    bounded probe before starting a lower-value Direction.

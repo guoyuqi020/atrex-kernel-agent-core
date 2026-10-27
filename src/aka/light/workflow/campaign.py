@@ -102,21 +102,54 @@ class ManagedCampaign(Campaign):
             if initial.kind == "sol" or not self.atrex_bench_root or self.sandbox_ssh:
                 raise ValueError("Source trees require native Atrex-Bench Eval, not SOL/SSH")
             from aka.contracts.content import SourceContent, WorkspaceFile
-            from aka.light.workspace.sources import initial_snapshot, unpack, POLICY
-            import json
+            from aka.light.workspace.sources import initial_snapshot, unpack
             source = initial_snapshot(self.workspace, self.module_options.source_tree)
             policy, files = unpack(source)
-            content = SourceContent(tuple(WorkspaceFile(name, text=data.decode()) for name, data in files.items()) +
-                                    (WorkspaceFile(POLICY, text=json.dumps(policy)),))
+            content = SourceContent(tuple(
+                WorkspaceFile(name, text=data.decode()) for name, data in files.items()
+            ))
         else:
             content = self.source_provider.prepare(SourceRequest(
                 initial=initial, name=self.campaign_name, framework=self.framework,
                 platform=self.platform))
-        self._selected_initial_kernel = next(
-            (entry.source.read_bytes() if entry.source is not None else entry.text.encode()
-             for entry in content.files if entry.path == "kernel.py"), None)
-        if self._selected_initial_kernel is None:
-            raise ValueError("Selected SourceProvider must supply kernel.py")
+
+        # Native tasks enter the unified representation before V0 is committed
+        # or measured.  Framework Baseline therefore edits the same source tree
+        # whose identity is recorded by V0 instead of migrating a measured raw
+        # kernel.py after the fact.  SOL/SSH remains on its legacy wire contract.
+        if (not self.module_options.source_tree and initial.kind != "sol"
+                and self.atrex_bench_root and not self.sandbox_ssh):
+            from aka.contracts.content import SourceContent, WorkspaceFile
+            from aka.light.workspace.sources import default_tree, pack
+
+            entries = tuple(entry for entry in content.files if entry.path == "kernel.py")
+            if len(content.files) != 1 or len(entries) != 1:
+                raise ValueError(
+                    "Native initial source must contain exactly kernel.py; use source_tree "
+                    "for an explicitly imported multi-file Kernel"
+                )
+            entry = entries[0]
+            raw = entry.source.read_bytes() if entry.source is not None else entry.text.encode()
+            policy, files = default_tree({"kernel.py": raw})
+            source = pack(files, policy)
+            content = SourceContent(
+                tuple(
+                    WorkspaceFile(name, text=data.decode("utf-8"))
+                    for name, data in sorted(files.items())
+                ),
+                readme=content.readme,
+            )
+
+        if self.module_options.source_tree or (
+            initial.kind != "sol" and self.atrex_bench_root and not self.sandbox_ssh
+        ):
+            self._selected_initial_source = source
+        else:
+            self._selected_initial_source = next(
+                (entry.source.read_bytes() if entry.source is not None else entry.text.encode()
+                 for entry in content.files if entry.path == "kernel.py"), None)
+        if self._selected_initial_source is None:
+            raise ValueError("Selected SourceProvider must supply a Kernel source")
         if initial.kind == "sol":
             self.candidate_workspace.prepare_sol(self.workspace, content,
                 problem_files=self.problem.agent.files)

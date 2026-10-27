@@ -1,8 +1,9 @@
 # Kernel optimization episode {{EPISODE}}
 
 Optimize the candidate described in `WORKSPACE.md` through evidence-backed engineering.
-For a single-file task edit `kernel.py`; for a source-tree task keep the fixed adapter and
-edit only the declared source directories. Continue investigating,
+Keep the required evaluator entry point at `adapter.py`. It is editable: you may keep the complete
+implementation there, or add, modify, and remove files below `implementation/` and import them from
+`adapter.py`. Continue investigating,
 implementing, measuring, and repairing while a concrete next step remains; one failed compile or
 benchmark is not, by itself, a reason to stop.
 
@@ -59,11 +60,11 @@ rules in `CLAUDE.md` and the relevant tool Skill.
 
 A candidate that already qualifies for nomination is a recoverable checkpoint, not by itself a
 reason to end the Episode. Preserve its exact source and measurement identity before further edits.
-While active-time budget remains, continue with a concrete, evidence-backed next step that has a
-material expected effect on the objective; restore the best measured candidate if the experiment
+While the Episode remains active, continue with a concrete, evidence-backed next step that has a
+material expected effect on the objective; honor any user-configured active-time limit and restore the best measured candidate if the experiment
 fails. A follow-up is secondary only when its expected effect is immaterial, existing evidence
-already resolves it, it has no bounded falsifiable probe, or it cannot fit the remaining active-time
-budget. Do not classify a structural change as secondary merely because it is larger than the last
+already resolves it, it has no bounded falsifiable probe, or it cannot fit a remaining explicitly
+configured active-time budget. Do not classify a structural change as secondary merely because it is larger than the last
 successful edit. Before reporting, either execute each remaining high-value follow-up or record the
 specific evidence or budget constraint that makes it inapplicable now.
 

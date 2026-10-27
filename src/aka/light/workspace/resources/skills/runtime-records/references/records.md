@@ -14,7 +14,7 @@ Agate Job IDs cannot replace these IDs.
 ```bash
 python3 tools/sandbox.py --kind record-read --record-id gateway-11111111111111111111111111111111
 python3 tools/sandbox.py --kind kernel-records --kernel-id kernel-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-python3 tools/sandbox.py --kind kernel-read --kernel-id kernel-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output-path scratch/previous.py
+python3 tools/sandbox.py --kind kernel-read --kernel-id kernel-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output-path scratch/previous-kernel
 ```
 
 `record-read` prints one JSON object, the same public result returned by a new measurement:
@@ -32,7 +32,8 @@ Old stream-only records are converted in memory, without changing their stored e
 submitting GPU work. Private request/options/input hashes are never included.
 
 `kernel-records` lists Record ID, operation and timestamp, not result bodies. `kernel-read`
-writes source to the requested scratch file and acknowledges it. Read that file before restoring it.
+writes the complete source tree to the requested scratch directory and acknowledges it. Inspect
+that directory before restoring it. A SOL record may still produce one file.
 
 Use returned IDs, not these illustrative examples. Shape IDs are opaque. Profile duration and
 Evaluate latency are different measurements; a diagnostic cannot establish untested performance.

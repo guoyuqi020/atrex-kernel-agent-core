@@ -8,7 +8,7 @@ Existing GPU command syntax is preserved, for example:
 Additional typed operations: check, disassemble, env; Wiki: wiki-query, wiki-search,
 wiki-hardware. Use --kind OPERATION --help for the operation's request options.
 Read saved results with --kind record-read --record-id gateway-...;
-copy source with --kind kernel-read --kernel-id kernel-... --output-path scratch/kernel.py;
+copy source with --kind kernel-read --kernel-id kernel-... --output-path scratch/kernel-tree;
 list a Kernel's measurements with --kind kernel-records --kernel-id kernel-....
 Find each Shape's fastest measured Kernel with --kind kernel-pareto-frontier (no GPU job).
 Journal writes: update-direction, record-experiment, episode-report --request-file FILE.

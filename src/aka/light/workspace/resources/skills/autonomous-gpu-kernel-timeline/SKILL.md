@@ -26,7 +26,7 @@ answers the question.
 ## Autonomous loop
 
 1. State one falsifiable timing question and begin with the fewest useful sites.
-2. Save the current clean `kernel.py` content, then create an instrumented working snapshot in the
+2. Save the current clean Kernel source tree, then create an instrumented working snapshot in the
    same episode worktree. This snapshot is not a handoff candidate and must not enter promotion or
    stall accounting.
 3. Run representative correctness through Gateway Evaluate and capture through `--kind dev`.

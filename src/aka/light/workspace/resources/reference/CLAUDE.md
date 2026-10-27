@@ -28,9 +28,10 @@ and finish procedure. Do not assume another DSL, library, or validation procedur
 
 ## Workspace and evidence
 
-- The execution boundary defines writable paths. Keep the executable candidate in `kernel.py`
-  for a single-file task. For a tree task, `WORKSPACE.md` declares editable directories;
-  the adapter and other fixed files must stay unchanged. The entire tree is one candidate;
+- The execution boundary defines writable paths. After V0 measurement, Framework Baseline and every
+  optimization Episode use the same unified tree: editable `adapter.py` is the required evaluator
+  entry point, and optional implementation files live below `implementation/`. You may keep a
+  single-file Kernel in `adapter.py` or split it into multiple files. The entire tree is one candidate;
   update `solution.json` only where the phase permits. Do not edit public contracts or canonical
   memory, or use Git for rollback.
 - Cover the entire public input domain. Opaque Shape IDs identify results, not input parameters;
@@ -72,7 +73,7 @@ Run Runtime commands in the foreground and wait for the same invocation to finis
 Do not add a shell `timeout`, background the command, or start unrelated work while it is
 pending. The session Prompt states whether Runtime request suspension is enabled. When enabled,
 the Supervisor pauses the Agent and its subagents during authenticated Runtime requests and
-excludes that wait from the Agent active-time budget. When disabled, the Supervisor does not
+excludes that wait from any configured Agent active-time budget. When disabled, the Supervisor does not
 pause them and request time remains active time. The request always has its own
 Supervisor-controlled deadline. Do not interpret a quiet wait as a dead Agent.
 If the CLI backend backgrounds a tool call automatically, use its wait/output facility

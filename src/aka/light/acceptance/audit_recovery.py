@@ -36,10 +36,12 @@ def _receipt_path(workspace: Path, episode: int) -> Path:
 def _validate_committed_files(workspace: Path, version: int) -> None:
     # Acknowledging an audit loss cannot repair a missing Kernel/report or an edited checkout.
     record = str(version_record_path(workspace, version).relative_to(workspace))
-    from aka.light.workspace.sources import from_git, snapshot as source_snapshot
-    if from_git(workspace, "HEAD") != source_snapshot(workspace):
+    from aka.light.workspace.sources import entrypoint, from_git, snapshot as source_snapshot, unpack
+    committed_source = from_git(workspace, "HEAD")
+    if committed_source != source_snapshot(workspace):
         raise ValueError("Kernel source tree differs from the committed promotion")
-    for relative in ("kernel.py", record):
+    policy, _ = unpack(committed_source)
+    for relative in (entrypoint(policy), record):
         if promotion_git(workspace, "hash-object", "--", relative).strip() != promotion_git(
             workspace, "rev-parse", f"HEAD:{relative}",
         ).strip():

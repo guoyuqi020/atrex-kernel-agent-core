@@ -98,13 +98,9 @@ class LongSessionRunner:
             raise ValueError(
                 "configure only one of episode_timeout_seconds or active_timeout_seconds"
             )
-        timeout = (
-            active_timeout_seconds
-            if active_timeout_seconds is not None
-            else episode_timeout_seconds
-            if episode_timeout_seconds is not None
-            else 14400
-        )
+        timeout = (active_timeout_seconds
+                   if active_timeout_seconds is not None
+                   else episode_timeout_seconds)
         with episode_budget(timeout):
             return self._run(*args, **kwargs)
 

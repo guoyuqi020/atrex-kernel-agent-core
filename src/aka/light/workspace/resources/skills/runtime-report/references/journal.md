@@ -12,8 +12,8 @@ Run the ordinary evaluator prescribed by the current phase:
 python3 tools/sandbox.py --kind run --no-sync
 ```
 
-Inspect the result using `record-read` if necessary. Leave the exact measured source in place:
-`kernel.py` for single-file tasks, or the contracted source tree described by `WORKSPACE.md`.
+Inspect the result using `record-read` if necessary. Leave the exact measured source tree in
+place as described by `WORKSPACE.md`, including the unchanged adapter and all implementation files.
 Save `scratch/episode-report.json`, replacing the example ID with the returned `gateway_record_id`:
 
 ```json

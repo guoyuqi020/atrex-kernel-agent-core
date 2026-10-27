@@ -49,7 +49,7 @@ class RecordedABBAValidator(GatewayABBAValidator):
 
 ABBA is optional during exploration. To make a comparison eligible for acceptance reuse,
 leave the complete candidate in place and run these exact commands
-(for a source-tree task, `kernel-read` creates a baseline directory, not a Python file):
+(`kernel-read` creates a complete baseline source-tree directory):
 
 ```bash
 {read}

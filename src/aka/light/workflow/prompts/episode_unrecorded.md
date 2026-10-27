@@ -9,7 +9,7 @@ to the current candidate. Prior analysis is interpretation, not measurement auth
 3. Implement and Evaluate; reuse matching saved results rather than repeating identical requests.
 4. Use measured evidence to continue, repair, restore a measured Kernel, or change approach.
 5. Submit the selected candidate, an exhausted approach, or an infrastructure blocker using the
-   terminal contract only after no remaining concrete high-value step fits the active-time budget.
+   terminal contract only after no remaining concrete high-value step fits an explicitly configured active-time budget.
    Do not stop merely because one candidate is already promotable. If a high-value step must be
    deferred, state its smallest next probe and the exact evidence or budget constraint that stopped it;
    do not repeatedly defer it without new contrary evidence.
