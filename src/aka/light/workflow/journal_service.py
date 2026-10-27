@@ -176,7 +176,7 @@ def initialize_journal(
     base_commit: str,
     branch: str,
     memory_version: int | None = None,
-    research_records: bool = False,
+    research_records: bool = True,
 ) -> dict[str, Any]:
     """Create one private Runtime-managed Episode Journal."""
     if type(research_records) is not bool:

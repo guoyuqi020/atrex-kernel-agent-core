@@ -137,7 +137,7 @@ def link_custom_skills(workspace: Path, reserved: tuple[str, ...]) -> None:
 
 
 def link_runtime(workspace: Path, atrex_bench_root: Path | None = None, *, is_ppu: bool = False,
-                 plugin_registry=None, research_records: bool = False) -> None:
+                 plugin_registry=None, research_records: bool = True) -> None:
     from aka.light.agent.home import open_private_directory
     from aka.light.workspace.files import publish
 

@@ -63,7 +63,7 @@ def bounded_tree_entries(root: Path):
 
 class EpisodeWorkspace:
     def __init__(self, worktree: Path, directory: Path, *, is_ppu: bool = False,
-                 research_records: bool = False, plugin_registry=None,
+                 research_records: bool = True, plugin_registry=None,
                  inherit_state: bool = True, adaptive_root: Path | None = None,
                  episode: int | None = None, history=None):
         if plugin_registry is None:

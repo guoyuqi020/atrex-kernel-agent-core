@@ -293,7 +293,7 @@ Patches replace a module's whole configuration; omitted fields receive that prov
 | `aka.light.evaluation.plugin` | No options; constructs measurement plans and projects/aggregates results |
 | `aka.light.experiment.plugin` | No options; injects the selected Evaluation and opens Campaign-scoped stores |
 | `aka.light.acceptance.plugin` | No options; preserves the existing candidate correctness and ABBA policies |
-| `aka.light.workflow.journal_plugin` | `research_records: false`; jointly controls Direction and research Experiment writes |
+| `aka.light.workflow.journal_plugin` | `research_records: true`; jointly controls Direction and research Experiment writes |
 
 Capture can be switched without enabling isolation. Wiki disabling removes its mounted Skill and required-query prompt fragments as well as rejecting the endpoint. Disabling supplemental numerical planning does not disable ordinary evaluator correctness, six-case Atrex-Bench validation, full SOL workload coverage, production constraints, or ABBA acceptance. Three-repetition aggregation is opt-in; untimed correctness checks are not repeated three times.
 
@@ -697,23 +697,23 @@ only when useful; no full-history reread is required.
 ### Optional research recording
 
 Direction and research Experiment recording share one switch because Experiments belong to
-Directions. Both are disabled by default in `light` and `light-sandbox`. To enable them,
+Directions. Both are enabled by default in `light` and `light-sandbox`. To disable them,
 use this composition patch:
 
 ```json
 {
   "api_version": 1,
   "patches": [
-    {"id": "light_journal", "config": {"research_records": true}}
+    {"id": "light_journal", "config": {"research_records": false}}
   ]
 }
 ```
 
 Pass it with `aka optimize --profile light --patch /path/to/patch.json -- ...` (also supported by
-`light-sandbox`). Set it to `false` to disable them again. The selected value is persisted in the private Episode
+`light-sandbox`). Set it to `true` to enable them explicitly. The selected value is persisted in the private Episode
 Journal; change it only at an Episode boundary or in a new workspace, not while resuming an existing
 Episode. Older Journals without the field retain enabled behavior; when resuming an older
-recording-enabled Episode, explicitly set `research_records: true` until that Episode finishes.
+recording-disabled Episode, explicitly set `research_records: false` until that Episode finishes.
 Existing records are not deleted or reinterpreted by the new default.
 
 With recording disabled, `update-direction` and `record-experiment` reject writes; no synthetic rows

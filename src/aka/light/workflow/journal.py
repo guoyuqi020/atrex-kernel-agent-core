@@ -10,7 +10,7 @@ from aka.light.workflow.journal_service import (
 
 @dataclass(frozen=True)
 class JournalFactory:
-    research_records: bool = False
+    research_records: bool = True
 
     def __post_init__(self):
         if type(self.research_records) is not bool:

@@ -7,7 +7,7 @@ identity_packages = ("aka.light.workflow.journal", "aka.light.workflow.journal_s
 Config = {"type": "object", "properties": {
     "research_records": {"type": "boolean"},
 }, "additionalProperties": False}
-Defaults = {"research_records": False}
+Defaults = {"research_records": True}
 
 def apply(ctx, config):
     from .journal import JournalFactory
