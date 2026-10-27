@@ -8,7 +8,11 @@ exploring the selected Direction. Advance at most three Directions per Episode, 
 `in_progress` at a time; additional proposals may remain for later. Put plans in
 `plan`, `success_criteria`, and `stop_conditions`, and classify `change_scope` as `local` or
 `major_redesign`. A major redesign should begin with a bounded, reversible probe while preserving
-the current best. Use `record-experiment` after decisive results,
+the current best. When work reveals a distinct new idea, refresh `list-directions` and compare all
+visible hypotheses before proposing it. Reuse the existing ID for the same hypothesis and use an
+Experiment for implementation variants. A genuinely new idea may be proposed immediately without
+closing or interrupting the active Direction; leave it `proposed` until deliberately selected later.
+Use `record-experiment` after decisive results,
 citing Gateway Record IDs in `gateway_record_ids` and separating `evidence` from `analysis`.
 Reuse saved results and exact source when applicable; separate plan/profile documents are not required.
 

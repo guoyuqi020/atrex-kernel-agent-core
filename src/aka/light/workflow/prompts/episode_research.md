@@ -24,7 +24,11 @@ Use this as a working guide when useful, not as additional mandatory stages:
    or plan files.
 3. **Research the question.** Use available references, Profile, or an explicitly enabled knowledge
    tool to resolve a specific uncertainty that informs the next change. Do not call disabled Wiki
-   or research/profile without a concrete purpose.
+   or research/profile without a concrete purpose. If research reveals a distinct promising idea,
+   refresh `list-directions` before proposing it, compare every visible hypothesis, and load likely
+   matches. Reuse an existing Direction for the same hypothesis and record implementation variants as
+   Experiments. Otherwise propose the new Direction immediately so it is not lost, but leave it
+   `proposed`; do not interrupt the current `in_progress` Direction merely to start the new idea.
 4. **Implement and validate.** Work on one coherent candidate at a time. Use Gateway Evaluate for
    correctness and performance, reusing a matching saved result instead of repeating the measurement.
 5. **Record and decide.** Record each decisive result as an Experiment, separating measured facts

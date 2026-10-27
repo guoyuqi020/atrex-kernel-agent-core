@@ -50,7 +50,12 @@ schedule, or new decomposition. This is an Agent planning assessment, not measur
 the incumbent and put a bounded, reversible probe for a major redesign in `plan`. `name`, `hypothesis`,
 and `rationale` are non-empty strings;
 `plan`, `success_criteria`, and `stop_conditions` are lists of non-empty strings. A proposal records
-the idea but does not start it. Propose any number of useful, nonduplicate directions.
+the idea but does not start it or consume one of the Episode's three start slots. During research,
+record a genuinely distinct promising idea immediately as a proposal so it survives the Session,
+without interrupting the active Direction. Before every proposal, refresh `list-directions`, compare
+all visible hypotheses, and load likely matches. Reuse an existing Direction ID for the same
+hypothesis; a different implementation of that hypothesis belongs in an Experiment. Propose any
+number of useful, nonduplicate Directions.
 
 ## Start or resume exploration
 

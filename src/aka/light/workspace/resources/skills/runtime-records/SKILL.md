@@ -20,13 +20,18 @@ creates the commit and decides acceptance independently.
    propose a new one only when no visible Direction represents the intended work.
 2. Record decisive Experiments promptly, linking actual `gateway_record_ids`; separate measured
    `evidence` from your `analysis`. Measurements are automatically saved; interpretation is not.
-3. Close the Direction with an explicit hypothesis assessment and supporting Experiment IDs.
-4. Prepare the report incrementally. Close all active Directions before `episode-report`.
+3. If work reveals a distinct promising idea, refresh `list-directions`, compare all visible
+   hypotheses, and load likely duplicates. Reuse an existing Direction for the same hypothesis and
+   record implementation variants as Experiments. Otherwise propose the new Direction immediately,
+   but leave it proposed while the current Direction remains active.
+4. Close the Direction with an explicit hypothesis assessment and supporting Experiment IDs.
+5. Prepare the report incrementally. Close all active Directions before `episode-report`.
    Correct validation errors and resubmit. An accepted report is a handoff, not promotion.
 
 The link is Direction → Experiment → Gateway Record → exact Kernel. Propose as many useful
 nonduplicate ideas as needed; start at most three distinct Directions per Episode and only one at
-a time. List exports are snapshots under `scratch/`; rerun list to refresh. Current and finalized
+a time. Proposing does not start a Direction or consume a start slot. List exports are snapshots
+under `scratch/`; rerun list before checking a new idea for duplication. Current and finalized
 earlier Runtime Journals are visible through the tools, including unsuccessful explorations.
 Legacy Journals are not automatically converted into Direction/Experiment IDs.
 
