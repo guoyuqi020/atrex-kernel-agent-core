@@ -18,8 +18,9 @@ creates the commit and decides acceptance independently.
    the strongest candidates as needed, choose the most important Direction, and explain the comparison
    in the `start` event's `analysis`. Reuse an existing Direction when its hypothesis is unchanged;
    propose a new one only when no visible Direction represents the intended work.
-2. Record decisive Experiments promptly, linking actual `gateway_record_ids`; separate measured
-   `evidence` from your `analysis`. Measurements are automatically saved; interpretation is not.
+2. Record decisive Experiments promptly. Use `hypothesis` for this change's concrete, falsifiable
+   prediction; provide the actual `change`, `gateway_record_ids`, your `analysis`, and the resulting
+   action. Runtime derives factual `evidence` from the immutable records; do not submit that field.
 3. If work reveals a distinct promising idea, refresh `list-directions`, compare all visible
    hypotheses, and load likely duplicates. Reuse an existing Direction for the same hypothesis and
    record implementation variants as Experiments. Otherwise propose the new Direction immediately,

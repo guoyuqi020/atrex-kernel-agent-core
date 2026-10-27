@@ -12,8 +12,9 @@ the current best. When work reveals a distinct new idea, refresh `list-direction
 visible hypotheses before proposing it. Reuse the existing ID for the same hypothesis and use an
 Experiment for implementation variants. A genuinely new idea may be proposed immediately without
 closing or interrupting the active Direction; leave it `proposed` until deliberately selected later.
-Use `record-experiment` after decisive results,
-citing Gateway Record IDs in `gateway_record_ids` and separating `evidence` from `analysis`.
+Use `record-experiment` after decisive results. State a concrete falsifiable prediction in the
+Experiment's `hypothesis`, cite Gateway Record IDs, describe the actual `change`, and provide only
+your interpretation in `analysis`; Runtime derives the factual `evidence` summary from the records.
 Reuse saved results and exact source when applicable; separate plan/profile documents are not required.
 
 Close every in-progress Direction before `episode-report`. Each closure must explicitly select

@@ -11,6 +11,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import threading
@@ -67,7 +68,6 @@ EXPERIMENT_FIELDS = {
     "hypothesis",
     "change",
     "gateway_record_ids",
-    "evidence",
     "analysis",
     "action",
 }
@@ -759,6 +759,90 @@ def _completed_record(record: Mapping[str, Any]) -> bool:
     return record["execution_status"] == "completed"
 
 
+def _finite_number(value: object) -> int | float | None:
+    return value if type(value) in (int, float) and math.isfinite(value) else None
+
+
+def _measurement_fact(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a bounded factual receipt from the private projected Gateway result."""
+    kind = record["gateway_kind"]
+    result = record.get("result")
+    result = result if isinstance(result, Mapping) else {}
+    fact: dict[str, Any] = {
+        "gateway_record_id": record["gateway_record_id"],
+        "kind": kind,
+        "execution_status": record["execution_status"],
+        "exit_code": record.get("exit_code"),
+    }
+
+    if kind == "run":
+        verdict = result.get("all_pass", result.get("correct"))
+        fact.update(
+            mode=result.get("mode"),
+            correct=verdict if type(verdict) is bool else None,
+            latency_us_geomean=_finite_number(result.get("latency_us_geomean")),
+            shape_count=(
+                len(result["latency_us_by_shape"])
+                if isinstance(result.get("latency_us_by_shape"), Mapping)
+                else 0
+            ),
+        )
+    elif kind == "same_allocation_abba":
+        verdict = result.get("correct")
+        fact.update(
+            correct=verdict if type(verdict) is bool else None,
+            baseline_us=_finite_number(
+                (result.get("baseline") or {}).get("latency_us_geomean")
+                if isinstance(result.get("baseline"), Mapping)
+                else None
+            ),
+            candidate_us=_finite_number(
+                (result.get("candidate") or {}).get("latency_us_geomean")
+                if isinstance(result.get("candidate"), Mapping)
+                else None
+            ),
+            speedup=_finite_number(result.get("speedup")),
+            improvement_pct=_finite_number(result.get("improvement_pct")),
+        )
+    else:
+        verdict = result.get("correct", result.get("all_pass"))
+        fact.update(
+            result_status=result.get("status") if isinstance(result.get("status"), str) else None,
+            correct=verdict if type(verdict) is bool else None,
+        )
+
+    error = result.get("error")
+    if isinstance(error, Mapping):
+        code = error.get("code", error.get("error_class"))
+        fact["error_code"] = code if isinstance(code, str) else "reported"
+    elif error is not None:
+        fact["error_code"] = "reported"
+    return {key: value for key, value in fact.items() if value is not None}
+
+
+def _measurement_evidence(campaign_root: Path, record_ids: list[str]) -> str:
+    facts = [_measurement_fact(_read_private_gateway_evidence(campaign_root, item)) for item in record_ids]
+    value = {"schema": "runtime_measurement_summary/v1", "records": facts}
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(encoded) <= 16000:
+        return encoded
+    # Keep every cited record visible while dropping optional measurements. The
+    # immutable Gateway Records retain the complete projected results.
+    value["records"] = [
+        {
+            key: fact[key]
+            for key in ("gateway_record_id", "kind", "execution_status", "exit_code", "error_code")
+            if key in fact
+        }
+        for fact in facts
+    ]
+    value["detail"] = "compact; use record-read for complete projected results"
+    return _text(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        "Experiment evidence",
+    )
+
+
 def _closure_support(
     path: Path, campaign_root: Path, direction_id: str, value: Mapping[str, object],
     *, history: _VisibleHistory | None = None,
@@ -851,7 +935,7 @@ def record_experiment(
         "hypothesis": _text(value["hypothesis"], "Experiment hypothesis"),
         "change": _text(value["change"], "Experiment change"),
         "gateway_record_ids": record_ids,
-        "evidence": _text(value["evidence"], "Experiment evidence"),
+        "evidence": _measurement_evidence(campaign_root, record_ids),
         "analysis": _text(value["analysis"], "Experiment analysis"),
         "action": action,
     }
@@ -1094,6 +1178,7 @@ class SupervisorJournalService:
                     key: item[key]
                     for key in (
                         "experiment_id",
+                        "direction_id",
                         "name",
                         "hypothesis",
                         "change",
