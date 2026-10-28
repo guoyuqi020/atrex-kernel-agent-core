@@ -28,7 +28,6 @@ from aka.light.evaluation.gateway import (
     EPISODE_EVALUATIONS_PATH,
     build_parser,
     configured_queue_wait_grace,
-    find_agate,
     validate_evaluation_options,
 )
 from aka.light.workspace.files import (
@@ -139,6 +138,26 @@ def parse_gateway(argv):
     args = build_parser(_RequestParser).parse_args(argv)
     validate_evaluation_options(args)
     return args
+
+
+def validate_gateway_transport(
+    parsed,
+    environment,
+    *,
+    ssh,
+    url,
+    profile,
+) -> None:
+    """Validate only the transport required by the selected operation."""
+    if ssh:
+        return
+    from aka.light.evaluation.source_transport import validate_gateway_sdk
+    validate_gateway_sdk(
+        parsed,
+        environment,
+        authority_url=url,
+        authority_profile=profile,
+    )
 
 
 def failure(message: str, *, repairable: bool = True, next_action: str | None = None,
@@ -775,11 +794,17 @@ class SupervisorRuntime:
                         return None
                     if parsed is not None and parsed.kind in QUERY_KINDS:
                         return self.experiments.query(parsed, capability.workspace)
-                    if parsed is not None and not self.config.ssh:
+                    if parsed is not None:
                         # Invalid operator overrides are known configuration
                         # failures, not Agent errors or unknown GPU outcomes.
                         # Reject before staging, task reservation or execution.
-                        find_agate(environment)
+                        validate_gateway_transport(
+                            parsed,
+                            environment,
+                            ssh=self.config.ssh,
+                            url=self.config.url,
+                            profile=self.config.profile,
+                        )
                     if parsed is not None and parsed.kind != "env":
                         from aka.light.workspace.sources import (
                             policy_at,

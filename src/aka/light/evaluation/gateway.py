@@ -15,10 +15,10 @@
 
 """Run optimizer GPU work through a gateway or an OpenSSH GPU host.
 
-In gateway mode, native Atrex-Bench correctness/performance commands use
-``agate eval --backend atrex`` and profiling commands use ``profile``. Failed
-typed evaluations recover explicitly classified infrastructure failures and never
-switch to ``dev``. ``dev`` remains the
+In gateway mode, native Atrex-Bench correctness/performance commands use the
+public Agate SDK for both inline and source-tree candidates; Profile, Check,
+Disassemble, Dev and Env use the same SDK authority and job lifecycle. Failed typed evaluations recover explicitly
+classified infrastructure failures and never switch to ``dev``. ``dev`` remains the
 compatibility escape hatch for workloads those typed interfaces cannot represent
 (for example SOL-ExecBench, source-correlated custom profiling, or a community
 gateway that explicitly returns ``kind_not_supported``). OpenSSH mode executes
@@ -41,11 +41,11 @@ the corresponding flags.  A
 localhost gateway uses the same transport as a remote worker, for example
 ``ATREX_SANDBOX_GPU=local`` plus
 ``ATREX_SANDBOX_URL=http://127.0.0.1:8000``.  Authentication and any remaining
-URL resolution stay agate's responsibility (AGATE_* or ~/.atrex/config.json).
-With a standard agate gateway profile, synchronized remote files are packed once
-on the worker, transferred through OSS, integrity-checked, and extracted locally.
-Custom endpoints selected by URL, ``AGATE_URL``, or agate config retain inline
-transport because gateways do not currently advertise OSS capability.
+URL resolution use the SDK with the same AGATE_* and ~/.atrex/config.json
+precedence as the CLI. Source trees and large Dev inputs are packed once, reserved
+through the SDK upload API, transferred through OSS, integrity-checked, and extracted
+by the evaluator or Runtime bootstrap. Only explicit SSH and presigned OSS artifact
+downloads use a non-SDK transport.
 
 ``ATREX_SANDBOX_SSH`` selects a standard OpenSSH target (including aliases from
 ``~/.ssh/config``). ``ATREX_SANDBOX_SSH_INIT`` optionally activates the remote
@@ -404,94 +404,68 @@ def _append_typed_dependency_options(
         command += ["--deps-mode", deps_mode]
 
 def _run_environment_query(args: argparse.Namespace) -> int:
-    """Retry read-only discovery within a deadline; never classify it as a Kernel failure."""
+    """Retry SDK discovery within a deadline; never classify it as a Kernel failure."""
     if args.ssh:
         raise SystemExit("sandbox: --kind env requires an Agate Gateway endpoint")
-    executable = find_agate()
-    url = _resolved_gateway_url(
-        executable,
-        url=args.url,
-        profile=args.gateway_profile,
-    )
-    if url:
-        path = "/v1/env"
-        if args.env_gpu:
-            encoded = urllib.parse.quote(args.env_gpu, safe="")
-            path = f"/v1/env/{encoded}"
-            if args.env_capabilities:
-                path += "/capabilities"
-        if args.env_force:
-            path += "?force=true"
-    else:
-        if executable is None:
-            raise SystemExit("sandbox: agate not found and no explicit --url was provided")
-        command = [executable, "env"]
-        if args.gateway_profile:
-            command += ["--profile", args.gateway_profile]
-        if args.env_gpu:
-            command.append(args.env_gpu)
-        if args.env_capabilities:
-            command += ["--frameworks", "--limits"]
-        if args.env_force:
-            command.append("--force")
-        command.append("--json")
+    from aka.light.evaluation.source_transport import _load_sdk_client, _sdk_error_process
+
+    client, _url, GatewayError, TransportError = _load_sdk_client(args)
     deadline = time.monotonic() + args.timeout
     failures = 0
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise EvidenceUnavailable("Environment discovery timed out; no GPU job was submitted")
+            raise EvidenceUnavailable(
+                "Environment discovery timed out; no GPU job was submitted"
+            )
         retry_after = 0.0
         try:
-            if url:
-                value = _gateway_json(url, "GET", path, None, min(remaining, 120 if args.env_force else 30))
-                completed = subprocess.CompletedProcess([], 0, json.dumps(value), "")
-            else:
-                completed = subprocess.run(
-                    command, capture_output=True, text=True, check=False,
-                    timeout=min(remaining, 180 if args.env_force else 60),
+            if args.env_gpu:
+                value = (
+                    client.get_capabilities(args.env_gpu, force=args.env_force)
+                    if args.env_capabilities
+                    else client.get_env(args.env_gpu, force=args.env_force)
                 )
-                if completed.returncode:
-                    rejection = submission_rejection(completed)
-                    if request_is_infrastructure(completed) or (rejection and (
-                            rejection.retryable or rejection.status is not None and rejection.status >= 500)):
-                        raise GatewayResponseError("Environment service unavailable")
-                    # A received CLI HTTP 5xx is safe to retry for this GET, even
-                    # though that same response cannot authorize replay of a POST.
-                    if re.search(r"(?m)^agate: \[5\d{2}\]", completed.stderr or ""):
-                        raise GatewayResponseError("Environment service unavailable")
-                    if not emit_gateway_error(completed, "env"):
-                        print(GATEWAY_ERROR_PREFIX + json.dumps(gateway_error_result({
-                            "operation": "env", "error": completed.stderr or completed.stdout,
-                        })))
-                    return completed.returncode
-                try:
-                    value = json.loads(completed.stdout)
-                except ValueError as exc:
-                    raise GatewayResponseError("Environment service returned malformed JSON") from exc
-            if request_is_infrastructure(completed):
-                raise GatewayResponseError("Environment service unavailable")
+            else:
+                value = {"env": client.list_env(force=args.env_force)}
             if not isinstance(value, dict):
-                raise GatewayResponseError("Environment service returned a non-object response")
+                raise GatewayResponseError(
+                    "Environment service returned a non-object response"
+                )
             break
-        except InvalidURL:
-            raise GatewayConfigurationError("Invalid Gateway URL.", next_action=(
-                "Ask the operator to correct the Supervisor Gateway endpoint and restart the Session; "
-                "do not change Agent arguments or bypass the Runtime."
-            )) from None
-        except GatewayHTTPError as exc:
-            if exc.status < 500 and exc.status not in {408, 429} and not request_is_infrastructure(
-                    subprocess.CompletedProcess([], 1, exc.detail, "")):
-                print(GATEWAY_ERROR_PREFIX + json.dumps(gateway_http_error_result(exc.status, exc.detail, "env")))
+        except GatewayError as error:
+            status = getattr(error, "status", None)
+            process = _sdk_error_process(error, stage="env")
+            if (
+                isinstance(status, int)
+                and status < 500
+                and status not in {408, 429}
+                and not request_is_infrastructure(process)
+            ):
+                if not emit_gateway_error(process, "env"):
+                    print(
+                        GATEWAY_ERROR_PREFIX
+                        + json.dumps(
+                            gateway_error_result(
+                                {"operation": "env", "error": process.stdout}
+                            )
+                        )
+                    )
                 return 1
-            retry_after = exc.retry_after_s or 0.0
-        except (OSError, subprocess.TimeoutExpired, GatewayResponseError):
-            pass  # Do not leak credential-bearing transport exception text.
+            retry_after = getattr(error, "retry_after_s", None) or 0.0
+        except (TransportError, OSError, GatewayResponseError):
+            pass
         failures += 1
         delay = max(retry_delay(failures), retry_after)
         if deadline - time.monotonic() <= delay:
-            raise EvidenceUnavailable("Environment discovery retry deadline reached; no GPU job was submitted")
-        print(f"[sandbox] Environment service unavailable; retrying in {delay:g}s", file=sys.stderr, flush=True)
+            raise EvidenceUnavailable(
+                "Environment discovery retry deadline reached; no GPU job was submitted"
+            )
+        print(
+            f"[sandbox] Environment service unavailable; retrying in {delay:g}s",
+            file=sys.stderr,
+            flush=True,
+        )
         time.sleep(delay)
     print(ENV_RESULT_PREFIX + json.dumps(value, ensure_ascii=False))
     return 0
@@ -3910,7 +3884,7 @@ def _run_typed_gateway(
     sync_paths: list[str],
     queue_wait_grace: int,
 ) -> int | None:
-    """Run agate eval/profile; a failed typed Eval never falls back to Dev."""
+    """Run SDK Eval or typed Profile; a failed Eval never falls back to Dev."""
     generalized = _is_generalized_workspace(workspace)
     from aka.light.workspace.sources import policy_at
     source_tree = policy_at(workspace) is not None
@@ -3984,7 +3958,9 @@ def _run_typed_gateway(
         )
         return 0
 
-    agate_executable = find_agate()
+    # Every native typed operation uses the published SDK.  Source-tree
+    # diagnostics are represented as a Runtime-owned Dev request but retain the
+    # same durable SDK submission and polling lifecycle.
     eval_store = None
     record_eval_store = None
     if kind == "run":
@@ -4041,51 +4017,15 @@ def _run_typed_gateway(
                         saved["stdout"],
                         saved["stderr"],
                     )
-                from aka.light.evaluation.source_transport import ARCHIVES, DIAGNOSTIC, run as run_tree
-                if ARCHIVES in batch_request or DIAGNOSTIC in batch_request:
-                    import sys
-                    process = run_tree(
-                        sys.modules[__name__], args, batch_request, kind, queue_wait_grace
-                    )
-                elif args.url and agate_executable is None:
-                    process = run_direct_job(
-                        url=args.url,
-                        kind="eval" if kind == "run" else kind,
-                        payload=batch_request,
-                        timeout=args.timeout,
-                        queue_wait_grace=queue_wait_grace,
-                    )
-                else:
-                    if agate_executable is None:
-                        raise FileNotFoundError("agate")
-                    reference_dir = None
-                    if kind in {"run", "profile"}:
-                        # Even a single targeted batch needs its filtered reference
-                        # directory. Otherwise the agate CLI would reload the original
-                        # full shapes.json and defeat Evaluate/Profile selection.
-                        reference_dir = batch_root / f"batch-{batch_index:04d}"
-                        _shape_batch_reference(batch_request["reference"], reference_dir)
-                    agate = build_typed_agate_command(
-                        agate_executable,
-                        args,
-                        workspace,
-                        kind,
-                        batch_request,
-                        queue_wait_grace,
-                        reference_dir,
-                        batch_root / f"sidecar-{batch_index:04d}",
-                    )
-                    process = run_agate_with_cancel_retry(
-                        agate=agate,
-                        executable=agate_executable,
-                        url=args.url,
-                        gateway_profile=args.gateway_profile,
-                        command_timeout=gateway_job_timeout(
-                            args.timeout, queue_wait_grace
-                        ),
-                        wait_budget=args.timeout + queue_wait_grace,
-                        request_identity={"kind": kind, "request": batch_request},
-                    )
+                from aka.light.evaluation.source_transport import run as run_tree
+                import sys
+                process = run_tree(
+                    sys.modules[__name__],
+                    args,
+                    batch_request,
+                    kind,
+                    queue_wait_grace,
+                )
                 if eval_store is not None and batch_identity is not None:
                     job = parse_job_response(process.stdout or "")
                     if job is not None:
@@ -4135,11 +4075,6 @@ def _run_typed_gateway(
             print("sandbox: Gateway submission outcome may be unknown; inspect the private checkpoint before resubmitting.", file=sys.stderr)
             return ENVIRONMENT_TEMPFAIL
         return 1
-    except FileNotFoundError as exc:
-        raise SystemExit(
-            "sandbox: agate not found and no explicit --url was provided; "
-            "install atrex-gateway-client first"
-        ) from exc
 
     jobs: list[dict[str, Any]] = []
     for proc in processes:
@@ -4552,39 +4487,22 @@ def _main(argv: list[str] | None = None) -> int:
         )
         if command_environment:
             command = shlex.join(["env", *command_environment]) + " " + command
-    agate_executable = None if args.ssh else find_agate()
-    direct_http = bool(args.url and agate_executable is None)
-    standard_oss_gateway = bool(
-        agate_executable
-        and _uses_standard_oss_gateway(
-            agate_executable,
-            url=args.url,
-            profile=args.gateway_profile,
-        )
-    )
+    # The SDK exposes uploads on every supported Gateway authority, so Dev no
+    # longer needs CLI profile introspection to decide whether OSS is available.
     oss_workspace = bool(
-        standard_oss_gateway and bundle_bytes > OSS_WORKSPACE_THRESHOLD_BYTES
+        not args.ssh and bundle_bytes > OSS_WORKSPACE_THRESHOLD_BYTES
     )
     workspace_transport = (
-        "ssh"
-        if args.ssh
-        else ("oss" if oss_workspace else ("http" if direct_http else "inline"))
+        "ssh" if args.ssh else ("oss" if oss_workspace else "sdk-inline")
     )
     if not sync_paths:
         output_transport = "none"
     elif args.ssh:
         output_transport = "ssh"
-    # Custom gateways do not advertise OSS capability yet, so both input and
-    # output stay inline unless agate resolves to one of its standard profiles.
-    elif standard_oss_gateway and not args.inline_output:
+    elif not args.inline_output:
         output_transport = "oss"
     else:
         output_transport = "inline"
-    if direct_http and bundle_bytes > 20 * 1024 * 1024:
-        raise SystemExit(
-            f"sandbox: packaged payload is {bundle_bytes / (1024 * 1024):.1f} MiB, "
-            "above the 20 MiB direct gateway request limit"
-        )
     print(
         f"[sandbox] sandbox_kind=dev hardware={args.hardware} files={file_count} "
         f"payload={bundle_bytes / 1024:.1f} KiB "
@@ -4678,68 +4596,17 @@ def _main(argv: list[str] | None = None) -> int:
             dev_intent = "custom_harness"
         else:
             dev_intent = "other"
-        agate = [
-            agate_executable or "agate",
-            "dev",
-            "--intent",
-            dev_intent,
-            "--note",
-            f"tools/sandbox.py {args.kind} compatibility path",
-        ]
-        if args.url:
-            agate += ["--url", args.url]
-        elif args.gateway_profile:
-            agate += ["--profile", args.gateway_profile]
-        agate += ["--gpu", args.hardware]
-        if num_gpus > 1:
-            agate += ["--num-gpus", str(num_gpus)]
-        agate += [
-            "--dev-timeout",
-            str(args.timeout),
-            "--http-timeout",
-            str(MAX_HTTP_REQUEST_TIMEOUT),
-            "--wait-timeout",
-            str(args.timeout + queue_wait_grace),
-            "--job-timeout",
-            str(_dev_gateway_job_timeout(args.timeout)),
-        ]
-        if oss_workspace:
-            agate += ["--oss-file", f"__atrex_workspace.tar.gz.b64={bundle_path}"]
-        elif workspace_part_paths:
-            for index, part_path in enumerate(workspace_part_paths):
-                agate += [
-                    "--file",
-                    f"__atrex_workspace.tar.gz.b64.part{index:03d}={part_path}",
-                ]
-        else:
-            agate += ["--file", f"__atrex_workspace.tar.gz.b64={bundle_path}"]
-        agate += [
-            "--file",
-            f"__atrex_command.sh={command_path}",
-            "--file",
-            f"__atrex_collect.py={collector_path}",
-            "--file",
-            f"__atrex_outputs.json={outputs_path}",
-        ]
-        for index, part_path in enumerate(runtime_part_paths):
-            agate += [
-                "--file",
-                f"__atrex_bench_runtime.tar.gz.b64.part{index:03d}={part_path}",
-            ]
         for item in gateway_environment:
             if "=" not in item or item.startswith("="):
-                raise SystemExit(f"sandbox: invalid --env {item!r}; expected KEY=VALUE")
-            agate += ["--env-var", item]
-        if args.keep_pod:
-            agate.append("--no-recycle")
-        if output_transport == "oss":
-            agate += ["--oss-output", OSS_OUTPUT_ARCHIVE]
-        agate.append("bash __atrex_runner.sh")
-
-        # The runner is uploaded separately after the command has been assembled.
+                raise SystemExit(
+                    f"sandbox: invalid --env {item!r}; expected KEY=VALUE"
+                )
+        if args.keep_pod and not args.ssh:
+            raise SystemExit(
+                "sandbox: --keep-pod is unsupported because Gateway Dev jobs require recycle"
+            )
         runner_path = temp / "runner.sh"
         runner_path.write_text(_runner_source(), encoding="utf-8")
-        agate[-1:-1] = ["--file", f"__atrex_runner.sh={runner_path}"]
 
         if args.ssh:
             upload_dir = temp / "ssh-upload"
@@ -4833,69 +4700,63 @@ def _main(argv: list[str] | None = None) -> int:
                 stdout=json.dumps(job),
                 stderr="",
             )
-        elif direct_http:
-            print(
-                "[sandbox] agate CLI not found; using direct gateway HTTP API",
-                file=sys.stderr,
-            )
-            try:
-                direct_files = {
-                    "__atrex_command.sh": command_path,
-                    "__atrex_collect.py": collector_path,
-                    "__atrex_outputs.json": outputs_path,
-                    "__atrex_runner.sh": runner_path,
-                }
-                if workspace_part_paths:
-                    direct_files.update(
-                        {
-                            f"__atrex_workspace.tar.gz.b64.part{index:03d}": path
-                            for index, path in enumerate(workspace_part_paths)
-                        }
-                    )
-                else:
-                    direct_files["__atrex_workspace.tar.gz.b64"] = bundle_path
-                direct_files.update(
-                    {
-                        f"__atrex_bench_runtime.tar.gz.b64.part{index:03d}": path
-                        for index, path in enumerate(runtime_part_paths)
-                    }
-                )
-                proc = _run_direct_gateway(
-                    url=args.url,
-                    hardware=args.hardware,
-                    timeout=args.timeout,
-                    queue_wait_grace=queue_wait_grace,
-                    env_items=gateway_environment,
-                    files=direct_files,
-                    command="bash __atrex_runner.sh",
-                    num_gpus=num_gpus,
-                )
-            except (EvidenceUnavailable, TimeoutError, subprocess.TimeoutExpired):
-                raise
-            except (OSError, RuntimeError) as exc:
-                raise SystemExit(
-                    f"sandbox: direct gateway request failed: {exc}"
-                ) from exc
         else:
+            from aka.light.evaluation.source_transport import run_sdk_job
+
+            sdk_files = {
+                "__atrex_command.sh": command_path,
+                "__atrex_collect.py": collector_path,
+                "__atrex_outputs.json": outputs_path,
+                "__atrex_runner.sh": runner_path,
+            }
+            if workspace_part_paths:
+                sdk_files.update({
+                    f"__atrex_workspace.tar.gz.b64.part{index:03d}": path
+                    for index, path in enumerate(workspace_part_paths)
+                })
+            else:
+                sdk_files["__atrex_workspace.tar.gz.b64"] = bundle_path
+            sdk_files.update({
+                f"__atrex_bench_runtime.tar.gz.b64.part{index:03d}": path
+                for index, path in enumerate(runtime_part_paths)
+            })
             try:
-                proc = run_agate_with_cancel_retry(
-                    agate=agate,
-                    executable=agate_executable or "agate",
-                    url=args.url,
-                    gateway_profile=args.gateway_profile,
-                    command_timeout=_dev_gateway_job_timeout(args.timeout),
-                    wait_budget=args.timeout + queue_wait_grace,
-                    request_identity={"kind": "dev", "command": command, "hardware": args.hardware,
-                                      "timeout": args.timeout,
-                                      "env_names": sorted(item.split("=", 1)[0] for item in gateway_environment),
-                                      "inputs": bundle_digest(base64.b64decode(bundle)),
-                                      "evaluator": bundle_digest(base64.b64decode(runtime_bundle)) if runtime_bundle else None},
-                )
-            except FileNotFoundError as exc:
-                raise SystemExit(
-                    "sandbox: agate not found and no explicit --url was provided; "
-                    "install atrex-gateway-client first"
-                ) from exc
+                env_vars = _parse_env_items(gateway_environment)
+            except ValueError as exc:
+                raise SystemExit(f"sandbox: {exc}") from exc
+            spec: dict[str, Any] = {"target_hardware": [args.hardware]}
+            if num_gpus > 1:
+                spec["num_gpus"] = num_gpus
+            dev_request: dict[str, Any] = {
+                "spec": spec,
+                "command": "bash __atrex_runner.sh",
+                "timeout_s": _dev_gateway_job_timeout(args.timeout),
+                "env_vars": env_vars,
+                "files": {
+                    name: path.read_text(encoding="utf-8")
+                    for name, path in sdk_files.items()
+                },
+                "recycle": True,
+                "dev_intent": dev_intent,
+                "dev_note": f"tools/sandbox.py {args.kind} compatibility path",
+            }
+            if output_transport == "oss":
+                dev_request["oss_outputs"] = [{"path": OSS_OUTPUT_ARCHIVE}]
+            proc = run_sdk_job(
+                sys.modules[__name__],
+                args,
+                dev_request,
+                "dev",
+                queue_wait_grace,
+                identity_extra={
+                    "requested_kind": args.kind,
+                    "inputs": bundle_digest(base64.b64decode(bundle)),
+                    "evaluator": (
+                        bundle_digest(base64.b64decode(runtime_bundle))
+                        if runtime_bundle else None
+                    ),
+                },
+            )
 
     hide_evaluator_details = evaluator_command and _is_generalized_workspace(workspace)
     if proc.stderr and not hide_evaluator_details:

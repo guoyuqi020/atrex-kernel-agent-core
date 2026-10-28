@@ -148,6 +148,55 @@ def _runtime_timeout_from_environment(name: str, default: float | None = None) -
     return value
 
 
+def _git_command_error(action: str, result: subprocess.CompletedProcess[str]) -> RuntimeError:
+    diagnostic = (result.stderr or result.stdout or "").strip()
+    if not diagnostic:
+        diagnostic = f"git exited with status {result.returncode}"
+    return RuntimeError(f"{action}: {diagnostic}")
+
+
+def _stage_framework_source_tree(workspace: Path, source_paths: list[str]) -> list[str]:
+    """Stage present or previously tracked Kernel paths and ignore absent optional paths."""
+    stageable: list[str] = []
+    for path in dict.fromkeys(source_paths):
+        candidate = workspace / path
+        if candidate.exists() or candidate.is_symlink():
+            stageable.append(path)
+            continue
+        tracked = subprocess.run(
+            ["git", "ls-files", "--", path],
+            cwd=str(workspace),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if tracked.returncode != 0:
+            raise _git_command_error(
+                f"failed to inspect framework baseline source path {path!r}", tracked
+            )
+        if tracked.stdout.strip():
+            # Keep a deleted tracked path so ``git add -A`` records its removal.
+            stageable.append(path)
+
+    if not stageable:
+        configured = ", ".join(repr(path) for path in dict.fromkeys(source_paths))
+        raise RuntimeError(
+            "cannot stage framework baseline source tree: none of the configured "
+            f"paths exists or is tracked ({configured})"
+        )
+
+    staged = subprocess.run(
+        ["git", "add", "-A", "--", *stageable],
+        cwd=str(workspace),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if staged.returncode != 0:
+        raise _git_command_error("failed to stage framework baseline source tree", staged)
+    return stageable
+
+
 @dataclass
 class Campaign:
     name: str
@@ -2624,13 +2673,7 @@ class Campaign:
             if source_policy is not None
             else ["kernel.py"]
         )
-        subprocess.run(
-            ["git", "add", "-A", "--", *dict.fromkeys(source_paths)],
-            cwd=str(self.workspace),
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        _stage_framework_source_tree(self.workspace, list(source_paths))
         staged = [
             path
             for path in (
@@ -2645,13 +2688,18 @@ class Campaign:
             str(path.relative_to(self.workspace))
             for path in sorted(self.workspace.glob(f"plans/v{n}_*.md"))
         ]
-        subprocess.run(
-            ["git", "add", *staged],
-            cwd=str(self.workspace),
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        if staged:
+            staged_metadata = subprocess.run(
+                ["git", "add", "--", *staged],
+                cwd=str(self.workspace),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if staged_metadata.returncode != 0:
+                raise _git_command_error(
+                    "failed to stage framework baseline metadata", staged_metadata
+                )
         if (
             subprocess.run(
                 ["git", "diff", "--cached", "--quiet"],

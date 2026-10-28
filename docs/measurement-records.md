@@ -93,10 +93,10 @@ The duplicate response is not a Kernel failure. Read the result instead of chang
 | Evidence | Action |
 | --- | --- |
 | Accepted job ID, polling interrupted | Retain the ID; recovery polls that same job before considering another submission |
-| Eval submission definitively rejected with HTTP 429/503, through direct HTTP or the Agate CLI | Persist `rejected`, then retry the same Eval route once; never fall back to Dev |
-| Submission returns any other HTTP 5xx without an accepted ID, through direct HTTP or the Agate CLI | Outcome may be unknown; retain `submitting` for operator reconciliation and do not resubmit |
+| Eval submission definitively rejected with HTTP 429/503 through the Agate SDK | Persist `rejected`, then retry the same Eval route once; never fall back to Dev |
+| Eval submission returns any other HTTP 5xx without an accepted ID through the Agate SDK | Outcome may be unknown; retain `submitting` for operator reconciliation and do not resubmit |
 | Other operation submission explicitly rejected with HTTP 429/503 | Persist `rejected`, then retry submission with the existing bounded backoff; never leave a sticky `submitting` marker |
-| Other definitive HTTP 4xx submission rejection, or Agate CLI argument-parsing error | Persist `rejected` and return the diagnostic without automatic retries; not a Candidate-failure cache entry |
+| Other definitive Eval HTTP 4xx rejection, or a diagnostic SDK validation error | Persist `rejected` and return the diagnostic without automatic retries; not a Candidate-failure cache entry |
 | Eval terminal admission/transport failure (`submit_failed`, `dashboard_unreachable`, `backend_unavailable`, `deps_install_timeout`, `logs_unavailable`, queue timeout before start or empty cancellation) | At most one new Eval job after five seconds across all retry causes |
 | Other operation terminal `error_class=infra` or `failure_origin=infrastructure` | New job after 5, 10, 20, 40, then 60-second backoff, within request budgets |
 | `logs_unavailable`, including `backend_state=succeeded` | Terminal infrastructure failure: resubmit a new job within the operation-specific allowance, not repeated get on the failed ID |
@@ -106,7 +106,7 @@ The duplicate response is not a Kernel failure. Read the result instead of chang
 | Empty, malformed, unclassified or incomplete result | Not a reusable measurement; preserve available evidence |
 | POST interrupted before an accepted ID is durably saved | Outcome unknown; retain reservation and require operator reconciliation, never blindly resubmit |
 
-Eval CLI submission timeouts persist an uncertain `submitting` checkpoint and return exit 75 (`ENVIRONMENT_TEMPFAIL`) with a fixed operator-reconciliation diagnostic. The Agent response omits the command, endpoint, sidecar paths and partial submission output; no Python traceback is emitted.
+Eval SDK submission transport failures persist an uncertain `submitting` checkpoint and retry only with the same durable wire idempotency key. If the request budget expires without acceptance or definitive rejection, the operation returns exit 75 (`ENVIRONMENT_TEMPFAIL`) with an operator-reconciliation diagnostic. The Agent response omits the endpoint, signed upload URLs, credentials and partial submission output; no Python traceback is emitted.
 
 A confirmed HTTP 400 source-validation rejection that names the **candidate** returns
 `[sandbox] SOURCE_ERROR_JSON=` with `repairable: true`,
@@ -154,7 +154,7 @@ private Gateway subprocess and Record query end-to-end. Accepted IDs and unknown
 submission outcomes remain outside the source-repair path. These checks do not
 execute a model or GPU job; test files remain outside the repository.
 
-Typed Eval has one durable, shared five-second retry allowance across confirmed submission rejection and terminal admission/transport failure. Once consumed for a task identity, a later identical request does not create another allowance. Profile, Dev and the other operations retain the 5, 10, 20, 40, then 60-second backoff and enclosing deadline; if their request budget expires, a later identical request may continue from the saved definitive state. This classification requires an actual HTTP rejection response or its recognizable CLI representation, not merely a nonzero exit code or an `infra` label. An accepted job ID takes precedence over error status; polling failures retain that ID. Lost connections, timeouts and malformed replies without acceptance or rejection evidence still leave an uncertain submission.
+Typed Eval has one durable, shared five-second retry allowance across confirmed submission rejection and terminal admission/transport failure. Once consumed for a task identity, a later identical request does not create another allowance. Profile, Dev and the other operations retain the 5, 10, 20, 40, then 60-second backoff and enclosing deadline; if their request budget expires, a later identical request may continue from the saved definitive state. This classification requires an actual structured SDK/HTTP rejection response, not merely a nonzero exit code or an `infra` label. An accepted job ID takes precedence over error status; polling failures retain that ID. Lost connections, timeouts and malformed replies without acceptance or rejection evidence still leave an uncertain submission.
 
 Retryable failures do not bypass the request deadline, revocation or process cleanup. Separately, a request rejected in the Supervisor's local queue before any dispatch returns a safe-to-retry HTTP 429. A later repetition timing out before its own dispatch is **not** a claim that the overall request submitted no job: it follows the post-dispatch 503 path. Agents should not convert transport/unknown-outcome failures into retry loops. After operator inspection, an unchanged request can recover known job IDs and completed ABBA batches. Old `submitting` checkpoints with a saved, recognizable CLI rejection can recover automatically; bare markers with no saved response still require operator reconciliation. A no-ID uncertain submission cannot be safely repaired by deleting its index blindly.
 

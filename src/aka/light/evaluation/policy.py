@@ -33,7 +33,7 @@ def validate_abba_repeats(repeats: int) -> None:
 
 def runner_overrides() -> dict:
     return {"warmup_iters": WARMUP_ITERS, "candidate_timeout_s": CANDIDATE_TIMEOUT,
-            "perf_timeout_s": PERFORMANCE_TIMEOUT}
+            "perf_timeout_s": PERFORMANCE_TIMEOUT, "skip_kernel_attribution": True}
 
 
 def measurement_defaults() -> dict:

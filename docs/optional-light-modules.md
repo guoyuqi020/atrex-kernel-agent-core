@@ -311,6 +311,13 @@ installs system packages nor launches an Agent/GPU job, and it does not certify
 Bubblewrap namespace permissions. Packages installed in a separate CI container
 are not evidence that this execution container has a working compiler.
 
+Sandbox deployments should use `tools/install_light_sandbox.sh`. Its
+`deployment.json` must contain non-empty `agate_client` and
+`atrex_bench_version` strings. The installer selects the vendored Agate client,
+sets the remote evaluator pin, and passes both values to this preflight as exact
+version requirements. A missing pin, a different Agate executable, or a version
+mismatch aborts installation before any campaign starts.
+
 ### Agent active-time limit and blocking Runtime calls
 
 Optimization Episodes have **no active-time limit by default**. To impose one, configure
@@ -559,14 +566,16 @@ A rejected/pivoted source tree is not broadcast. Custom tools/Skills keep their
 independent inheritance policy. Framework Baseline receives the same tree as V0 and may keep its
 implementation in `adapter.py` or split it into any number of files below `implementation/`.
 
-Evaluate and ABBA upload exact source archives to native Agate Eval, using persisted
-upload references and idempotency keys across recovery. There is no Eval-to-Dev
-fallback. Profile, Check and Disassemble mirror Runtime's tree support: a trusted
-diagnostic driver runs in Dev with the whole tree and evaluator-owned inputs;
-these results are not correctness/acceptance evidence. Ordinary Dev probes and
-supplemental numerical probes also receive the full candidate. Tree diagnostic
-payloads above 4 MiB use OSS with Runtime's digest-verified unpacker. HTTP uses Supervisor
-credentials from the Agate environment or operator CLI config, never Agent files.
+All Gateway operations use the public Agate SDK. Evaluate and ABBA use the native
+Eval kind for inline candidates and exact source archives, with persisted upload
+references and idempotency keys across recovery; there is no Eval-to-Dev fallback.
+Profile, Check and Disassemble mirror Runtime's tree support. When a typed API cannot
+represent a source tree, a trusted diagnostic driver runs as an SDK Dev job with the
+whole tree and evaluator-owned inputs; these results are not correctness/acceptance
+evidence. Ordinary Dev probes and supplemental numerical probes also receive the full
+candidate. Dev payloads above 120 KiB use SDK OSS upload with Runtime's digest-verified
+unpacker. Env discovery and Job submit/get/cancel use the same SDK authority and
+credentials from the Supervisor environment or operator config, never Agent files.
 
 Historical `kernel-read` writes a **directory** for every managed native Kernel. Use that directory
 as `--baseline-path`; a repeated read is safe if its contents are still identical.
@@ -954,10 +963,9 @@ measurement repetitions, request deadlines and Workflow options remain independe
 | --- | --- |
 | Failed Job with `error_class=infra`, including `logs_unavailable` or `exec_failed` | Persist the failed Job and submit a replacement; backoff 5, 10, 20, 40, 60 seconds, then 60 seconds. No fixed one-retry limit, but cancellation and the configured request deadline still apply. |
 | Collection/GET transport outage | Retry collection of the same accepted Job, without another submission. Permanent request/auth errors stop recovery. |
-| Environment discovery | Read-only GET/CLI recovery on transport timeout, 408/429/5xx, malformed responses or explicit infrastructure errors. Backoff 5/10/20/40/60 seconds within the request deadline. Invalid URL and permanent auth/request errors fail immediately. Exhaustion returns infrastructure feedback, not a Kernel verdict. |
+| Environment discovery | Read-only SDK recovery on transport timeout, 408/429/5xx, malformed responses or explicit infrastructure errors. Backoff 5/10/20/40/60 seconds within the request deadline. Invalid URL and permanent auth/request errors fail immediately. Exhaustion returns infrastructure feedback, not a Kernel verdict. |
 | Local transport/collection deadline | Return structured infrastructure/unavailable feedback and exit 75, without raw timeout argv/paths. Preserve known Job IDs for reconciliation. A terminal Job's `command_timeout` is classified by its explicit error class: `infra` is recoverable; Candidate/unknown errors do not become infrastructure merely because they mention timeout. |
-| Direct HTTP submit transport/5xx/408/429 or structured `infra`/`oss_unavailable` error | Replay with the same wire idempotency key, persisted before POST. Known failed Job replacements get a different, deterministic key. Other permanent 4xx and invalid URLs are not retried. |
-| Agate CLI submit outcome unknown | Preserve the uncertain checkpoint for reconciliation. The currently supported CLI has no general wire-idempotency flag, so unknown submissions cannot safely be replayed. Confirmed 429/503 or structured infrastructure rejection can retry; a submit timeout/408 or other 5xx without an accepted ID remains uncertain. |
+| SDK submit transport/5xx/408/429 or structured `infra`/`oss_unavailable` error | Replay an uncertain submission only with the same durable wire idempotency key. Known failed Job replacements get a different, deterministic key. Other permanent 4xx and invalid URLs are not retried. If no accepted ID can be confirmed before the deadline, preserve the uncertain checkpoint for reconciliation. |
 | Explicit device-unavailable error inside Eval results | Up to two replacement executions; preserve raw failures. Exhaustion is an infrastructure blocker, not a correctness failure or cacheable negative result. OOM, illegal memory access, numerical mismatches and arbitrary text are not inferred to be device outages. |
 | Device-unavailable ABBA batch | Up to ten replacements with a 60-second delay and durable budget. Keep completed sibling batches. Missing/invalid receipts or unknown execution outcomes do not grant permission to resubmit. |
 | Cancelled Job, unknown error or Candidate failure | No automatic replacement solely for that outcome. A cancelled/unknown result is not permanent negative evidence. A complete Candidate rejection remains reusable. |
