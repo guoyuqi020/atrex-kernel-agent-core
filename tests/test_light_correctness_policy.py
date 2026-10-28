@@ -117,6 +117,52 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("metadata.json", visible)
         self.assertNotIn("shapes.json", visible)
 
+    def test_generalized_workspace_privacy_guard_allows_metadata(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            operator = root / "operator"
+            operator.mkdir()
+            (operator / "reference.py").write_text("class Model: pass\n")
+            (operator / "shapes.json").write_text(
+                json.dumps({"0": {"init_kwargs": {}, "input_kwargs": {"x": 1}}})
+            )
+            public_problem = {
+                "schema_version": "atrex.agent_problem.v1",
+                "objective": "Optimize the operator.",
+                "evaluation": {
+                    "exact_cases": "private",
+                    "development_cases_are_evaluation_cases": False,
+                },
+                "operator_contract": {},
+                "shape_domain": {},
+                "invariants": [],
+                "coverage_regimes": [],
+            }
+            (operator / "agent_problem.json").write_text(json.dumps(public_problem))
+            campaign = Campaign(
+                name="operator",
+                kernel_demo=str(operator / "reference.py"),
+                platform="L20D",
+                framework="Cuda",
+                atrex_bench_root=str(root),
+                work_dir=str(root / "work"),
+            )
+            campaign.workspace.mkdir(parents=True)
+            (campaign.workspace / "agent_problem.json").write_text(
+                json.dumps(public_problem)
+            )
+            (campaign.workspace / "metadata.json").write_text(
+                json.dumps({"benchmark_contract": {}})
+            )
+
+            campaign._assert_generalized_inputs_are_private()
+
+            (campaign.workspace / "shapes.json").write_text(
+                (operator / "shapes.json").read_text()
+            )
+            with self.assertRaisesRegex(RuntimeError, "shapes.json"):
+                campaign._assert_generalized_inputs_are_private()
+
     def test_typed_eval_forwards_metadata_without_light_tolerance_defaults(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
