@@ -58,7 +58,8 @@ After the implementation edit, run this smoke command:
 ```
 {{SMOKE_SCOPE}}
 
-Do not broaden its scope, add `--multi-seed`, or launch a separate full evaluation. A route
+Do not broaden its scope or launch a separate full evaluation. Runtime fixes the correctness
+case count and applies the same policy to smoke, ordinary Evaluate, and acceptance. A route
 without a subset selector may already use the whole workload in this prescribed command.
 On compile/correctness failure, inspect `result.actionable_diagnostics` in the returned JSON, repair the
 candidate, and rerun the same command. Read existing records rather than repeating an identical

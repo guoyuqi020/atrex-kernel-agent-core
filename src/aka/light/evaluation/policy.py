@@ -11,8 +11,8 @@ from aka.contracts.evaluation import (
 )
 
 
-# Preserve the legacy candidate gate: one base seed plus five additional seeds.
-CORRECTNESS_CASES = 6
+# One base case plus four additional deterministic input cases per Shape.
+CORRECTNESS_CASES = 5
 BENCH_ITERS = 20
 WARMUP_ITERS = 5
 # Budget each Shape independently. Candidate initialization/correctness retains

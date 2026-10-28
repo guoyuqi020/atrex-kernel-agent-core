@@ -1426,7 +1426,7 @@ class SupervisorJournalService:
             # All report/evidence checks precede GPU work. The callback measures
             # these frozen bytes; only a pass may finalize or commit the report.
             current["acceptance_checks"] = {
-                "multi_seed_correctness": validate_candidate(kernel_source),
+                "five_case_correctness": validate_candidate(kernel_source),
             }
         if kernel_source is not None and self.supervisor_git:
             from aka.light.workspace.git import EpisodeWorktree

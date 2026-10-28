@@ -143,7 +143,7 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
 def gateway_schema(kind, parser):
     """Read option types/choices from the real parser; never expose its defaults."""
     groups = {
-        "run": {"--mode", "--version", "--multi-seed", "--shape-id", "--timed-runs", "--baseline-path",
+        "run": {"--mode", "--version", "--shape-id", "--timed-runs", "--baseline-path",
                 "--comparison-repeats", "--comparison-run-timeout", "--shape-batch-size", "--input-path", "--shapes-path"},
         "profile": {"--kernel-name", "--kernel-regex", "--profile-source", "--launch-skip", "--launch-count",
                     "--profile-shape-id", "--requirement", "--deps-mode", "--profile-level", "--profiler",

@@ -197,6 +197,19 @@ def _stage_framework_source_tree(workspace: Path, source_paths: list[str]) -> li
     return stageable
 
 
+def framework_baseline_validation_command(n: int, *, atrex_bench: bool) -> list[str]:
+    """Build the Supervisor gate without exposing correctness-case control."""
+    command = ["python", "test_kernel.py", "--version", f"v{n}"]
+    if atrex_bench:
+        # Typed Evaluate applies the Runtime-owned five-case policy.
+        command += ["--timed-runs", "100"]
+    else:
+        # Legacy SOL harnesses still own their internal seed flag.
+        command += ["--multi-seed", "5"]
+    command.append("--no-memory")
+    return command
+
+
 @dataclass
 class Campaign:
     name: str
@@ -1096,8 +1109,7 @@ class Campaign:
             f"- {contract}\n"
             "- Use `python3 tools/sandbox.py --kind run --mode full --no-sync`; the Supervisor "
             "supplies the official evaluator and private inputs.\n"
-            "- V0 uses exactly one full-workload base-seed evaluator run. It does not profile, "
-            "run multi-seed correctness, or perform ABBA.\n"
+            "- V0 uses exactly one full-workload evaluator run. It does not profile or perform ABBA.\n"
             "- Ground-truth operator files and canonical memory are immutable to the Agent.\n\n"
             "## Hardware evidence policy\n\n"
             "V0 records identity only and does not speculate about peak specifications. "
@@ -2091,8 +2103,8 @@ class Campaign:
                 f"The supervisor rejected the current candidate:\n\n{rejection}\n\n"
                 "Keep sound work, fix this exact rejection, and finish V1. If a prior targeted "
                 "smoke passed but the supervisor's combined full-workload validation failed, "
-                "you may run exactly one full base-seed evaluator while repairing; do not run "
-                "multi-seed or a separate benchmark because the supervisor will repeat the "
+                "you may run exactly one full evaluator while repairing; do not run "
+                "a separate benchmark because the supervisor will repeat the "
                 "combined authoritative gate.\n\n"
                 + prompt
             )
@@ -2504,22 +2516,10 @@ class Campaign:
         return result, validation_problem
 
     def _validate_framework_baseline(self, n: int) -> tuple[Optional[dict], str]:
-        """Validate V1 once: base-seed performance plus five extra correctness cases."""
+        """Validate V1 once: base-case performance plus four extra correctness cases."""
         # V1 does not gate on speedup, but its full measurement uses the same
         # sampling policy as Bootstrap and ordinary Evaluate.
-        command = [
-            "python",
-            "test_kernel.py",
-            "--version",
-            f"v{n}",
-            "--multi-seed",
-            "4" if self.atrex_bench_root else "5",
-        ]
-        # --timed-runs belongs to the native Atrex-Bench adapter. SOL and
-        # derived legacy harnesses retain their own pinned benchmark settings.
-        if self.atrex_bench_root:
-            command += ["--timed-runs", "100"]
-        command.append("--no-memory")
+        command = framework_baseline_validation_command(n, atrex_bench=bool(self.atrex_bench_root))
         try:
             test = _sandbox_command(
                 self.workspace,
@@ -2549,7 +2549,7 @@ class Campaign:
         except (RuntimeError, json.JSONDecodeError) as exc:
             return None, f"combined validation produced no usable result: {exc}"
         if result.get("all_pass") is not True:
-            return None, "combined multi-seed correctness validation failed"
+            return None, "combined five-case correctness validation failed"
 
         latency = result.get("latency_us_geomean")
         if (
@@ -2737,7 +2737,7 @@ class Campaign:
         memory["git_commit_hash"] = kernel_commit
         memory[FRAMEWORK_BASELINE_CATEGORY] = {
             "framework": self.framework,
-            "validated_stages": ["combined-base-performance+six-cases" if self.atrex_bench_root
+            "validated_stages": ["combined-base-performance+five-cases" if self.atrex_bench_root
                                  else "combined-base-performance+multi-seed-5"],
         }
         save_version_record(self.workspace, n, memory, generate_memory=self.generate_memory)

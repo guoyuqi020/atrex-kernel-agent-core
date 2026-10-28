@@ -348,7 +348,7 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
     baseline = (unpack(baseline_source)[1][entrypoint(source_policy)].decode() if tree else
                 gateway.read_workspace_override(workspace, args.baseline_path, field="baseline-path", max_bytes=16 * 1024 * 1024))
     command = ["python3", "test_kernel.py"]
-    for flag, value in (("--multi-seed", args.multi_seed), ("--timed-runs", args.timed_runs)):
+    for flag, value in (("--timed-runs", args.timed_runs),):
         if value is not None:
             command += [flag, str(value)]
     limitation = gateway._typed_workspace_limitation(workspace, command, "run")

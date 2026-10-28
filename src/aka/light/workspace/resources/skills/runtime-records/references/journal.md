@@ -218,7 +218,7 @@ proposed/deferred Directions may remain for later exploration.
 
 ## Candidate report
 
-Leave the selected measurement's complete source tree in place. The Supervisor reuses matching six-case correctness evidence, or performs the missing check, before sealing that tree into a candidate Commit. Do not run Git or supply a Commit ID. Save as `scratch/episode-report.json`:
+Leave the selected measurement's complete source tree in place. The Supervisor reuses matching five-case correctness evidence, or performs the missing check, before sealing that tree into a candidate Commit. Do not run Git or supply a Commit ID. Save as `scratch/episode-report.json`:
 
 ```json
 {
@@ -242,8 +242,8 @@ The selected Experiment must belong to this Episode and cite a passing Evaluate 
 byte-identical current Kernel source tree. Profile/Dev/Check/Disassemble
 or ABBA alone cannot satisfy this report binding; custom-input or correctness-only diagnostics are
 not substitutes for standard performance evidence. Before accepting `candidate_ready`, the Supervisor
-reuses a matching successful full or correctness-only Evaluate with the base case plus five additional
-seeds. Ordinary Atrex-Bench Evaluate already checks these six cases. If evidence is missing or does
+reuses a matching successful full or correctness-only Evaluate with the base case plus four additional
+cases. Ordinary Atrex-Bench Evaluate already checks these five cases. If evidence is missing or does
 not match the complete contract, the Supervisor performs a correctness-only check without timing.
 You need not submit or cite an extra check yourself. `candidate_correctness_failed` returns a Record
 ID and repair instructions: fix the Kernel, update its full Evaluate/Experiment evidence and resubmit.

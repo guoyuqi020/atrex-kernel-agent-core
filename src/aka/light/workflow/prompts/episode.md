@@ -80,7 +80,7 @@ Choose an evidence-backed state:
 
 1. `candidate_ready`: {{REPORT_SELECTION}}
    The Supervisor automatically runs or reuses the evaluator-specific acceptance check before
-   accepting the report: six-case multi-seed correctness for Atrex-Bench, or the official full
+   accepting the report: Runtime-owned five-case correctness for Atrex-Bench, or the official full
    `workload.jsonl` evaluation for SOL-ExecBench. A failed check leaves the Episode open for repair
    and resubmission.
    In production, the Supervisor also runs targeted numerical probes. A measured failure returns

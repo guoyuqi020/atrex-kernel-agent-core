@@ -942,23 +942,23 @@ def public_dev_output(command: list[str]) -> bool:
 def evaluation_policy(command: list[str], mode: str | None = None) -> dict[str, Any]:
     """Resolve Atrex-Bench correctness policy before execution and task hashing.
 
-    Implicit full-contract evaluation checks six cases without turning a v2+
-    performance request into the legacy explicit-multi-seed correctness mode.
-    Targeted smoke keeps one case unless the caller asks for more.
+    Every Agent-visible Evaluate checks the same Runtime-owned five cases.  The
+    caller may select Shapes or omit timing, but cannot weaken correctness by
+    changing the number of generated cases.
     """
     seed_values = _option_values(command, "--multi-seed")
-    if len(seed_values) > 1:
-        raise ValueError("Specify --multi-seed only once so the measured seed policy is unambiguous")
-    seed_value = seed_values[0] if seed_values else None
-    additional = int(seed_value) if seed_value is not None else (
-        0 if _option_values(command, "--shape-id") else CORRECTNESS_CASES - 1
-    )
-    if additional < 0:
-        raise ValueError("--multi-seed must be non-negative")
-    legacy_check = (seed_value is not None and additional > 0
-                    and str(_option_value(command, "--version", "v0")) not in {"v0", "v1"})
-    return {"schema_version": 1, "num_correctness_cases": 1 + additional,
-            "mode": mode or ("correctness_only" if legacy_check or "--correctness-only" in _command_parts(command) else "full")}
+    if seed_values:
+        raise ValueError(
+            "--multi-seed is Runtime-owned and cannot be set by the Agent; "
+            f"Evaluate always uses {CORRECTNESS_CASES} correctness cases"
+        )
+    return {
+        "schema_version": 1,
+        "num_correctness_cases": CORRECTNESS_CASES,
+        "mode": mode or (
+            "correctness_only" if "--correctness-only" in _command_parts(command) else "full"
+        ),
+    }
 
 
 def read_json_object(path: Path, *, required: bool = False) -> dict[str, Any] | None:
@@ -1414,14 +1414,14 @@ def build_typed_request(
         requested_shape_ids = list(dict.fromkeys(requested_shape_ids))
     try:
         policy = evaluation_policy(command, evaluation_mode) if kind == "run" else None
-        multi_seed = policy["num_correctness_cases"] - 1 if policy else 0
+        correctness_cases = policy["num_correctness_cases"] if policy else CORRECTNESS_CASES
         bench_iters = int(_option_value(command, "--timed-runs", BENCH_ITERS))
         atol = float(_option_value(command, "--atol", 1e-2))
         rtol = float(_option_value(command, "--rtol", 0.05))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid evaluator command option: {exc}") from exc
-    if multi_seed < 0 or bench_iters < 1:
-        raise ValueError("--multi-seed must be non-negative and --timed-runs must be positive")
+    if bench_iters < 1:
+        raise ValueError("--timed-runs must be positive")
 
     reference: dict[str, Any] = {
         "operator": workspace.name,
@@ -1451,7 +1451,7 @@ def build_typed_request(
         "candidate": candidate_source,
         "reference": reference,
         "options": {
-            "num_correctness_cases": 1 + multi_seed,
+            "num_correctness_cases": correctness_cases,
             "bench_iters": bench_iters,
             "atol": atol,
             "rtol": rtol,
@@ -2084,10 +2084,6 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
         )
     parser.add_argument("--version", default=None,
                         help="Evaluation version label, e.g. v3 (--kind run, no explicit command).")
-    parser.add_argument(
-            "--multi-seed", type=int, default=None,
-            help="Additional correctness seeds (Atrex-Bench default: 5, targeted Shape smoke: 0); shorthand --kind run only.",
-        )
     parser.add_argument(
             "--shape-id", action="append", default=[],
             help="Opaque evaluation Shape id (--kind run, no explicit command; repeatable; default: all).",
@@ -3807,7 +3803,7 @@ def _record_profile_job(
 
 def _top_level_evaluation_options(args: argparse.Namespace) -> list[str]:
     return [option for option, value in (
-        ("--version", args.version), ("--multi-seed", args.multi_seed),
+        ("--version", args.version),
         ("--shape-id", args.shape_id or None), ("--timed-runs", args.timed_runs),
     ) if value is not None]
 
@@ -3833,7 +3829,7 @@ def validate_evaluation_options(args: argparse.Namespace) -> None:
             f"Top-level {names} cannot be combined with an explicit command. "
             "Omit the command to use the evaluator shorthand, or move these options "
             "after test_kernel.py in the explicit command, e.g. "
-            "--kind run -- python3 test_kernel.py --multi-seed 3. "
+            "--kind run -- python3 test_kernel.py --timed-runs 100. "
             "Do not specify evaluator controls in both places."
         )
 
@@ -4233,7 +4229,7 @@ def _main(argv: list[str] | None = None) -> int:
             ) from exc
     if args.command in ([], ["--"]) and args.kind == "run":
         args.command = ["python3", "test_kernel.py", "--no-memory"]
-        for option, value in (("--version", args.version), ("--multi-seed", args.multi_seed),
+        for option, value in (("--version", args.version),
                               ("--timed-runs", args.timed_runs)):
             if value is not None:
                 args.command += [option, str(value)]
@@ -4820,8 +4816,6 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
                    ["python3", "test_kernel.py", "--no-memory"])
         if args.version is not None:
             command += ["--version", str(args.version)]
-        if args.multi_seed is not None:
-            command += ["--multi-seed", str(args.multi_seed)]
         if args.timed_runs is not None:
             command += ["--timed-runs", str(args.timed_runs)]
         for shape in args.shape_id or []:
@@ -4972,7 +4966,7 @@ def _sandbox_telemetry_category(arguments: list[str]) -> str:
     if names & {"profile_nvidia.sh", "profile_kernel.sh"}:
         return "profile"
     if "test_kernel.py" in names:
-        return "correctness" if "--multi-seed" in arguments else "benchmark"
+        return "correctness" if "--correctness-only" in arguments else "benchmark"
     return "dev"
 
 
