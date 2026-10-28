@@ -41,7 +41,16 @@ fi
 readonly required_agate_version
 readonly required_atrex_bench_version
 
+agate_wheels=(
+  "${deploy_root}"/wheels/atrex_gateway_client-"${required_agate_version}"-*.whl
+)
+if [[ ${#agate_wheels[@]} -ne 1 || ! -f "${agate_wheels[0]}" ]]; then
+  echo "Light installation requires exactly one Agate SDK wheel for ${required_agate_version}" >&2
+  exit 1
+fi
+
 python3 -m pip install --no-index --no-deps --force-reinstall \
+  "${agate_wheels[0]}" \
   "${deploy_root}"/wheels/atrex_aka_framework-*.whl \
   "${deploy_root}"/wheels/atrex_aka_legacy-*.whl \
   "${deploy_root}"/wheels/atrex_aka_light-*.whl
@@ -49,7 +58,6 @@ python3 -m pip install --no-index --no-deps --force-reinstall \
 command -v bwrap >/dev/null
 command -v cc >/dev/null || dnf install -y gcc glibc-devel
 
-export PYTHONPATH="${deploy_root}/agate-vendor${PYTHONPATH:+:${PYTHONPATH}}"
 export ATREX_SANDBOX_ATREX_BENCH_VERSION="${required_atrex_bench_version}"
 
 aka optimize --help >/dev/null

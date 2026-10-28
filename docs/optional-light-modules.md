@@ -313,10 +313,12 @@ are not evidence that this execution container has a working compiler.
 
 Sandbox deployments should use `tools/install_light_sandbox.sh`. Its
 `deployment.json` must contain non-empty `agate_client` and
-`atrex_bench_version` strings. The installer selects the vendored Agate client,
-sets the remote evaluator pin, and passes both values to this preflight as exact
-version requirements. A missing pin, a different Agate executable, or a version
-mismatch aborts installation before any campaign starts.
+`atrex_bench_version` strings. The installer requires and installs the matching
+Agate SDK wheel from `deploy/wheels`, sets the remote evaluator pin, and passes
+both values to this preflight as exact version requirements. A missing wheel or
+pin, a different installed SDK version, or a version mismatch aborts installation
+before any campaign starts. This keeps the SDK available inside the minimal
+Bubblewrap filesystem without relying on a host-only `PYTHONPATH` directory.
 
 ### Agent active-time limit and blocking Runtime calls
 
