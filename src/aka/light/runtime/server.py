@@ -54,7 +54,8 @@ from aka.light.workflow.constants import ATREX_BENCH_HARNESS, PROFILE_DRIVER, SO
 from aka.light.workspace.episode import EpisodeWorkspace
 from aka.light.acceptance.provider import CandidateValidation
 from aka.light.runtime.errors import (
-    RequestValidationError, RequestDispatchTimeout, GatewayExecutionUnavailable, SessionRevokedError,
+    RequestValidationError, RequestDispatchTimeout, GatewayExecutionUnavailable,
+    ResultPublicationError, SessionRevokedError,
 )
 from aka.light.runtime.paths import supervisor_campaign_root
 from aka.light.wiki.config import WikiConfig
@@ -458,6 +459,49 @@ class _Handler(BaseHTTPRequestHandler):
                 gateway_started=True,
                 cancellation_requested=error.cancellation_requested,
                 cancellation_confirmed=False,
+                request_id=self.request_id,
+                **error.details,
+            ))
+        except ResultPublicationError as error:
+            record_id = error.gateway_record_id
+            record_instruction = (
+                f"The GPU operation completed and its result is saved as {record_id}. Read it with "
+                f"`python3 tools/sandbox.py --kind record-read --record-id {record_id}`; do not "
+                "resubmit the completed request."
+                if record_id else
+                "The GPU operation completed, but its saved Record ID could not be returned. "
+                "Report this request_id to the operator for Record reconciliation; do not resubmit blindly."
+            )
+            next_action = (
+                record_instruction
+                + " Requested output files were not synchronized. If their contents are still needed, "
+                  "make the remote output bounded and request only the required file in a new Dev probe."
+            )
+            recovery = [{"instruction": next_action}]
+            if record_id:
+                recovery.insert(0, {
+                    "tool": "record-read",
+                    "request": {"record_id": record_id},
+                    "command": "python3 tools/sandbox.py --kind record-read --record-id " + record_id,
+                    "instruction": "Read the completed measurement result; this does not rerun the GPU job.",
+                })
+            logging.getLogger(__name__).warning(
+                "Supervisor Runtime request %s completed but result publication failed during %s: %s",
+                self.request_id, error.phase, error,
+            )
+            issue_path = error.details.get("output_path", "$")
+            self.reply(503, failure(
+                str(error),
+                repairable=False,
+                code=error.code,
+                next_action=next_action,
+                issues=[{"path": issue_path, "code": error.code, "message": str(error)[:2000]}],
+                recovery=recovery,
+                outcome="completed",
+                phase=error.phase,
+                execution_completed=True,
+                result_recorded=record_id is not None,
+                gateway_record_id=record_id,
                 request_id=self.request_id,
                 **error.details,
             ))
@@ -1205,12 +1249,24 @@ class SupervisorRuntime:
                     raise ValueError("--sync must be inside profiles/ or scratch/")
                 source = staged / path
                 if source.is_symlink():
-                    raise ValueError("Synchronized output cannot be a symlink")
+                    raise ResultPublicationError(
+                        f"Synchronized output {path.as_posix()!r} cannot be a symlink",
+                        code="output_synchronization_rejected",
+                        phase="output_synchronization",
+                        output_path=path.as_posix(),
+                        rejection_reason="symlink",
+                    )
                 files = source.rglob("*") if source.is_dir() else [source]
                 for item in files:
                     visited += 1
                     if visited > 4096:
-                        raise ValueError("Synchronized output exceeds 4096 entries")
+                        raise ResultPublicationError(
+                            "Synchronized output exceeds the 4096-entry limit",
+                            code="output_synchronization_limit_exceeded",
+                            phase="output_synchronization",
+                            limit_type="entry_count",
+                            limit_entries=4096,
+                        )
                     if not item.is_file() or item.is_symlink():
                         continue
                     relative = item.relative_to(staged).as_posix()
@@ -1225,10 +1281,27 @@ class SupervisorRuntime:
                         if remaining <= MAX_FILE_BYTES:
                             message = (f"Synchronized output exceeds cumulative size limit of {MAX_TOTAL_BYTES} bytes; "
                                        f"{remaining} bytes remain while reading {relative!r}")
+                            details = {
+                                "output_path": relative,
+                                "limit_type": "cumulative_bytes",
+                                "limit_bytes": MAX_TOTAL_BYTES,
+                                "remaining_sync_budget_bytes": remaining,
+                            }
                         else:
                             message = (f"Synchronized output file {relative!r} exceeds per-file size limit "
                                        f"of {MAX_FILE_BYTES} bytes; {remaining} bytes remain in the sync budget")
-                        raise ValueError(message) from error
+                            details = {
+                                "output_path": relative,
+                                "limit_type": "per_file_bytes",
+                                "limit_bytes": MAX_FILE_BYTES,
+                                "remaining_sync_budget_bytes": remaining,
+                            }
+                        raise ResultPublicationError(
+                            message,
+                            code="output_synchronization_limit_exceeded",
+                            phase="output_synchronization",
+                            **details,
+                        ) from error
                     total += len(data)
                     paths.add(relative)
                     publish(ready, relative, data)

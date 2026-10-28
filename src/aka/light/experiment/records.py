@@ -365,9 +365,32 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
                     publish(staged, str(EPISODE_EVALUATIONS_PATH), (json.dumps(row) + "\n").encode())
             # Record publication precedes legacy-output publication: a later
             # filesystem error cannot cause a completed GPU task to run again.
-            effects.publish_log(staged)
+            from aka.light.runtime.errors import ResultPublicationError
+            try:
+                effects.publish_log(staged)
+            except ResultPublicationError as error:
+                error.bind_record(task.record_id)
+                raise
+            except Exception as error:
+                raise ResultPublicationError(
+                    f"GPU operation completed and was recorded, but evaluation-log publication failed: {error}",
+                    code="evaluation_log_publication_failed",
+                    phase="evaluation_log_publication",
+                    gateway_record_id=task.record_id,
+                ) from error
             if response["exit_code"] == 0:
-                effects.publish_outputs(staged, args)
+                try:
+                    effects.publish_outputs(staged, args)
+                except ResultPublicationError as error:
+                    error.bind_record(task.record_id)
+                    raise
+                except Exception as error:
+                    raise ResultPublicationError(
+                        f"GPU operation completed and was recorded, but requested output synchronization failed: {error}",
+                        code="output_synchronization_failed",
+                        phase="output_synchronization",
+                        gateway_record_id=task.record_id,
+                    ) from error
             return response
     except DuplicateTask as error:
         if reuse_completed and error.record_id:
