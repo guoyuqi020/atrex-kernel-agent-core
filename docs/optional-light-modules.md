@@ -1121,6 +1121,12 @@ reserved-client restoration while custom edits survive.
 
 Runtime-policy alignment was checked on 2026-10-19 with 33 targeted offline regressions: environment recovery, timeout classification, SDK request/CLI compatibility, native ABBA parsing and resume, exact measurement defaults, and latency-based promotion. The combined regression run contains 150 checks: 146 passed and four Linux-only checks were skipped on macOS. Request construction was checked against the installed Agate SDK 0.14.3 and native result parsing against Runtime. The framework/legacy/light wheels were rebuilt from sdists and installed into a fresh environment; profile, Gateway entrypoint, service/asset and controlled capture smoke checks passed. No live GPU or model task was submitted for this alignment.
 
+On 2026-10-28, the configured Agate release index and local CLI both reported
+`atrex-gateway-client` 0.14.22 as current. Light requires
+`atrex-gateway-client>=0.14.22,<0.15`; sandbox deployment additionally installs
+the exact wheel named by `deployment.json` and verifies that installed version
+before starting a campaign.
+
 Validation uses external temporary fixtures, not committed test modules. It covers module boot/dispose, independent capture selection, native session resume, revoked HTTP capabilities, report correction, Direction/Experiment evidence, sealed candidates surviving later edits, stable Kernel IDs, record reads and duplicate detection after reopening the store, per-Shape median aggregation, confirmed-rejection classification and unknown-submission recovery.
 
 On 2026-10-21, 21 targeted Execution/recovery checks passed on macOS and Lima/Linux.
