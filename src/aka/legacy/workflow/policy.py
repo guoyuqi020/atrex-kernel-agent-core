@@ -22,6 +22,7 @@ def optimization_mode_directive(
     mode: str, framework: str, *, source_checks_enabled: bool = True,
     numerical_feedback_instruction: str | None = None,
     candidate_submission_instruction: str = "Before committing",
+    correctness_instruction: str | None = None,
 ) -> str:
     """Shared policy; callers may adapt feedback/submission mechanics, not the gates."""
     if mode == "leaderboard":
@@ -68,6 +69,13 @@ def optimization_mode_directive(
             "Read verification_artifacts/.atrex_long_horizon_verify/numerical_feedback.json, "
             "fix the implementation, rerun ordinary validation and submit the updated candidate. "
         )
+    if correctness_instruction is None:
+        correctness_instruction = (
+            "Validate correctness with the immutable evaluator's ordinary random input generator "
+            "over the full workload set. Native Atrex-Bench uses allclose for ordinary operators "
+            "and relative L2 error <= 0.2 for NVFP4 operators. Keep the configured allclose "
+            "tolerances and required random-seed coverage; correctness must pass before promotion.\n"
+        )
     return (
         "## Optimization mode: production (hard gate)\n\n"
         "This generated section overrides any conflicting permissive framework or third-party-library "
@@ -81,10 +89,7 @@ def optimization_mode_directive(
         "when they only build or launch the candidate's self-authored kernel. Prebuilt kernels/operators/math "
         "implementations, alternate DSLs, hidden dispatch, PyTorch compute fallbacks, and external "
         "implementation loading remain forbidden. Ambiguous evidence is rejected.\n"
-        "- Validate correctness with the immutable evaluator's ordinary random input generator "
-        "over the full workload set. Native Atrex-Bench uses allclose for ordinary operators "
-        "and relative L2 error <= 0.2 for NVFP4 operators. Keep the configured allclose "
-        "tolerances and required random-seed coverage; correctness must pass before promotion.\n"
+        f"- {correctness_instruction}"
         "- Numerical review produces targeted supplemental tests, not subjective rejection verdicts. "
         "The supervisor executes those probes; measured failures return to the coding Agent for repair "
         "before baseline admission or episode completion. "

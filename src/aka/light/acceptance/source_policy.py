@@ -28,6 +28,16 @@ def optimization_mode_directive(
         )
     return workflow_policy.optimization_mode_directive(
         mode, framework, source_checks_enabled=source_checks_enabled,
+        correctness_instruction=(
+            "Validate correctness with the immutable evaluator over the full workload. "
+            "Before reasoning about numerical acceptance, read workspace `metadata.json` when it "
+            "is present; its benchmark correctness contract is authoritative. Do not assume, "
+            "invent, or override a tolerance formula or threshold. Treat every returned "
+            "correctness check as required for that task; one passing check never overrides "
+            "another reported failure. Use the returned per-shape and per-case diagnostics to repair the Kernel. "
+            "Never edit trusted inputs, tolerances, metadata, or evaluation records; correctness "
+            "must pass before promotion.\n"
+        ),
         numerical_feedback_instruction=(
             "Use the Supervisor's returned numerical feedback and Gateway Records; "
             "fix the implementation, rerun ordinary validation and resubmit the report. "

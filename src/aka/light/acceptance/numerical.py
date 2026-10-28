@@ -19,7 +19,6 @@ import time
 import traceback
 from concurrent.futures import CancelledError
 
-from aka.legacy.task.problem.native_harness import _fp4_correctness_max_rel_l2
 from aka.legacy.task.problem.resources import native_harness_script
 from aka.legacy.evaluation.drivers import numerical_inputs as probe_algorithms
 from aka.light.evaluation.policy import CANDIDATE_TIMEOUT
@@ -27,7 +26,7 @@ from aka.light.workspace.files import read_input, publish
 from aka.light.evaluation.projection import bounded_text, credential_values, redact_diagnostics
 from aka.light.agent.session_tail import read_regular_bytes
 
-from aka.light.acceptance.remote_numerical import MAX_REL_L2, PREFIX, validate_suite, validation_schedule
+from aka.light.acceptance.remote_numerical import PREFIX, validate_suite, validation_schedule
 from aka.light.workflow.constants import SUPPLEMENTAL_PENDING_PREFIX, SUPPLEMENTAL_REPAIR_PREFIX
 from aka.legacy.task.persistence import durable_write_json
 from aka.light.execution.retry import (check_review_service, retry_infrastructure)
@@ -306,7 +305,6 @@ def _run_probes(campaign, workspace, suite, shapes_path, digest, directory, *, c
             # Use the ordinary Evaluate budget, not the legacy harness's 20s
             # default. This is part of the recorded request/dedup identity.
             "candidate_timeout_s": CANDIDATE_TIMEOUT,
-            "max_rel_l2": _fp4_correctness_max_rel_l2(workspace) or MAX_REL_L2,
         })
 
         # Only a private, bounded input snapshot enters the normal Dev record
@@ -412,9 +410,14 @@ def supplemental_feedback(campaign, workspace, *, state_root, standard_correctne
     # Workspace feedback copies are never accepted as supervisor state.
     plan_root = state_root / "plans"
     plan_path = plan_root / (hashlib.sha256(repr(plan_key).encode()).hexdigest() + ".json")
-    record = {"schema_version": 1, "evidence_digest": validation_digest,
-              "comparison": {"metric": "relative_l2", "max_rel_l2":
-                  _fp4_correctness_max_rel_l2(workspace) or MAX_REL_L2}}
+    record = {
+        "schema_version": 1,
+        "evidence_digest": validation_digest,
+        "comparison": {
+            "metric": "task_metadata_correctness",
+            "policy_source": "metadata.json",
+        },
+    }
     try:
         previous_path = state_root / "numerical_feedback.json"
         if previous_path.is_file():

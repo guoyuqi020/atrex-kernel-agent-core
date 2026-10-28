@@ -51,6 +51,7 @@ from aka.light.execution.recovery import (
     EnvironmentUnavailable,
     environment_state_file,
 )
+from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES
 from aka.light.agent.dependency_policy import DEPENDENCY_GUARD_ENV
 from aka.light.workflow.baseline_progress import (capture_unexpected_exit as capture_framework_baseline_exit)
 from aka.light.workflow.baseline_progress import (load_progress as load_framework_baseline_progress)
@@ -114,6 +115,45 @@ _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_SCHEMA_VERSION = 4
 _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_PATH = Path(
     ".atrex_long_horizon/framework_baseline/correctness_guidance.json"
 )
+
+
+def _framework_baseline_validation_failure(
+    result: dict, *, returncode: int
+) -> str:
+    """Render the same bounded evaluator evidence used by ordinary Episode feedback."""
+    from aka.light.evaluation.projection import (
+        bounded_text,
+        evaluation as project_evaluation,
+        redact_diagnostics,
+    )
+
+    projected = project_evaluation(result)
+    evidence = {
+        key: projected[key]
+        for key in (
+            "correctness",
+            "failures",
+            "actionable_diagnostics",
+            "diagnostics",
+            "feedback_truncation",
+        )
+        if projected.get(key)
+    }
+    detail = bounded_text(
+        json.dumps(
+            redact_diagnostics(evidence),
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        16_384,
+    )
+    exit_note = f"; evaluator command exit={returncode}" if returncode else ""
+    message = f"combined five-case correctness validation failed{exit_note}"
+    if detail and detail != "{}":
+        message += f". Evaluator diagnostics: {detail}"
+    return message + ". Repair the reported shapes/checks, then rerun validation."
+
+
 _FRAMEWORK_BASELINE_CORRECTNESS_CONTEXT_PATHS = (
     "README.md",
     "reference.py",
@@ -198,14 +238,19 @@ def _stage_framework_source_tree(workspace: Path, source_paths: list[str]) -> li
 
 
 def framework_baseline_validation_command(n: int, *, atrex_bench: bool) -> list[str]:
-    """Build the Supervisor gate without exposing correctness-case control."""
+    """Build the same evaluator policy used by an ordinary Episode.
+
+    Framework admission differs only in its promotion objective: it needs a
+    measured, compliant V1 and does not compare that measurement against V0.
+    Sampling and timing policy remain shared with Episode evaluation.
+    """
     command = ["python", "test_kernel.py", "--version", f"v{n}"]
     if atrex_bench:
         # Typed Evaluate applies the Runtime-owned five-case policy.
-        command += ["--timed-runs", "100"]
+        command += ["--timed-runs", str(BENCH_ITERS)]
     else:
         # Legacy SOL harnesses still own their internal seed flag.
-        command += ["--multi-seed", "5"]
+        command += ["--multi-seed", str(CORRECTNESS_CASES - 1)]
     command.append("--no-memory")
     return command
 
@@ -950,8 +995,9 @@ class Campaign:
 
     def _evaluator_directive(self) -> str:
         public = (
-            "Use agent_problem.json for the public domain. Exact shapes and metadata remain private; "
-            "result Shape IDs are opaque and must not be reverse-engineered. "
+            "Use agent_problem.json for the public domain and read the immutable visible "
+            "metadata.json for the benchmark contract. Exact evaluator shapes remain private; "
+            "returned Shape IDs are opaque and must not be reverse-engineered. "
             if self.private_reference_dir else "The visible operator contract defines the supported inputs. "
         )
         if self.atrex_bench_root:
@@ -960,7 +1006,8 @@ class Campaign:
                 "The Supervisor supplies the official evaluator. Minimize latency_us_geomean; "
                 "performance_score is a reference-relative diagnostic, not the promotion criterion. "
                 "Use --kind run --mode full --no-sync for the complete workload. "
-                "Correctness-only, custom-input or subset results do not satisfy an Episode report. "
+                "Correctness-only, custom-input or subset results do not satisfy authoritative "
+                "full-workload acceptance. "
                 "For diagnostic Profile, use --kind profile --profile-shape-id ID --no-sync "
                 "with an opaque Shape ID from a saved result. The same option selects the "
                 "privately supplied case in Typed Profile or a compatible Dev fallback. "
@@ -1047,8 +1094,8 @@ class Campaign:
         source_policy, source_files = default_tree({"kernel.py": raw})
         self._selected_initial_source = pack(source_files, source_policy)
         install(self.workspace, self._selected_initial_source)
-        # Native tasks always expose a generalized public contract. Exact shapes and
-        # release metadata remain in the source operator directory and are injected only at the
+        # Native tasks always expose a generalized public contract and immutable metadata.
+        # Exact shapes remain in the source operator directory and are injected only at the
         # sandbox boundary. A missing public contract is authored before the baseline session.
         generalized = self.private_reference_dir is not None
         for name in agent_visible_operator_files(op_dir, generalized=generalized):
@@ -2118,6 +2165,7 @@ class Campaign:
             )
         try:
             from aka.light.workflow.session import LongSessionRunner
+            from aka.light.workflow.context import session_execution_policy
 
             observation_root = framework_baseline_progress_path(self.workspace).parent
             observation_root.mkdir(parents=True, exist_ok=True)
@@ -2136,15 +2184,8 @@ class Campaign:
             result = runner.run(
                 self.workspace,
                 prompt,
-                active_timeout_seconds=self.framework_baseline_timeout,
                 output_directory=observation_root,
                 telemetry_environment=telemetry_environment,
-                output_limit_recovery_retries=getattr(
-                    self.module_options, "output_limit_recovery_retries", 2
-                ),
-                dependency_policy_recovery_retries=getattr(
-                    self.module_options, "dependency_policy_recovery_retries", 2
-                ),
                 stage_name="Framework baseline",
                 initial_purpose="framework_baseline",
                 completion_instruction=(
@@ -2152,7 +2193,7 @@ class Campaign:
                     "implementation/. Leave the complete candidate ready for the Supervisor's framework-baseline "
                     "gates; do not create Git commits or submit an episode-report."
                 ),
-                reasoning_effort="max",
+                **session_execution_policy(self),
             )
         except EnvironmentUnavailable:
             capture_framework_baseline_exit(
@@ -2357,11 +2398,9 @@ class Campaign:
         return shlex.join(command), scope
 
     def _framework_baseline_sandbox_directive(self) -> str:
-        from aka.light.workflow.session_io import sandbox_boundary_directive
-        return sandbox_boundary_directive(
-            self.sandbox_hardware or self.platform, self.sandbox_profile,
-            self.sandbox_url, self.sandbox_ssh,
-        )
+        # The execution boundary and Runtime usage contract are identical to an
+        # optimization Episode. The baseline prompt alone narrows the objective.
+        return self._sandbox_directive()
 
     def _framework_baseline_prompt(self, n: int) -> str:
         smoke_command, smoke_scope = self._framework_baseline_smoke_command(n)
@@ -2537,19 +2576,40 @@ class Campaign:
         except (OSError, subprocess.SubprocessError) as exc:
             return None, f"combined validation failed to run: {exc}"
         self._print_v0_evaluator_output(test)
-        if test.returncode != 0:
-            from aka.light.evaluation.projection import source_error_from_stdout
-            source_error = source_error_from_stdout(test.stdout)
-            if source_error is not None:
-                error = source_error["error"]
-                return None, " ".join((error["message"], "; ".join(error["violations"]), error["next_action"]))
-            return None, f"combined validation command failed (exit={test.returncode})"
+        from aka.light.evaluation.projection import (
+            bounded_text,
+            redact_diagnostics,
+            source_error_from_stdout,
+        )
+        source_error = source_error_from_stdout(test.stdout)
+        if source_error is not None:
+            error = source_error["error"]
+            return None, " ".join(
+                (
+                    error["message"],
+                    "; ".join(error["violations"]),
+                    error["next_action"],
+                )
+            )
         try:
             result = _test_result_from_stdout(test.stdout)
         except (RuntimeError, json.JSONDecodeError) as exc:
+            if test.returncode != 0:
+                output = redact_diagnostics(test.stderr or test.stdout)
+                detail = bounded_text(output, 4096)
+                suffix = f": {detail}" if detail else ""
+                return None, (
+                    f"combined validation command failed (exit={test.returncode}){suffix}"
+                )
             return None, f"combined validation produced no usable result: {exc}"
+        if test.returncode != 0:
+            return result, _framework_baseline_validation_failure(
+                result, returncode=test.returncode
+            )
         if result.get("all_pass") is not True:
-            return None, "combined five-case correctness validation failed"
+            return result, _framework_baseline_validation_failure(
+                result, returncode=test.returncode
+            )
 
         latency = result.get("latency_us_geomean")
         if (

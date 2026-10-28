@@ -93,6 +93,27 @@ def episode_directives(campaign: Campaign, version: int) -> dict[str, str]:
     }
 
 
+def session_execution_policy(campaign: Campaign) -> dict[str, object]:
+    """Agent-session policy shared by Framework baseline and every Episode.
+
+    Stage goals and terminal instructions belong in their prompts. Resource
+    budgeting, reasoning effort and automatic recovery must not drift between
+    the two workflows.
+    """
+    return {
+        "episode_timeout_seconds": getattr(
+            campaign.module_options, "episode_timeout_seconds", None
+        ),
+        "reasoning_effort": "max",
+        "output_limit_recovery_retries": getattr(
+            campaign.module_options, "output_limit_recovery_retries", 2
+        ),
+        "dependency_policy_recovery_retries": getattr(
+            campaign.module_options, "dependency_policy_recovery_retries", 2
+        ),
+    }
+
+
 def run_sandbox(
     workspace: Path,
     hardware: str,

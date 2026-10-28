@@ -21,11 +21,10 @@ against the actual reference, not a hypothetical higher-precision implementation
 Derive packed constants from their component fields and verify the resulting
 bit pattern against the reference decoder. Use inputs on which the reference
 produces finite outputs; a non-finite reference cannot certify the candidate.
-Supplemental floating-point outputs are compared by the evaluator using relative
-L2 <= 1e-3 per output tensor (FP4 uses its benchmark threshold of 0.2), with
-finite-value and structural checks retained.
-Elementwise absolute/relative errors are diagnostics, not supplemental rejection
-criteria. This supervisor-owned threshold is fixed; do not propose tolerances.
+Read `trusted/metadata.json` when present before reasoning about acceptance. The
+benchmark's correctness contract is authoritative for supplemental outputs as well
+as the ordinary gate. Do not infer thresholds from dtype or operator name, propose
+new tolerances, or treat one passing check as overriding another reported failure.
 
 Request at most three targeted cases. For example, a claim about saturation of
 FP8 P*V accumulation may justify tied logits, same-sign large V and sufficiently

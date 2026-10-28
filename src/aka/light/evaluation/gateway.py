@@ -236,7 +236,6 @@ OUTPUT_END = "__ATREX_SANDBOX_OUTPUT_END__"
 DEFAULT_COMMAND_TIMEOUT = derived_evaluation_timeout()
 DEFAULT_EVAL_SHAPE_BATCH_SIZE = SHAPE_BATCH_SIZE
 DEFAULT_EVAL_BATCH_WORKERS = BATCH_WORKERS
-FP4_MAX_REL_L2 = 0.2
 MAX_DEV_JOB_TIMEOUT = 600
 MAX_HTTP_REQUEST_TIMEOUT = 600
 RECOVERY_GET_TIMEOUT = 30
@@ -1005,17 +1004,6 @@ def _workspace_num_gpus(workspace: Path) -> int:
     return _distributed_evaluation_world_size(metadata)
 
 
-def _fp4_correctness_max_rel_l2(
-    metadata: dict[str, Any] | None,
-    operator: object = None,
-) -> float | None:
-    return (
-        FP4_MAX_REL_L2
-        if _metadata_has_fp4_dtype(metadata) or _is_fp4_dtype(operator)
-        else None
-    )
-
-
 def _is_generalized_workspace(workspace: Path) -> bool:
     """Return whether this workspace uses private exact-case handling."""
     return (workspace / AGENT_PROBLEM_FILENAME).is_file()
@@ -1192,6 +1180,9 @@ def _typed_workspace_limitation(
         "--workspace",
         "--candidate-timeout-s",
         "--perf-timeout-s",
+        "--atol",
+        "--rtol",
+        "--correctness-max-rel-l2",
     )
     for option in unsupported_options:
         if _option_value(command, option) is not None:
@@ -1199,15 +1190,6 @@ def _typed_workspace_limitation(
     warmup = _option_value(command, "--warmup")
     if warmup is not None and str(warmup) != str(WARMUP_ITERS):
         return "non-default --warmup is not supported by the typed API"
-    for option, default in (("--atol", 1e-2), ("--rtol", 0.05)):
-        value = _option_value(command, option)
-        if value is not None:
-            try:
-                matches_default = float(value) == default
-            except (TypeError, ValueError):
-                matches_default = False
-            if not matches_default:
-                return f"non-default {option} is not exposed by agate eval"
     return None
 
 
@@ -1416,8 +1398,6 @@ def build_typed_request(
         policy = evaluation_policy(command, evaluation_mode) if kind == "run" else None
         correctness_cases = policy["num_correctness_cases"] if policy else CORRECTNESS_CASES
         bench_iters = int(_option_value(command, "--timed-runs", BENCH_ITERS))
-        atol = float(_option_value(command, "--atol", 1e-2))
-        rtol = float(_option_value(command, "--rtol", 0.05))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid evaluator command option: {exc}") from exc
     if bench_iters < 1:
@@ -1453,18 +1433,10 @@ def build_typed_request(
         "options": {
             "num_correctness_cases": correctness_cases,
             "bench_iters": bench_iters,
-            "atol": atol,
-            "rtol": rtol,
             "timeout_s": timeout,
         },
         "env_vars": _parse_env_items(env_items),
     }
-    correctness_max_rel_l2 = _fp4_correctness_max_rel_l2(
-        reference.get("metadata") if isinstance(reference.get("metadata"), dict) else None,
-        reference.get("operator"),
-    )
-    if kind == "run" and correctness_max_rel_l2 is not None:
-        request["options"]["correctness_max_rel_l2"] = correctness_max_rel_l2
     if kind == "run":
         request["mode"] = policy["mode"]
         request["lock_clocks"] = True
@@ -3525,20 +3497,12 @@ def build_typed_agate_command(
         # the runner-config channel, so keep this final to prevent a request
         # override from enabling the profiler again.
         command += ["--set", "skip_kernel_attribution=true"]
-        for name in ("atol", "rtol"):
-            command += ["--set", f"{name}={options[name]}"]
         if request.get("abba"):
             if request_sidecar_dir is None:
                 raise ValueError("Native ABBA requires a private source sidecar directory")
             baseline_path = request_sidecar_dir / "baseline.py"
             baseline_path.write_text(request["abba"]["baseline"], encoding="utf-8")
             command += ["--baseline", str(baseline_path), "--abba-repeats", str(request["abba"]["repeats"])]
-    correctness_max_rel_l2 = options.get("correctness_max_rel_l2")
-    if kind == "run" and correctness_max_rel_l2 is not None:
-        command += [
-            "--set",
-            f"correctness_max_rel_l2={json.dumps(correctness_max_rel_l2)}",
-        ]
     for key, value in request["env_vars"].items():
         command += ["--env-var", f"{key}={value}"]
     if kind == "profile":

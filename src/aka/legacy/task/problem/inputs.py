@@ -227,7 +227,7 @@ class BenchInputs:
             ) from exc
         leaked = [
             name
-            for name in ("shapes.json", "metadata.json", "roofline.json", "valid.py")
+            for name in ("shapes.json", "roofline.json", "valid.py")
             if (self.workspace / name).exists()
         ]
         if leaked:

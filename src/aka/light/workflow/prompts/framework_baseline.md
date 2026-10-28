@@ -5,6 +5,13 @@ V0 is the PyTorch reference wrapper; the Supervisor will register the accepted i
 as v{{N}} before optimization Episodes begin. If recovering an interrupted session, preserve
 and inspect the candidate already on disk instead of starting over.
 
+This stage uses the same source boundary, Runtime tools, evaluator policy, correctness checks,
+infrastructure recovery and active-time configuration as a normal optimization Episode. Its only
+stage-specific differences are:
+
+1. **Goal:** translate the V0 PyTorch reference into the first compliant target-framework V1.
+2. **Performance requirement:** measure V1, but do not require it to be faster than V0.
+
 {{SOURCE_INSTRUCTIONS}}
 
 This is a non-interactive job. Work through concrete in-scope fixes until the prescribed smoke
@@ -31,7 +38,7 @@ run ABBA, or add a separate benchmark.
 
 Read workspace `README.md`, the optional `memory/v0.json` if present, the complete current Kernel source tree, and the available public
 contract/reference files. For native problems these include `reference.py`, `input.py`, and
-public `agent_problem.json` or legacy `shapes.json`; for SOL, use `definition.json`, `reference.py`,
+immutable `metadata.json` when present, plus public `agent_problem.json` or legacy `shapes.json`; for SOL, use `definition.json`, `reference.py`,
 and `workload.jsonl`. Cover the full public domain without searching for hidden evaluator inputs.
 Reconcile any supplied correctness guidance with the immutable reference; advice does not
 override the operator contract.

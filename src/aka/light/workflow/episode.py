@@ -48,7 +48,6 @@ MEMORY_EXPERIMENT_FIELDS = (
 )
 MAX_MEMORY_EXPERIMENT_FIELD_CHARS = 2_000
 EPISODE_EVALUATIONS_PATH = Path(".atrex_long_horizon/evaluations.jsonl")
-EPISODE_REASONING_EFFORT = "max"
 GOAL_AFTER_EPISODES = 50
 GOAL_AFTER_STALLS = 3
 GOAL_HANDOFF_RESUMES = 20
@@ -1900,7 +1899,6 @@ class LongHorizonCampaign:
                 agent_workspace,
                 prompt,
                 output_directory=store.episode_dir(episode),
-                episode_timeout_seconds=self.base_campaign.module_options.episode_timeout_seconds,
                 handoff_path=handoff_path,
                 handoff_resumes=(
                     max(self.handoff_resumes, GOAL_HANDOFF_RESUMES)
@@ -1911,22 +1909,14 @@ class LongHorizonCampaign:
                     journal_path,
                     handoff,
                 ),
-                reasoning_effort=EPISODE_REASONING_EFFORT,
                 telemetry_environment=telemetry_environment,
                 record_usage=lambda tokens: store.record_usage(
                     state, usage_receipt, tokens
                 ),
-                output_limit_recovery_retries=getattr(
-                    self.base_campaign.module_options, "output_limit_recovery_retries", 2
-                ),
-                dependency_policy_recovery_retries=getattr(
-                    self.base_campaign.module_options,
-                    "dependency_policy_recovery_retries",
-                    2,
-                ),
                 remaining_token_budget=(
                     max(0, self.token_budget - state.tokens) if self.token_budget else None
                 ),
+                **main_adapter.session_execution_policy(self.base_campaign),
             )
             # Also persist before verification: a GPU outage there must not
             # discard the coding session's usage. Receipt replay is harmless.

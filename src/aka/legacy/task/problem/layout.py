@@ -27,6 +27,7 @@ GENERATED_AGENT_PROBLEM_FIELDS = frozenset(
 GENERALIZED_AGENT_VISIBLE_FILES = (
     "reference.py",
     "input.py",
+    "metadata.json",
     AGENT_PROBLEM_FILENAME,
 )
 LEGACY_ATREX_VISIBLE_FILES = (
