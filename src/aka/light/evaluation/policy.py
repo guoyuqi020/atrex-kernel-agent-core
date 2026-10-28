@@ -20,7 +20,7 @@ WARMUP_ITERS = 5
 # seconds. Operators may still override the enclosing allocation.
 CANDIDATE_TIMEOUT = DEFAULT_CANDIDATE_TIMEOUT
 PERFORMANCE_TIMEOUT = DEFAULT_PERFORMANCE_TIMEOUT
-SHAPE_BATCH_SIZE = 1
+SHAPE_BATCH_SIZE = 5
 BATCH_WORKERS = 16
 MEASUREMENT_CONTRACT = "runtime-native-eval-v1"
 ACCEPTANCE_METRIC = "geomean-latency-reduction-v1"

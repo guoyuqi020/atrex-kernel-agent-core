@@ -153,7 +153,7 @@ from aka.light.execution.gateway_jobs import (  # noqa: E402
     submission_rejection,
 )
 
-from aka.legacy.evaluation.shapes import (
+from aka.light.evaluation.shapes import (
     request_shape_ids as _request_shape_ids,
     batch_shape_ids as batch_shape_ids,
     shape_batch_request as _shape_batch_request,
@@ -1412,7 +1412,6 @@ def build_typed_request(
         # gateway must honor the adapter's targeted-smoke contract instead of
         # silently expanding a one-shape request back to the complete workload.
         requested_shape_ids = list(dict.fromkeys(requested_shape_ids))
-        shapes = {shape_id: shapes[shape_id] for shape_id in requested_shape_ids}
     try:
         policy = evaluation_policy(command, evaluation_mode) if kind == "run" else None
         multi_seed = policy["num_correctness_cases"] - 1 if policy else 0
@@ -1441,15 +1440,6 @@ def build_typed_request(
         ):
             value = read_json_object(_evaluator_input_path(workspace, filename, required=False))
             if value is not None:
-                if requested_shape_ids and isinstance(value.get("shapes"), dict):
-                    value = dict(value)
-                    value["shapes"] = {
-                        shape_id: value["shapes"][shape_id]
-                        for shape_id in requested_shape_ids
-                        if shape_id in value["shapes"]
-                    }
-                    if filename == "metadata.json" and "num_shapes" in value:
-                        value["num_shapes"] = len(requested_shape_ids)
                 reference[field] = value
 
     num_gpus = _distributed_evaluation_world_size(reference.get("metadata"))
@@ -1479,6 +1469,8 @@ def build_typed_request(
         request["mode"] = policy["mode"]
         request["lock_clocks"] = True
         request["runner_overrides"] = runner_overrides()
+        if requested_shape_ids:
+            request["runner_overrides"]["shape_ids"] = requested_shape_ids
         if dependency_specs:
             request["requirements"] = dependency_specs
         if deps_mode is not None:
@@ -1983,7 +1975,10 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
                 "ATREX_EVAL_SHAPE_BATCH_SIZE", str(DEFAULT_EVAL_SHAPE_BATCH_SIZE)
             )
         ),
-        help="Maximum Atrex-Bench shapes per concurrent eval job (default: 4).",
+        help=(
+            "Maximum Atrex-Bench shapes per concurrent eval job "
+            f"(default: {DEFAULT_EVAL_SHAPE_BATCH_SIZE})."
+        ),
     )
     parser.add_argument(
         "--sync",
@@ -3577,25 +3572,6 @@ def _typed_fallback_allowed(detail: object) -> bool:
     return any(reason in text for reason in TYPED_FALLBACK_REASONS)
 
 
-def _shape_batch_reference(
-    reference: dict[str, Any], destination: Path
-) -> None:
-    destination.mkdir()
-    for filename, field in (
-        ("reference.py", "reference_py"),
-        ("input.py", "input_py"),
-        ("shapes.json", "shapes"),
-        ("metadata.json", "metadata"),
-        ("roofline.json", "roofline"),
-    ):
-        value = reference.get(field)
-        if value is not None:
-            (destination / filename).write_text(
-                value if isinstance(value, str) else json.dumps(value),
-                encoding="utf-8",
-            )
-
-
 def _mask_generalized_result(
     workspace: Path, result: dict[str, Any]
 ) -> dict[str, Any]:
@@ -3984,77 +3960,70 @@ def _run_typed_gateway(
             record_eval_store.retain_terminal_job(identity, retained)
 
     try:
-        with tempfile.TemporaryDirectory(prefix="atrex-shape-batches-") as temp_dir:
-            batch_root = Path(temp_dir)
+        def run_batch(shape_ids: list[str]) -> subprocess.CompletedProcess[str]:
+            batch_request = (
+                _shape_batch_request(request, shape_ids) if batched else request
+            )
+            batch_identity = (
+                {
+                    "transport": "agate_native_eval",
+                    "request": payload_identity(batch_request),
+                    "shape_ids": shape_ids,
+                }
+                if eval_store is not None
+                else None
+            )
+            if eval_store is not None and batch_identity is not None and (
+                saved := eval_store.load(batch_identity)
+            ) is not None:
+                retain_eval_batch(batch_identity, saved)
+                return subprocess.CompletedProcess(
+                    [],
+                    saved["returncode"],
+                    saved["stdout"],
+                    saved["stderr"],
+                )
+            from aka.light.evaluation.source_transport import run as run_tree
+            import sys
+            process = run_tree(
+                sys.modules[__name__],
+                args,
+                batch_request,
+                kind,
+                queue_wait_grace,
+            )
+            if eval_store is not None and batch_identity is not None:
+                job = parse_job_response(process.stdout or "")
+                if job is not None:
+                    try:
+                        saved = eval_store.save(
+                            batch_identity,
+                            job,
+                            stdout=process.stdout,
+                            stderr=process.stderr or "",
+                            returncode=process.returncode,
+                        )
+                    except ValueError:
+                        # Queued, running, incomplete and infrastructure
+                        # outcomes remain only physical-job checkpoints.
+                        pass
+                    else:
+                        retain_eval_batch(batch_identity, saved)
+            return process
 
-            def run_batch(
-                item: tuple[int, list[str]],
-            ) -> subprocess.CompletedProcess[str]:
-                batch_index, shape_ids = item
-                batch_request = (
-                    _shape_batch_request(request, shape_ids) if batched else request
-                )
-                batch_identity = (
-                    {
-                        "transport": "agate_native_eval",
-                        "request": payload_identity(batch_request),
-                        "shape_ids": shape_ids,
-                    }
-                    if eval_store is not None
-                    else None
-                )
-                if eval_store is not None and batch_identity is not None and (
-                    saved := eval_store.load(batch_identity)
-                ) is not None:
-                    retain_eval_batch(batch_identity, saved)
-                    return subprocess.CompletedProcess(
-                        [],
-                        saved["returncode"],
-                        saved["stdout"],
-                        saved["stderr"],
-                    )
-                from aka.light.evaluation.source_transport import run as run_tree
-                import sys
-                process = run_tree(
-                    sys.modules[__name__],
-                    args,
-                    batch_request,
-                    kind,
-                    queue_wait_grace,
-                )
-                if eval_store is not None and batch_identity is not None:
-                    job = parse_job_response(process.stdout or "")
-                    if job is not None:
-                        try:
-                            saved = eval_store.save(
-                                batch_identity,
-                                job,
-                                stdout=process.stdout,
-                                stderr=process.stderr or "",
-                                returncode=process.returncode,
-                            )
-                        except ValueError:
-                            # Queued, running, incomplete and infrastructure
-                            # outcomes remain only physical-job checkpoints.
-                            pass
-                        else:
-                            retain_eval_batch(batch_identity, saved)
-                return process
-
-            batch_items = list(enumerate(shape_batches))
-            if batched:
-                print(
-                    f"[sandbox] running {len(shape_batches)} shape batches "
-                    f"with {min(DEFAULT_EVAL_BATCH_WORKERS, len(shape_batches))} workers",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                with ThreadPoolExecutor(
-                    max_workers=min(DEFAULT_EVAL_BATCH_WORKERS, len(shape_batches))
-                ) as executor:
-                    processes = list(executor.map(run_batch, batch_items))
-            else:
-                processes = [run_batch(batch_items[0])]
+        if batched:
+            print(
+                f"[sandbox] running {len(shape_batches)} shape batches "
+                f"with {min(DEFAULT_EVAL_BATCH_WORKERS, len(shape_batches))} workers",
+                file=sys.stderr,
+                flush=True,
+            )
+            with ThreadPoolExecutor(
+                max_workers=min(DEFAULT_EVAL_BATCH_WORKERS, len(shape_batches))
+            ) as executor:
+                processes = list(executor.map(run_batch, shape_batches))
+        else:
+            processes = [run_batch(shape_batches[0])]
     except GatewayHTTPError as exc:
         if kind != "run" and _typed_fallback_allowed(exc) and compatible_fallback:
             print(

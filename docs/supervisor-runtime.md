@@ -166,6 +166,13 @@ The deadline is measured from HTTP dispatch, including time spent waiting for th
 
 Operators can set positive finite `ATREX_AKA_REQUEST_TIMEOUT_SECONDS` and `ATREX_AKA_QUEUE_TIMEOUT_SECONDS` before starting the Campaign; library callers use `RuntimeConfig.request_timeout` (`None` selects the derived default) and `queue_timeout`. Empty, malformed, non-finite or non-positive environment values stop Campaign Runtime startup with a concise error naming the variable and explaining how to correct or unset it, without a Python traceback. Unset variables keep the defaults. An explicit request timeout is the whole-request limit, not an addition to the derived budget, and can deliberately shorten or extend it. The queue timeout applies to each of the two sequential waiting stages, not to their combined duration: with the default 60 seconds, Session-lock and process-slot waiting can total nearly 120 seconds before execution, plus staging time. Both waits and staging consume the same overall request deadline. These Supervisor settings do not change standalone verifier/Gateway deadlines.
 
+Light keeps the evaluator's reference bundle immutable while batching. Each ordinary
+Evaluate and ABBA shard sends the complete `input.py`, Shape contract, metadata and
+roofline together with at most five opaque IDs in
+`runner_overrides.shape_ids`. Completed shard checkpoints therefore retain a stable
+source/input identity, and recovery resubmits only missing five-Shape selections rather
+than generating rewritten reference directories.
+
 The derived budget is not multiplied automatically by batch count. ABBA Shape batches and ordinary Evaluate can require multiple execution waves. Their combined queue/run time can exceed a single-job allowance. For such workloads, set `ATREX_AKA_REQUEST_TIMEOUT_SECONDS` for the entire operation, accounting for batches, waves and staging; increasing only an individual job's queue grace is not a whole-operation guarantee.
 
 ## Python module interfaces
@@ -175,6 +182,7 @@ The shared interfaces used by this Runtime have public names; helpers used only 
 | Module | Shared interface |
 | --- | --- |
 | `supervisor.gateway` | Request construction: `build_typed_request`; execution: all public Gateway job kinds through `evaluation.source_transport.run_sdk_job`, plus `configured_queue_wait_grace` and `gateway_job_timeout`; data handling: `parse_job_response`, `read_workspace_override`, `private_reference_dir`, `read_json_object`, `shape_id_sort_key`, `batch_shape_ids`, `bounded_actionable_diagnostic` |
+| `evaluation.shapes` | Immutable reference selection: `request_shape_ids`, `batch_shape_ids`, and `shape_batch_request` |
 | `supervisor.projection` | `bounded_text`, alongside the existing public result projections |
 | `orchestrator.agent_home` | `open_private_directory`: context-managed, no-follow directory descriptor |
 | `orchestrator.session_tail` | `read_regular_bytes`: bounded regular-file reads without following symlinks |
