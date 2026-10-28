@@ -354,7 +354,7 @@ third-party libraries. `optimization_mode=production` is fail-closed:
   rejected;
 - deterministic checks retain only whole-tree syntax and source boundaries, self-containment,
   immutable campaign state, and the Triton-to-Gluon phase latch;
-- the editable `adapter.py` entry point, the complete optional implementation tree, its source
+- the editable `kernel.py` entry point, the complete optional implementation tree, its source
   contract, and `solution.json` when applicable are copied into a bounded temporary workspace for
   every complete production-candidate review;
 - a missing, malformed, incomplete, or evidence-mutating Agent verdict fails closed;
@@ -470,8 +470,9 @@ output.
 
 ```text
 kernel_opt_<name>_<framework>_<platform>[_production]/
-├── adapter.py                         # Required editable evaluator entry point
-├── implementation/                    # Optional editable Kernel source tree
+├── kernel.py                         # Required editable evaluator entry point
+├── implementation/                    # Package; helper/source files are optional
+│   └── __init__.py                    # Required source-tree/package marker
 ├── test_kernel.py
 ├── README.md
 ├── memory/v<N>.json
@@ -483,7 +484,7 @@ kernel_opt_<name>_<framework>_<platform>[_production]/
 ```
 
 Native Campaigns create this tree before the V0 commit and first measurement. Framework Baseline
-therefore receives the same editable adapter and may keep a single-file implementation there or
+therefore receives the same editable Kernel entry point and may keep a single-file implementation there or
 freely add, edit, or delete files below `implementation/`; V0, Framework Baseline, and later
 Episodes share one source identity.
 

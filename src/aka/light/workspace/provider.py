@@ -51,11 +51,13 @@ class ManagedCandidateWorkspace(GitCandidateWorkspace):
         publish(workspace, ".gitignore", b"__pycache__/\n*.pyc\n/scratch\n")
         (workspace / "memory").mkdir(exist_ok=True)
         # Native Campaigns arrive in the only supported source-tree layout.
-        # adapter.py may contain the complete Kernel or import files below
+        # kernel.py may contain the complete Kernel or import files below
         # implementation/. No workspace manifest or migration is needed.
         paths = {item.path for item in content.files}
-        if "adapter.py" not in paths:
-            raise ValueError("Native initial source requires adapter.py")
+        if "kernel.py" not in paths:
+            raise ValueError("Native initial source requires kernel.py")
+        if "implementation/__init__.py" not in paths:
+            raise ValueError("Native initial source requires implementation/__init__.py")
         if not (workspace / ".git").exists():
             subprocess.run(["git", "init", "-q", str(workspace)], check=True)
             subprocess.run(["git", "-C", str(workspace), "config", "user.name", "GPU Kernel Optimizer"], check=True)

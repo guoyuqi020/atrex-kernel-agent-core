@@ -34,7 +34,7 @@ flowchart TD
 
 Code boundaries: `orchestrator/episode_workspace.py` materializes/publishes the draft; `SupervisorRuntime.register_episode/session` binds it; `supervisor/journal.py` validates and submits; `long_horizon/git_episode.py` seals and promotes. `recorded_verifier.py` consumes recorded ABBA and the existing score gate. `promotion_audit.py` and `audit_recovery.py` bind recovery to an already committed promotion.
 
-The commit tree is built from the exact source-tree bytes validated against the selected Experiment, not a second read of mutable Agent source. Only `adapter.py` and paths below `implementation/` can differ from the Episode baseline. A temporary index avoids mixing staged files into the commit; compare-and-swap refuses concurrent HEAD changes. Repeating the same report after a commit/write interruption reuses the matching HEAD instead of creating another commit. No Agent-provided Commit ID is accepted in managed Episodes.
+The commit tree is built from the exact source-tree bytes validated against the selected Experiment, not a second read of mutable Agent source. Only `kernel.py` and paths below `implementation/` can differ from the Episode baseline. A temporary index avoids mixing staged files into the commit; compare-and-swap refuses concurrent HEAD changes. Repeating the same report after a commit/write interruption reuses the matching HEAD instead of creating another commit. No Agent-provided Commit ID is accepted in managed Episodes.
 
 Private report persistence precedes compatibility publication. A rejected report may be corrected and resubmitted. Once accepted, only identical replay is allowed. Subsequent draft edits do not change the sealed candidate: Session publication retains the source bound to the private report and commit, leaves the Agent draft untouched, and records an integrity warning in the private draft state and operator log if the draft differs or cannot be read. Completion/recovery restores a differing controller copy from the verified seal before policy review. Acceptance read the committed bytes, never the later draft. Invalid report digests, Git identity/ancestry changes and protected-file modifications remain blocking errors.
 
@@ -42,8 +42,9 @@ Private report persistence precedes compatibility publication. A rejected report
 
 ```text
 workspace/
-├── adapter.py                        # Required writable evaluator entry point
-├── implementation/                  # Optional writable candidate source tree
+├── kernel.py                        # Required writable evaluator entry point
+├── implementation/                  # Writable package; helper sources are optional
+│   └── __init__.py                  # Required source-tree/package marker
 ├── README.md / CLAUDE.md              # Public immutable instructions
 ├── public operator/evaluator files   # Existing layout; no additional private Shapes
 ├── memory/vN.json                    # Read-only canonical history

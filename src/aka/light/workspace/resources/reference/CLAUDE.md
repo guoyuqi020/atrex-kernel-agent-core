@@ -29,9 +29,10 @@ and finish procedure. Do not assume another DSL, library, or validation procedur
 ## Workspace and evidence
 
 - The execution boundary defines writable paths. After V0 measurement, Framework Baseline and every
-  optimization Episode use the same unified tree: editable `adapter.py` is the required evaluator
+  optimization Episode use the same unified tree: editable `kernel.py` is the required evaluator
   entry point, and optional implementation files live below `implementation/`. You may keep a
-  single-file Kernel in `adapter.py` or split it into multiple files. The entire tree is one candidate;
+  single-file Kernel in `kernel.py` or split it into multiple files. Keep
+  `implementation/__init__.py` present. The entire tree is one candidate;
   update `solution.json` only where the phase permits. Do not edit public contracts or canonical
   memory, or use Git for rollback.
 - Cover the entire public input domain. Opaque Shape IDs identify results, not input parameters;

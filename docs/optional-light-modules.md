@@ -487,14 +487,16 @@ end-to-end run was performed for pooled search.
 ### Unified and imported source-tree Kernels
 
 Every fresh native Light task enters its optimization Episodes with one source-tree
-representation. The original one-file implementation becomes editable `adapter.py`, the required
+representation. The original one-file implementation becomes editable `kernel.py`, the required
 evaluator entry point. The Agent may keep the complete implementation there or add, modify, and
-remove files below `implementation/` and import them from `adapter.py`.
+remove files below `implementation/` and import them from `kernel.py`.
+The package marker `implementation/__init__.py` is always present and must remain; other
+implementation files are optional.
 The tree is created before V0 is committed or measured, so V0, Framework Baseline and every
 optimization Episode use exactly the same source identity. Native Kernel workspaces do not carry
 a source manifest: the directory layout is the contract.
 
-For a task that already has multiple files or needs a custom adapter, select the Workflow's
+For a task that already has multiple files or needs a custom entry point, select the Workflow's
 optional imported source contract. Either
 snapshot a plain local directory (no Git required):
 
@@ -513,13 +515,13 @@ snapshot a plain local directory (no Git required):
 Or use `"repository": "/absolute/path/to/git-checkout"` instead of `directory`
 to import an exact Git revision. These options are mutually exclusive.
 
-The import manifest selects the source snapshot and supplies the initial adapter:
+The import manifest selects the source snapshot and supplies the initial `kernel.py`:
 
 ```json
 {
   "schema_version": 1,
   "name": "package-kernel",
-  "adapter": "adapter.py",
+  "adapter": "kernel.py",
   "source": {
     "name": "package",
     "archive_paths": ["LICENSE", "package"],
@@ -528,9 +530,9 @@ The import manifest selects the source snapshot and supplies the initial adapter
 }
 ```
 
-`adapter.py` is resolved beside the manifest and copied as the initial editable
-root `adapter.py` entry point. Every selected source is installed below `implementation/`;
-the adapter must import it through that package. `source.archive_paths` selects files/directories relative
+`kernel.py` is resolved beside the manifest and copied as the initial editable
+root `kernel.py` entry point. Every selected source is installed below `implementation/`;
+the entry point must import it through that package. `source.archive_paths` selects files/directories relative
 to the supplied directory or repository. In **directory mode**, the Supervisor
 captures the current working bytes, including uncommitted and untracked files in
 those paths; it does not run Git or modify the original directory. No
@@ -543,30 +545,30 @@ In **repository mode**, add `"revision": "<full Git commit hash>"` under `source
 The Supervisor uses `git archive` at that revision, excluding uncommitted changes.
 Both modes save the complete initial snapshot atomically in the Supervisor-private
 `<scope>/initial-source/snapshot.json` **before** initializing/measuring V0. Failed
-Bootstrap retries reuse this snapshot even if the original directory, adapter or
+Bootstrap retries reuse this snapshot even if the original directory, entry point or
 manifest has since changed or disappeared. A corrupt saved snapshot fails closed;
 it never silently recaptures a different seed. Use a new Campaign to select a new
 seed. The controller may still use its own Git repository for candidate sealing;
 the supplied source directory does not need to be one.
 
 There is no `.atrex_source.json`. Runtime derives the boundary directly from the fixed layout:
-root `adapter.py` may be modified but must remain present, and `implementation/**` allows additions,
-modifications and deletions. Source validation
+root `kernel.py` and `implementation/__init__.py` must remain present, while other
+`implementation/**` paths allow additions, modifications and deletions. Source validation
 rejects symlinks, special/binary files, new build artifacts and protected import
 shadowing. Limits: 4096 files, 16 MiB/file, 64 MiB total.
 
-The Agent sees editable `adapter.py` and optional Kernel/package sources alongside `skills/`,
+The Agent sees editable `kernel.py` and optional Kernel/package sources alongside `skills/`,
 `tools/` and `scratch/`. `WORKSPACE.md` explains the source boundary. Submission and sealing
-validate the complete source tree and require the adapter entry point.
+validate the complete source tree and require the `kernel.py` entry point.
 Light reserves its root-level workspace names (public inputs, `README.md`, tools,
 Skills, scratch and controller metadata); a manifest colliding with them is rejected
 explicitly. Put package documentation inside its imported package directory.
 
-The complete source snapshot, not only the adapter, determines the Kernel ID,
+The complete source snapshot, not only the entry point, determines the Kernel ID,
 measurement identity, report binding, sealed commit, promotion and Epoch broadcast.
 A rejected/pivoted source tree is not broadcast. Custom tools/Skills keep their
 independent inheritance policy. Framework Baseline receives the same tree as V0 and may keep its
-implementation in `adapter.py` or split it into any number of files below `implementation/`.
+implementation in `kernel.py` or split it into any number of files below `implementation/`.
 
 All Gateway operations use the public Agate SDK. Evaluate and ABBA use the native
 Eval kind for inline candidates and exact source archives, with persisted upload
@@ -607,7 +609,7 @@ on macOS. The Light sdist and wheel build successfully with the source/worker as
 
 ### Reusable workspace
 
-Managed Episodes expose writable `adapter.py`, optional writable `implementation/`, `skills/` and `tools/`, temporary `scratch/`,
+Managed Episodes expose writable `kernel.py`, optional writable `implementation/`, `skills/` and `tools/`, temporary `scratch/`,
 optional Supervisor-owned `memory/v*.json`, and public contracts/instructions. `WORKSPACE.md` states
 the selected inheritance policy. Each reusable directory has a writable README index; Agents
 must update it when adding, modifying or deleting custom contents. Store reusable methods in

@@ -22,7 +22,7 @@ TERMINAL_STATUSES = {"completed", "interrupted", "failed"}
 MEMORY_RE = re.compile(r"v[0-9]+\.json")
 LONG_MEMORY_RE = re.compile(r"long_horizon_e[0-9]+\.json")
 PROFILE_RE = re.compile(r"v[0-9]+(?:[_-].+)?")
-ROOT_FILES = ("adapter.py", "kernel.py", "definition.json", "solution.json", "workload.jsonl")
+ROOT_FILES = ("kernel.py", "definition.json", "solution.json", "workload.jsonl")
 PROFILE_FILES = (
     "summary.txt", "REPORT.md", "iteration_report.md", "evidence.md",
     "analysis/metrics_key_run.json",

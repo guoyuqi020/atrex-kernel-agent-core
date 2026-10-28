@@ -145,7 +145,7 @@ def production_structure_violations(
     *,
     require_gluon: bool = False,
 ) -> list[str]:
-    """Validate the editable adapter and the fixed source-tree boundary."""
+    """Validate the editable Kernel entry point and source-tree boundary."""
     from aka.light.workspace.sources import policy_at, collect
 
     policy = policy_at(workspace)

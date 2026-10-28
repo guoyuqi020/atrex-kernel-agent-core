@@ -88,22 +88,20 @@ def speedup_vs_reference(
 
 
 # ── git is the SINGLE source of truth for a "committed win" ───────────────────
-# A managed native Kernel is a source tree whose adapter.py entry point is required and editable. Win/stall
-# facts therefore compare canonical source snapshots. SOL retains its separate
-# raw kernel.py execution contract through the same API.
+# Every managed Kernel is a source tree whose kernel.py entry point is required and editable.
+# Win/stall facts therefore compare canonical source snapshots.
 
 
 def git_kernel_blob(workspace: Path) -> str:
-    """Committed evaluator-entry blob for native trees or SOL kernels."""
+    """Committed evaluator-entry blob for a managed Kernel source tree."""
     from aka.light.workspace.sources import entrypoint, policy_at
     return git_path_blob(workspace, "HEAD", entrypoint(policy_at(workspace, committed=True)))
 
 
 def v0_baseline_commit(workspace: Path) -> str:
     """Commit that introduced this Campaign's evaluator entry point."""
-    from aka.light.workspace.sources import ADAPTER, policy_at
-    policy = policy_at(workspace, committed=True)
-    path = ADAPTER if policy is not None else "kernel.py"
+    from aka.light.workspace.sources import ENTRYPOINT
+    path = ENTRYPOINT
     result = subprocess.run(
         ["git", "rev-list", "--reverse", "HEAD", "--", path],
         cwd=str(workspace), capture_output=True, text=True,
@@ -115,7 +113,7 @@ def v0_baseline_commit(workspace: Path) -> str:
 
 
 def resolve_framework_baseline_commit(workspace: Path) -> tuple[str, int]:
-    """Verify a framework pin against its recorded raw or tree entry point."""
+    """Verify a framework pin against its recorded source-tree entry point."""
     marker = read_framework_baseline(workspace)
     if marker is None:
         return "", 0

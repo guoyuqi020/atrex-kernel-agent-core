@@ -964,7 +964,7 @@ class Campaign:
         raise ValueError("A canonical Atrex-Bench or SOL evaluator is required")
 
     def _install_native_evaluator(self) -> None:
-        """Seed the immutable adapter used only by native Atrex-Bench shape campaigns."""
+        """Seed the immutable harness used only by native Atrex-Bench shape campaigns."""
         if not self.atrex_bench_root:
             return
         if not ATREX_BENCH_HARNESS.is_file():
@@ -1028,13 +1028,12 @@ class Campaign:
             check=True,
         )
         # Normalize before any commit, Agent session or V0 measurement. The
-        # shell initializer's kernel.py is only a transient copy boundary.
+        # shell initializer's kernel.py remains the canonical editable entry.
         from aka.light.workspace.sources import default_tree, install, pack
         raw = (self.workspace / "kernel.py").read_bytes()
         source_policy, source_files = default_tree({"kernel.py": raw})
         self._selected_initial_source = pack(source_files, source_policy)
         install(self.workspace, self._selected_initial_source)
-        (self.workspace / "kernel.py").unlink()
         # Native tasks always expose a generalized public contract. Exact shapes and
         # release metadata remain in the source operator directory and are injected only at the
         # sandbox boundary. A missing public contract is authored before the baseline session.
@@ -2137,7 +2136,7 @@ class Campaign:
                 stage_name="Framework baseline",
                 initial_purpose="framework_baseline",
                 completion_instruction=(
-                    "Finish the preserved V1 implementation inside adapter.py and, if useful, "
+                    "Finish the preserved V1 implementation inside kernel.py and, if useful, "
                     "implementation/. Leave the complete candidate ready for the Supervisor's framework-baseline "
                     "gates; do not create Git commits or submit an episode-report."
                 ),
@@ -2357,9 +2356,9 @@ class Campaign:
         from aka.light.workspace.sources import policy_at
         source_policy = policy_at(self.workspace)
         source_instructions = (
-            "Keep the required evaluator entry point at editable root `adapter.py`. "
+            "Keep the required evaluator entry point at editable root `kernel.py`. "
             "You may implement the whole Kernel there or add, modify, and remove files "
-            "inside `implementation/` and import them from `adapter.py`."
+            "inside `implementation/` and import them from `kernel.py`."
             if source_policy is not None
             else "This SOL Framework Baseline edits the candidate `kernel.py`."
         )

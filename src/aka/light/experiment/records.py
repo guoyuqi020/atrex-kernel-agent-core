@@ -195,16 +195,16 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
         # Let the HTTP boundary attach the effective CLI contract and redaction.
         raise AgentRequestError(str(error)) from error
     operation = request["operation"]
-    from aka.light.workspace.sources import ADAPTER, from_inputs
+    from aka.light.workspace.sources import ENTRYPOINT, from_inputs
     kernels = (
         {"candidate": store.kernel(from_inputs(inputs))}
-        if "kernel.py" in inputs or ADAPTER in inputs else {}
+        if ENTRYPOINT in inputs else {}
     )
     baseline_path = request["options"]["baseline_path"]
     if baseline_path:
         kernels["baseline"] = store.kernel(
             from_inputs(inputs, prefix=baseline_path + "/")
-            if baseline_path + "/" + ADAPTER in inputs else inputs[baseline_path])
+            if baseline_path + "/" + ENTRYPOINT in inputs else inputs[baseline_path])
     if reuse_correctness and reuse_completed and "candidate" in kernels:
         response = reuse_correctness_result(store, request, kernels["candidate"]["kernel_id"])
         if response is not None:

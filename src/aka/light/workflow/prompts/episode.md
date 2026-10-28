@@ -1,9 +1,9 @@
 # Kernel optimization episode {{EPISODE}}
 
 Optimize the candidate described in `WORKSPACE.md` through evidence-backed engineering.
-Keep the required evaluator entry point at `adapter.py`. It is editable: you may keep the complete
+Keep the required evaluator entry point at `kernel.py`. It is editable: you may keep the complete
 implementation there, or add, modify, and remove files below `implementation/` and import them from
-`adapter.py`. Continue investigating,
+`kernel.py`. Keep `implementation/__init__.py` present. Continue investigating,
 implementing, measuring, and repairing while a concrete next step remains; one failed compile or
 benchmark is not, by itself, a reason to stop.
 

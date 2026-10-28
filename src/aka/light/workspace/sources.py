@@ -1,14 +1,13 @@
 """Whole-Kernel identities and task-owned source boundaries.
 
 Every newly initialized native optimization Kernel becomes a canonical UTF-8
-source tree before its first Episode. ``adapter.py`` is the evaluator entry
+source tree before its first Episode. ``kernel.py`` is the evaluator entry
 point and is ordinary editable Kernel source. An Agent may keep the whole
 implementation there or split helpers and implementations below
-``implementation/``. Raw ``kernel.py`` is reserved for the separate SOL
-execution contract; native Atrex-Bench Campaigns always use the tree layout.
+``implementation/``. Single-file and multi-file Kernels use this same layout.
 
 The layout itself is the contract. There is no per-workspace manifest: the
-controller recognizes required editable ``adapter.py`` plus optional sources
+controller recognizes required editable ``kernel.py`` plus optional sources
 below ``implementation/``.
 """
 from __future__ import annotations
@@ -25,9 +24,9 @@ import time
 from aka.light.agent.session_tail import read_regular_bytes
 from aka.light.workspace.files import publish
 
-ADAPTER = "adapter.py"
+ENTRYPOINT = "kernel.py"
 IMPLEMENTATION = "implementation"
-LEGACY_ENTRY = "kernel.py"
+TREE_MARKER = f"{IMPLEMENTATION}/__init__.py"
 MAGIC = b"ATREX-SOURCE-TREE-v1\n"
 MAX_FILE = 16 * 1024 * 1024
 MAX_TOTAL = 64 * 1024 * 1024
@@ -72,7 +71,7 @@ def ignored(name):
 
 def source_name(name):
     return not ignored(name) and (
-        name == ADAPTER or name.startswith(IMPLEMENTATION + "/")
+        name == ENTRYPOINT or name.startswith(IMPLEMENTATION + "/")
     )
 
 
@@ -83,48 +82,50 @@ def source_directory(name):
 
 
 def editable(policy, name):
-    return name == ADAPTER or (
+    return name == ENTRYPOINT or (
         name.startswith(IMPLEMENTATION + "/") and source_name(name)
     )
 
 
 def _implicit_policy(files, *, revision=None):
     """Build the canonical in-memory contract from the fixed layout."""
-    adapter = files.get(ADAPTER)
-    if not isinstance(adapter, bytes):
-        raise ValueError(f"Kernel source tree requires fixed root {ADAPTER}")
+    entry = files.get(ENTRYPOINT)
+    if not isinstance(entry, bytes):
+        raise ValueError(f"Kernel source tree requires fixed root {ENTRYPOINT}")
+    if not isinstance(files.get(TREE_MARKER), bytes):
+        raise ValueError(f"Kernel source tree requires package marker {TREE_MARKER}")
     for name, data in sorted(files.items()):
         relative(name)
         if not source_name(name) or not isinstance(data, bytes):
-            raise ValueError(f"Kernel source must live in {ADAPTER} or {IMPLEMENTATION}/: {name}")
+            raise ValueError(f"Kernel source must live in {ENTRYPOINT} or {IMPLEMENTATION}/: {name}")
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         # These fields remain inside the opaque Kernel artifact format, but are
         # fixed by the layout rather than published as workspace configuration.
         "package_root": ".",
-        "editable_paths": [ADAPTER, IMPLEMENTATION],
+        "editable_paths": [ENTRYPOINT, IMPLEMENTATION],
         "runtime_requirements": [],
     }
 
 
 def default_tree(files):
     """Turn an ordinary one-file Kernel into the canonical editable source tree."""
-    if not isinstance(files, dict) or set(files) != {LEGACY_ENTRY}:
+    if not isinstance(files, dict) or set(files) != {ENTRYPOINT}:
         raise ValueError("Implicit source-tree initialization requires exactly kernel.py")
-    files = {ADAPTER: files[LEGACY_ENTRY]}
+    files = {ENTRYPOINT: files[ENTRYPOINT], TREE_MARKER: b""}
     policy = _implicit_policy(files)
     validate_files(files, policy)
     return policy, files
 
 
 def entrypoint(policy):
-    """Return the evaluator-facing module for native trees or SOL kernels."""
-    return ADAPTER if policy is not None else LEGACY_ENTRY
+    """Return the evaluator-facing module for every Kernel source tree."""
+    return ENTRYPOINT
 
 
 def implementation_entry(policy):
     """Return the initial single-file implementation edited by framework bring-up."""
-    return ADAPTER if policy is not None else LEGACY_ENTRY
+    return ENTRYPOINT
 
 
 def requires_archive(policy, files):
@@ -136,53 +137,64 @@ def validate_policy(policy):
     common = {
         "schema_version", "package_root", "editable_paths", "runtime_requirements",
     }
-    if (not isinstance(policy, dict) or policy.get("schema_version") != 5
+    if (not isinstance(policy, dict) or policy.get("schema_version") != 6
             or set(policy) != common):
         raise ValueError("Invalid source contract")
     if policy["package_root"] != ".":
         raise ValueError("Kernel package_root is fixed at '.'")
-    if policy["editable_paths"] != [ADAPTER, IMPLEMENTATION]:
-        raise ValueError("Kernel editable paths are fixed at adapter.py and implementation/")
+    if policy["editable_paths"] != [ENTRYPOINT, IMPLEMENTATION]:
+        raise ValueError("Kernel editable paths are fixed at kernel.py and implementation/")
     requirements = policy["runtime_requirements"]
     if requirements != []:
         raise ValueError("Kernel runtime requirements belong to the task, not the source tree")
     return policy
 
 
-def _committed_adapter(workspace: Path, revision="HEAD"):
-    """Return adapter.py at revision when this is a managed native source tree."""
+def _committed_file(workspace: Path, path: str, revision="HEAD"):
+    """Return one committed file, or None when revision/path is absent."""
     if not workspace.is_dir():
         return None
     result = subprocess.run(
-        ["git", "show", f"{revision}:{ADAPTER}"], cwd=workspace, capture_output=True
+        ["git", "show", f"{revision}:{path}"], cwd=workspace, capture_output=True
     )
     return result.stdout if result.returncode == 0 else None
 
 
 def policy_at(workspace: Path, *, committed=False):
     workspace = Path(workspace)
+    committed_marker = _committed_file(workspace, TREE_MARKER)
     if committed:
-        adapter = _committed_adapter(workspace)
-        if adapter is None:
+        if committed_marker is None:
             return None
-        return validate_policy(_implicit_policy({ADAPTER: adapter}))
-    if not (workspace / ADAPTER).is_file():
+        entry = _committed_file(workspace, ENTRYPOINT)
+        return validate_policy(_implicit_policy({ENTRYPOINT: entry, TREE_MARKER: committed_marker}))
+    marker = workspace / TREE_MARKER
+    if not marker.is_file() and committed_marker is None:
+        return None
+    if not (workspace / ENTRYPOINT).is_file():
         # A managed Agent may accidentally remove the required entry point.
         # Preserve tree-mode detection so validation reports that error instead
         # of silently reinterpreting the workspace as a raw SOL Kernel.
-        adapter = _committed_adapter(workspace)
-        if adapter is None:
+        entry = _committed_file(workspace, ENTRYPOINT)
+        if entry is None:
             return None
     else:
-        adapter = read_regular_bytes(workspace / ADAPTER, limit=MAX_FILE + 1)
-    return validate_policy(_implicit_policy({ADAPTER: adapter}))
+        entry = read_regular_bytes(workspace / ENTRYPOINT, limit=MAX_FILE + 1)
+    marker_bytes = (
+        read_regular_bytes(marker, limit=MAX_FILE + 1)
+        if marker.is_file()
+        else committed_marker
+    )
+    return validate_policy(_implicit_policy({ENTRYPOINT: entry, TREE_MARKER: marker_bytes}))
 
 
 def validate_files(files, policy):
     validate_policy(policy)
-    adapter = entrypoint(policy)
-    if adapter not in files:
-        raise ValueError(f"Kernel source tree requires {adapter} as its fixed entry point")
+    entry = entrypoint(policy)
+    if entry not in files:
+        raise ValueError(f"Kernel source tree requires {entry} as its fixed entry point")
+    if TREE_MARKER not in files:
+        raise ValueError(f"Kernel source tree requires {TREE_MARKER}")
     if len(files) > 4096 or sum(len(data) for data in files.values()) > MAX_TOTAL:
         raise ValueError("Source tree exceeds 4096 files / 64 MiB")
     for name, data in files.items():
@@ -210,9 +222,8 @@ def pack(files, policy):
 
 def from_inputs(inputs, *, prefix=""):
     """Use the already frozen measurement bytes, never reread a mutable draft."""
-    adapter = inputs.get(prefix + ADAPTER)
-    if adapter is None:
-        return inputs[prefix + "kernel.py"]
+    if prefix + TREE_MARKER not in inputs:
+        return inputs[prefix + ENTRYPOINT]
     files = {name[len(prefix):]: data for name, data in inputs.items()
              if name.startswith(prefix) and source_name(name[len(prefix):])}
     return pack(files, _implicit_policy(files))
@@ -267,9 +278,8 @@ def snapshot(workspace, *, policy=_DISCOVER):
 
 def from_git(workspace, revision):
     from aka.light.workspace.git import git_blob
-    result = subprocess.run(["git", "show", f"{revision}:{ADAPTER}"], cwd=workspace, capture_output=True)
-    if result.returncode:
-        return git_blob(workspace, revision, "kernel.py")
+    if _committed_file(workspace, TREE_MARKER, revision) is None:
+        return git_blob(workspace, revision, ENTRYPOINT)
     listing = subprocess.run(["git", "ls-tree", "-r", "-z", revision], cwd=workspace, capture_output=True, check=True).stdout
     files = {}
     for entry in listing.split(b"\0"):
@@ -306,11 +316,12 @@ def install(workspace, source, *, replace=True):
 
 def instructions(policy):
     if policy is None:
-        return ("\n## Kernel source\nThis SOL task uses its external kernel.py contract.\n")
-    return ("\n## Kernel source tree\nAll source files form one Kernel. adapter.py is the required "
+        return ("\n## Kernel source\nThis archived task uses the legacy raw kernel.py contract.\n")
+    return ("\n## Kernel source tree\nAll source files form one Kernel. kernel.py is the required "
             "editable evaluator entry point. Keep a single-file implementation there, or add, edit and "
-            "delete helper/source files inside implementation/ and import them from adapter.py. "
-            "Files outside adapter.py and implementation/ are not Kernel source. "
+            "delete helper/source files inside implementation/ and import them from kernel.py. "
+            "Keep implementation/__init__.py present so the package and tree identity remain valid. "
+            "Files outside kernel.py and implementation/ are not Kernel source. "
             "Keep notes, reusable tools and temporary builds in tools/, skills/ and scratch/; "
             "they are not Kernel source. Evaluate, Profile, Check, Disassemble, sealed reports "
             "and broadcasts bind the complete source tree. kernel-read writes a directory; pass "
@@ -495,8 +506,6 @@ def import_tree(manifest_path, repository=None, *, directory=None):
     revision = spec.get("revision") if repository is not None else None
     imported = (_git_sources(Path(repository).expanduser().resolve(), revision, paths)
                 if repository is not None else _directory_sources(directory, paths))
-    if ADAPTER in imported:
-        raise ValueError("Imported source collides with the separately supplied adapter")
     if spec.get("package_root", ".") != ".":
         raise ValueError("Native Eval source trees require package_root='.'")
     if manifest.get("runtime_requirements"):
@@ -507,7 +516,8 @@ def import_tree(manifest_path, repository=None, *, directory=None):
         name if name.startswith(IMPLEMENTATION + "/") else f"{IMPLEMENTATION}/{name}": data
         for name, data in imported.items()
     }
-    files[ADAPTER] = read_regular_bytes(
+    files.setdefault(TREE_MARKER, b"")
+    files[ENTRYPOINT] = read_regular_bytes(
         manifest_path.parent / relative(manifest["adapter"]), limit=MAX_FILE + 1
     )
     return pack(files, _implicit_policy(files, revision=revision))
