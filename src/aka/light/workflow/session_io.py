@@ -37,6 +37,11 @@ from aka.light.execution.recovery import (environment_state_file, raise_if_envir
 from aka.light.evaluation.hardware import hardware_vendor
 from aka.light.agent.recovery_processes import spawn_owned_session
 from aka.light.execution.config import queue_wait_grace
+from aka.light.evaluation.policy import SHAPE_BATCH_SIZE
+from aka.light.evaluation.shapes import (
+    effective_shape_batch_size,
+    shape_request_timeout,
+)
 from aka.light.workspace.state import speedup_vs_reference
 
 
@@ -262,6 +267,47 @@ def sandbox_boundary_directive(hardware: str, profile: str = "", url: str = "", 
                    ENDPOINT=_sandbox_endpoint(profile, url, ssh))
 
 
+def _evaluation_request_shape_count(
+    workspace: Path,
+    private_reference_dir: Path | None,
+    command: list[str],
+    per_shape_timeout: int,
+    grace: int,
+    environment: dict[str, str],
+) -> int:
+    """Return the largest concrete Shape shard the child Eval will submit."""
+    selected = []
+    for index, value in enumerate(command):
+        if value == "--shape-id" and index + 1 < len(command):
+            selected.append(command[index + 1])
+        elif value.startswith("--shape-id="):
+            selected.append(value.split("=", 1)[1])
+    selected = list(dict.fromkeys(item for item in selected if item))
+
+    requested_batch_size = int(
+        environment.get("ATREX_EVAL_SHAPE_BATCH_SIZE", str(SHAPE_BATCH_SIZE))
+    )
+    batch_size = effective_shape_batch_size(
+        per_shape_timeout, requested_batch_size, grace
+    )
+    if selected:
+        return min(len(selected), batch_size)
+
+    shapes_path = (
+        private_reference_dir / "shapes.json"
+        if private_reference_dir is not None
+        else workspace / "shapes.json"
+    )
+    try:
+        shapes = json.loads(shapes_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        # The child owns custom/private request construction. Use its legal
+        # maximum shard size when the parent cannot inspect the Shape contract.
+        return batch_size
+    shape_count = len(shapes) if isinstance(shapes, dict) else 0
+    return min(shape_count, batch_size) if shape_count else batch_size
+
+
 def _sandbox_command(
     workspace: Path,
     hardware: str,
@@ -337,7 +383,18 @@ def _sandbox_command(
     else:
         uses_ssh = bool(ssh or (not profile and not url and environment.get("ATREX_SANDBOX_SSH")))
         grace = 0 if uses_ssh else queue_wait_grace(environment)
-        effective_timeout = timeout + grace + 240
+        command_timeout = timeout
+        if not uses_ssh and gateway_kind == "run":
+            shape_count = _evaluation_request_shape_count(
+                workspace,
+                private_reference_dir,
+                command,
+                timeout,
+                grace,
+                environment,
+            )
+            command_timeout = shape_request_timeout(timeout, shape_count)
+        effective_timeout = command_timeout + grace + 240
     raise_if_environment_blocked()
     process = spawn_owned_session(
         cmd,

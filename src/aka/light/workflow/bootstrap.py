@@ -1210,6 +1210,7 @@ class Campaign:
             health_command=self.sandbox_health_command,
             gateway_kind="run",
             private_reference_dir=self.private_reference_dir,
+            terminal_validation=True,
         )
         self._print_v0_evaluator_output(test)
         if test.returncode == ENVIRONMENT_TEMPFAIL:

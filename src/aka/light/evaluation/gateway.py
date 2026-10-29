@@ -60,6 +60,7 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
+import copy
 import hashlib
 import hmac
 import io
@@ -157,6 +158,8 @@ from aka.light.execution.gateway_jobs import (  # noqa: E402
 from aka.light.evaluation.shapes import (
     request_shape_ids as _request_shape_ids,
     batch_shape_ids as batch_shape_ids,
+    effective_shape_batch_size,
+    shape_request_timeout,
     shape_batch_request as _shape_batch_request,
 )
 
@@ -1441,7 +1444,10 @@ def build_typed_request(
     if kind == "run":
         request["mode"] = policy["mode"]
         request["lock_clocks"] = True
-        request["runner_overrides"] = runner_overrides()
+        requested_version = _option_value(command, "--version")
+        request["runner_overrides"] = runner_overrides(
+            performance_timeout_s=timeout if requested_version == "v0" else None
+        )
         if requested_shape_ids:
             request["runner_overrides"]["shape_ids"] = requested_shape_ids
         if dependency_specs:
@@ -1936,7 +1942,8 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
             os.environ.get("ATREX_SANDBOX_TIMEOUT", str(DEFAULT_COMMAND_TIMEOUT))
         ),
         help=(
-            "Positive remote command execution timeout in seconds "
+            "Positive per-Shape remote execution timeout in seconds; each Eval "
+            "request gets this budget times its selected Shape count "
             f"(default: {DEFAULT_COMMAND_TIMEOUT}; queue wait is budgeted separately)."
         ),
     )
@@ -3858,14 +3865,21 @@ def _run_typed_gateway(
         return None
 
     expected_shape_ids = _request_shape_ids(request)
-    shape_batches = (
-        batch_shape_ids(
-            expected_shape_ids,
-            getattr(args, "shape_batch_size", DEFAULT_EVAL_SHAPE_BATCH_SIZE),
+    if kind == "run":
+        requested_batch_size = getattr(
+            args, "shape_batch_size", DEFAULT_EVAL_SHAPE_BATCH_SIZE
         )
-        if kind == "run"
-        else [expected_shape_ids]
-    )
+        actual_batch_size = effective_shape_batch_size(
+            args.timeout, requested_batch_size, queue_wait_grace
+        )
+        shape_batches = batch_shape_ids(expected_shape_ids, actual_batch_size)
+        batch_timeouts = [
+            shape_request_timeout(args.timeout, len(shape_ids))
+            for shape_ids in shape_batches
+        ]
+    else:
+        shape_batches = [expected_shape_ids]
+        batch_timeouts = [args.timeout]
     batched = len(shape_batches) > 1
 
     if args.dry_run:
@@ -3886,6 +3900,7 @@ def _run_typed_gateway(
                         else len(request["reference"]["shapes"])
                     ),
                     "shape_batch_count": len(shape_batches),
+                    "shape_batch_timeouts_s": batch_timeouts,
                     "mode": request.get("mode"),
                     "options": request["options"],
                     "sync": sync_paths,
@@ -3926,9 +3941,18 @@ def _run_typed_gateway(
 
     try:
         def run_batch(shape_ids: list[str]) -> subprocess.CompletedProcess[str]:
-            batch_request = (
-                _shape_batch_request(request, shape_ids) if batched else request
+            batch_timeout = (
+                shape_request_timeout(args.timeout, len(shape_ids))
+                if kind == "run"
+                else args.timeout
             )
+            batch_request = (
+                _shape_batch_request(request, shape_ids, timeout_s=batch_timeout)
+                if kind == "run"
+                else request
+            )
+            batch_args = copy.copy(args)
+            batch_args.timeout = batch_timeout
             batch_identity = (
                 {
                     "transport": "agate_native_eval",
@@ -3949,14 +3973,39 @@ def _run_typed_gateway(
                     saved["stderr"],
                 )
             from aka.light.evaluation.source_transport import run as run_tree
-            import sys
-            process = run_tree(
-                sys.modules[__name__],
-                args,
-                batch_request,
-                kind,
-                queue_wait_grace,
+            from aka.light.evaluation.evaluation_failures import (
+                embedded_candidate_wall_clock_timeouts,
             )
+            import sys
+            process = None
+            for attempt in range(2):
+                retry_context = (
+                    {"eval_wall_clock_retry": attempt} if attempt else None
+                )
+                kwargs = (
+                    {"identity_extra": retry_context}
+                    if retry_context is not None
+                    else {}
+                )
+                process = run_tree(
+                    sys.modules[__name__],
+                    batch_args,
+                    batch_request,
+                    kind,
+                    queue_wait_grace,
+                    **kwargs,
+                )
+                job = parse_job_response(process.stdout or "")
+                timeouts = embedded_candidate_wall_clock_timeouts(job)
+                if not timeouts or attempt:
+                    break
+                print(
+                    "[sandbox] Eval candidate exceeded its wall-clock limit; "
+                    "retrying the complete Shape batch once.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            assert process is not None
             if eval_store is not None and batch_identity is not None:
                 job = parse_job_response(process.stdout or "")
                 if job is not None:

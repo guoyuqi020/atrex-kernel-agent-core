@@ -65,6 +65,7 @@ The Runtime supplies the evaluator, full workload and target; private inputs sta
 
 Supervisor measurement repetitions: **{measurement_repetitions}** per request (one result if 1;
 per-Shape median if 3). The enclosing allocation is derived from the per-run limits above.
+Each native Eval shard scales that per-Shape allocation by its actual Shape count.
 These are Runtime-owned settings, already applied to this request; do not loop the command
 or set environment variables to reproduce them.
 

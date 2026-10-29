@@ -15,11 +15,19 @@ from aka.light.acceptance.provider import candidate_acceptance_argv
 from aka.light.acceptance.recorded_verifier import RecordedABBAValidator
 from aka.light.acceptance.source_policy import optimization_mode_directive
 from aka.light.evaluation.gateway import (
+    _run_typed_gateway,
     build_parser,
     build_typed_request,
     evaluation_policy,
 )
+from aka.light.evaluation.evaluation_failures import (
+    embedded_candidate_wall_clock_timeouts,
+)
 from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES
+from aka.light.evaluation.shapes import (
+    effective_shape_batch_size,
+    shape_request_timeout,
+)
 from aka.light.execution.gateway_jobs import (
     DEFAULT_MAX_INFRA_RETRIES,
     TERMINAL_VALIDATION_ENV,
@@ -36,6 +44,106 @@ from aka.light.workflow.provider import WorkflowOptions
 
 
 class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
+    def test_eval_timeout_scales_with_actual_shape_count(self):
+        self.assertEqual(shape_request_timeout(1800, 5), 9000)
+        self.assertEqual(shape_request_timeout(1800, 3), 5400)
+        self.assertEqual(effective_shape_batch_size(1800, 5, 120), 5)
+        self.assertEqual(effective_shape_batch_size(3000, 5, 120), 3)
+
+    def test_eval_timeout_rejects_one_shape_above_gateway_limit(self):
+        with self.assertRaisesRegex(ValueError, "One Shape exceeds"):
+            effective_shape_batch_size(10681, 5, 120)
+
+    def test_eval_retries_candidate_wall_clock_timeout_once(self):
+        payload = {
+            "name": "timeout-retry",
+            "spec": {"target_hardware": ["L20D"]},
+            "candidate": "class Model: pass\n",
+            "reference": {
+                "operator": "example",
+                "reference_py": "class Model: pass\n",
+                "input_py": "def generate_input(*args, **kwargs): return ()\n",
+                "shapes": {"0": {"x": 1}},
+            },
+            "options": {"num_correctness_cases": 1, "bench_iters": 1, "timeout_s": 600},
+            "runner_overrides": {"shape_ids": ["0"]},
+            "mode": "full",
+            "lock_clocks": True,
+            "env_vars": {},
+        }
+        timeout_job = subprocess.CompletedProcess(
+            ["agate-sdk", "get"],
+            1,
+            json.dumps({
+                "job_id": "ev_timeout",
+                "status": "succeeded",
+                "result": {
+                    "performance": {
+                        "shapes": {
+                            "0": {
+                                "error": "candidate exceeded 300.0s wall-clock timeout"
+                            }
+                        }
+                    }
+                },
+            }),
+            "",
+        )
+        final = subprocess.CompletedProcess(
+            ["agate-sdk", "get"],
+            1,
+            json.dumps({
+                "job_id": "ev_timeout_retry",
+                "status": "succeeded",
+                "result": {
+                    "performance": {
+                        "shapes": {
+                            "0": {
+                                "error": "candidate exceeded 300.0s wall-clock timeout"
+                            }
+                        }
+                    }
+                },
+            }),
+            "",
+        )
+        args = SimpleNamespace(
+            hardware="L20D", timeout=600, env=[], profiler="auto",
+            profile_level="basic", profile_counter=[], kernel_regex=None,
+            top_kernels=None, kernel_name=None, profile_source=None,
+            launch_skip=None, launch_count=None, profile_shape_id=None,
+            requirement=[], deps_mode="auto", evaluation_input_path=None,
+            evaluation_shapes_path=None, evaluation_mode=None, version=None,
+            multi_seed=None, shape_id=[], timed_runs=None, shape_batch_size=5,
+            dry_run=False, url=None, gateway_profile="prod",
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("aka.light.evaluation.gateway._is_generalized_workspace", return_value=False),
+            patch("aka.light.workspace.sources.policy_at", return_value=None),
+            patch("aka.light.evaluation.gateway.build_typed_request", return_value=payload),
+            patch(
+                "aka.light.evaluation.source_transport.run",
+                side_effect=[timeout_job, final],
+            ) as sdk_run,
+        ):
+            result = _run_typed_gateway(
+                args, Path(directory), ["python3", "test_kernel.py"],
+                "run", [], 120,
+            )
+
+        self.assertEqual(result, 1)
+        self.assertEqual(sdk_run.call_count, 2)
+        self.assertNotIn("identity_extra", sdk_run.call_args_list[0].kwargs)
+        self.assertEqual(
+            sdk_run.call_args_list[1].kwargs["identity_extra"],
+            {"eval_wall_clock_retry": 1},
+        )
+        self.assertEqual(
+            embedded_candidate_wall_clock_timeouts(json.loads(final.stdout)),
+            ["candidate exceeded 300.0s wall-clock timeout"],
+        )
+
     @staticmethod
     def _deadline_job(*, max_deadline_retries, failures):
         submitted = []
@@ -398,6 +506,38 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertNotIn("atol", request["options"])
         self.assertNotIn("rtol", request["options"])
         self.assertNotIn("correctness_max_rel_l2", request["options"])
+
+    def test_v0_uses_complete_per_shape_performance_timeout(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            (workspace / "kernel.py").write_text("class Model: pass\n")
+            (workspace / "reference.py").write_text("class Model: pass\n")
+            (workspace / "input.py").write_text(
+                "def generate_input(*args, **kwargs): return ()\n"
+            )
+            (workspace / "shapes.json").write_text(
+                json.dumps({"0": {"init_kwargs": {}, "input_kwargs": {}}})
+            )
+
+            v0 = build_typed_request(
+                workspace,
+                "L20D",
+                1800,
+                [],
+                ["python3", "test_kernel.py", "--version", "v0"],
+                "run",
+            )
+            candidate = build_typed_request(
+                workspace,
+                "L20D",
+                1800,
+                [],
+                ["python3", "test_kernel.py"],
+                "run",
+            )
+
+        self.assertEqual(v0["runner_overrides"]["perf_timeout_s"], 1800)
+        self.assertEqual(candidate["runner_overrides"]["perf_timeout_s"], 300)
 
     def test_native_harness_has_no_light_owned_tolerance_switches(self):
         args = native_harness_parser().parse_args([])

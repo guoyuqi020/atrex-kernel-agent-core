@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from aka.contracts.evaluation import MAX_TYPED_GATEWAY_JOB_TIMEOUT
+
 
 def _sort_key(shape_id: str) -> tuple[int, object]:
     return (0, int(shape_id)) if shape_id.isdigit() else (1, shape_id)
@@ -49,8 +51,51 @@ def batch_shape_ids(shape_ids: list[str], batch_size: int) -> list[list[str]]:
     ]
 
 
+def shape_request_timeout(per_shape_timeout: int, shape_count: int) -> int:
+    """Return the execution allocation for one concrete Shape request.
+
+    ``--timeout`` is a per-Shape budget. Atrex-Bench evaluates the selected
+    Shapes sequentially inside one Eval job, so a shard containing N Shapes
+    needs N times that budget.
+    """
+    if type(per_shape_timeout) is not int or per_shape_timeout <= 0:
+        raise ValueError("Per-Shape timeout must be a positive integer")
+    if type(shape_count) is not int or shape_count <= 0:
+        raise ValueError("Shape count must be a positive integer")
+    return per_shape_timeout * shape_count
+
+
+def effective_shape_batch_size(
+    per_shape_timeout: int,
+    requested_batch_size: int,
+    queue_wait_grace: int,
+) -> int:
+    """Fit Shape shards under Agate's typed-job deadline.
+
+    The configured batch size is an upper bound. If its Shape-scaled deadline
+    would exceed the service limit, make smaller requests instead of silently
+    shortening their execution budget.
+    """
+    if type(requested_batch_size) is not int or requested_batch_size <= 0:
+        raise ValueError("Shape batch size must be a positive integer")
+    if type(queue_wait_grace) is not int or queue_wait_grace < 0:
+        raise ValueError("Queue wait grace must be a non-negative integer")
+    per_shape = shape_request_timeout(per_shape_timeout, 1)
+    available = MAX_TYPED_GATEWAY_JOB_TIMEOUT - queue_wait_grace
+    if per_shape > available:
+        raise ValueError(
+            "One Shape exceeds Agate's 10800-second typed-job limit: "
+            f"per-Shape timeout {per_shape_timeout}s + queue grace "
+            f"{queue_wait_grace}s. Reduce the per-Shape timeout or queue grace."
+        )
+    return min(requested_batch_size, available // per_shape)
+
+
 def shape_batch_request(
-    request: dict[str, Any], shape_ids: list[str]
+    request: dict[str, Any],
+    shape_ids: list[str],
+    *,
+    timeout_s: int | None = None,
 ) -> dict[str, Any]:
     """Select one shard without copying or mutating the reference bundle."""
     available = set(request_shape_ids(request))
@@ -68,4 +113,10 @@ def shape_batch_request(
     overrides = dict(request.get("runner_overrides") or {})
     overrides["shape_ids"] = list(shape_ids)
     batched["runner_overrides"] = overrides
+    if timeout_s is not None:
+        if type(timeout_s) is not int or timeout_s <= 0:
+            raise ValueError("Shape batch timeout must be a positive integer")
+        options = dict(request.get("options") or {})
+        options["timeout_s"] = timeout_s
+        batched["options"] = options
     return batched

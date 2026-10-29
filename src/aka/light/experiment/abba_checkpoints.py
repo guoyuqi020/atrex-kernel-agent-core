@@ -21,7 +21,10 @@ from typing import Any
 
 from aka.legacy.task.persistence import durable_write_json, ensure_private_directory
 from aka.light.experiment.store import private_write, read_json
-from aka.light.evaluation.evaluation_failures import embedded_device_failure
+from aka.light.evaluation.evaluation_failures import (
+    embedded_candidate_wall_clock_timeouts,
+    embedded_device_failure,
+)
 
 MAX_CHECKPOINT_BYTES = 32 * 1024 * 1024
 
@@ -315,6 +318,8 @@ class EvalBatchStore:
             raise ValueError("Eval batch payload disagrees with captured execution output")
         from aka.light.execution.gateway_jobs import cacheable_job
 
+        if embedded_candidate_wall_clock_timeouts(job):
+            raise ValueError("Eval batch has a retryable candidate wall-clock timeout")
         if not cacheable_job(job, {"kind": "eval", "payload": request}):
             raise ValueError("Eval batch has no complete terminal measurement")
 

@@ -1,6 +1,7 @@
 """Native Agate Eval ABBA: exact A/B/B/A evidence, no Dev driver fallback."""
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -15,7 +16,9 @@ from aka.legacy.evaluation.abba import verification_schedule
 from aka.light.evaluation.result_conversion import compile_failures
 from aka.light.evaluation.shapes import (
     batch_shape_ids,
+    effective_shape_batch_size,
     request_shape_ids,
+    shape_request_timeout,
     shape_batch_request,
 )
 from aka.light.evaluation.evaluation_feedback import evaluation_feedback
@@ -402,7 +405,10 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
             record_store.retain_terminal_job(identity, retained)
 
     def run_batch(ids):
-        batch = shape_batch_request(request, ids)
+        batch_timeout = shape_request_timeout(args.timeout, len(ids))
+        batch = shape_batch_request(request, ids, timeout_s=batch_timeout)
+        batch_args = copy.copy(args)
+        batch_args.timeout = batch_timeout
         identity = {"transport": "agate_native_eval_abba", "request": payload_identity(batch),
                     "schedule": schedule, "shape_ids": ids}
         if store and (saved := store.load(identity)) is not None:
@@ -416,7 +422,7 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
             from .source_transport import run as run_tree
             return run_tree(
                 gateway,
-                args,
+                batch_args,
                 batch,
                 "run",
                 queue_wait_grace,
@@ -470,7 +476,10 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
                 retain_in_record(identity, saved)
             return payload, None
 
-    batches = batch_shape_ids(shapes, args.shape_batch_size)
+    batch_size = effective_shape_batch_size(
+        args.timeout, args.shape_batch_size, queue_wait_grace
+    )
+    batches = batch_shape_ids(shapes, batch_size)
     with ThreadPoolExecutor(max_workers=min(BATCH_WORKERS, len(batches))) as pool:
         results = list(pool.map(run_batch, batches))
     failures = [process for _, process in results if process is not None]
