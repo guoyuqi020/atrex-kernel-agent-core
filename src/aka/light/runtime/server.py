@@ -58,6 +58,7 @@ from aka.light.runtime.errors import (
     ResultPublicationError, SessionRevokedError,
 )
 from aka.light.runtime.paths import supervisor_campaign_root
+from aka.light.execution.retry import InfrastructureUnavailable
 from aka.light.wiki.config import WikiConfig
 from aka.light.wiki.service import WikiService
 
@@ -423,6 +424,33 @@ class _Handler(BaseHTTPRequestHandler):
             self.reply(400, error.response)
         except RuntimeStateError as error:
             self.reply(503, error.response)
+        except InfrastructureUnavailable as error:
+            # This is a confirmed incomplete infrastructure operation, not an
+            # unknown handler outcome.  In particular, candidate acceptance may
+            # already have a resumable private Gateway Record.  Return a stable
+            # infra classification so the Agent preserves its source/report and
+            # retries the identical request after backoff instead of seeing a
+            # generic outcome_unknown connection failure.
+            self.reply(
+                503,
+                failure(
+                    str(error),
+                    repairable=False,
+                    code="infrastructure_unavailable",
+                    reason="infrastructure_unavailable",
+                    error_class="infra",
+                    outcome="incomplete",
+                    request_id=self.request_id,
+                    retry_after_seconds=DISPATCH_RETRY_SECONDS,
+                    next_action=(
+                        f"Keep the candidate and request unchanged. Wait at least "
+                        f"{DISPATCH_RETRY_SECONDS} seconds, then retry the identical request; "
+                        "the Runtime will reconcile and reuse completed private Gateway evidence. "
+                        "Do not reinterpret this as a Kernel failure."
+                    ),
+                ),
+                retry_after=DISPATCH_RETRY_SECONDS,
+            )
         except RequestValidationError as error:
             self.reply(400, failure(str(error)))
         except RequestDispatchTimeout as error:

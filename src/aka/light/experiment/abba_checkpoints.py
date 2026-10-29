@@ -299,8 +299,13 @@ class EvalBatchStore:
             or not isinstance(reference, dict)
         ):
             raise ValueError("Eval batch has an invalid request identity")
-        shapes = reference.get("shapes")
-        if not isinstance(shapes, dict) or list(shapes) != shape_ids:
+        from aka.light.evaluation.shapes import request_shape_ids
+
+        try:
+            selected_shape_ids = request_shape_ids(request)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Eval batch request has invalid Shape selection") from exc
+        if selected_shape_ids != shape_ids:
             raise ValueError("Eval batch request has inconsistent Shape coverage")
         try:
             job = json.loads(record["stdout"])

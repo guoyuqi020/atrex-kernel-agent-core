@@ -146,7 +146,19 @@ def complete_evaluation(result: dict, request: dict) -> bool:
             return True
         except (ValueError, TypeError, KeyError, AttributeError):
             return False
-    shapes = request["reference"].get("shapes", {})
+    # A native Eval shard keeps the complete immutable reference bundle and
+    # selects its effective Shapes through runner_overrides.shape_ids.  Checking
+    # every reference Shape here makes every legitimate shard look incomplete,
+    # which in turn marks the aggregate Gateway Record non-cacheable.  The same
+    # mistake also breaks native ABBA because its retained batch evidence uses
+    # this predicate.  Validate exactly the request's effective selection while
+    # still rejecting malformed/unknown Shape IDs in request_shape_ids().
+    from aka.light.evaluation.shapes import request_shape_ids
+
+    try:
+        shapes = request_shape_ids(request)
+    except (KeyError, TypeError, ValueError):
+        return False
     passed = result.get("passed")
     if not shapes or not isinstance(passed, dict):
         return False

@@ -874,10 +874,16 @@ class Campaign:
                     json.JSONDecodeError,
                     ValueError,
                 ) as exc:
-                    errors = [
+                    # A missing/malformed reviewer output is not a candidate
+                    # policy verdict.  Let retry_review start one fresh isolated
+                    # reviewer and never poison the candidate-digest cache with
+                    # an execution/protocol failure.
+                    from aka.light.execution.retry import ReviewerOutputUnavailable
+
+                    raise ReviewerOutputUnavailable(
                         "independent production policy review produced no valid verdict: "
                         f"{type(exc).__name__}: {exc}"
-                    ]
+                    ) from exc
                 else:
                     status = "accepted" if not errors else "rejected"
                     print(
