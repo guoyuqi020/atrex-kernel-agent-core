@@ -106,7 +106,9 @@ def session_execution_policy(campaign: Campaign) -> dict[str, object]:
         ),
         "reasoning_effort": "max",
         "output_limit_recovery_retries": getattr(
-            campaign.module_options, "output_limit_recovery_retries", 2
+            campaign.module_options,
+            "output_limit_recovery_retries",
+            _constants.DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES,
         ),
         "dependency_policy_recovery_retries": getattr(
             campaign.module_options, "dependency_policy_recovery_retries", 2

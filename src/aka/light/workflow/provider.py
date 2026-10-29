@@ -9,6 +9,7 @@ from weakref import WeakSet
 
 from aka.contracts.problem import LoadedProblem
 from aka.contracts.workflow import CampaignRequest, ProblemSource
+from .constants import DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES
 from .search import SearchOptions
 
 
@@ -17,7 +18,7 @@ class WorkflowOptions:
     numerical_validation: bool = True
     goal_episodes: bool = False
     generate_memory: bool = False
-    output_limit_recovery_retries: int = 2
+    output_limit_recovery_retries: int = DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES
     dependency_policy_recovery_retries: int = 2
     episode_timeout_seconds: float | None = None
     search: SearchOptions | dict | None = None

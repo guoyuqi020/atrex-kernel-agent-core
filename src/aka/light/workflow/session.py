@@ -20,6 +20,7 @@ from aka.light.workflow.output_limit import (
 )
 from aka.light.agent.runtime.adapter import ClaudeAdapter, PiAdapter
 from aka.light.execution.retry import InfrastructureUnavailable
+from aka.light.workflow.constants import DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES
 
 CompletionCheck = Callable[[EpisodeHandoff], str]
 _CLAUDE_TRANSIENT_API_ERRORS = {"api error: terminated"}
@@ -117,7 +118,7 @@ class LongSessionRunner:
         output_directory: Path | None = None,
         telemetry_environment: Mapping[str, str] | None = None,
         record_usage: Callable[[int], None] | None = None,
-        output_limit_recovery_retries: int = 2,
+        output_limit_recovery_retries: int = DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES,
         dependency_policy_recovery_retries: int = 2,
         remaining_token_budget: int | None = None,
         stage_name: str = "Episode",

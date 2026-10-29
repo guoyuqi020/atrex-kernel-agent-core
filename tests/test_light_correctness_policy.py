@@ -22,9 +22,20 @@ from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES
 from aka.light.runtime.request_feedback import gateway_schema
 from aka.light.workflow.bootstrap import Campaign, framework_baseline_validation_command
 from aka.light.workflow.context import session_execution_policy
+from aka.light.workflow.plugin import Defaults as WORKFLOW_PLUGIN_DEFAULTS
+from aka.light.workflow.provider import WorkflowOptions
 
 
 class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
+    def test_output_limit_recovery_defaults_to_five_fresh_sessions(self):
+        self.assertEqual(WorkflowOptions().output_limit_recovery_retries, 5)
+        self.assertEqual(WORKFLOW_PLUGIN_DEFAULTS["output_limit_recovery_retries"], 5)
+        campaign = SimpleNamespace(module_options=SimpleNamespace())
+        self.assertEqual(
+            session_execution_policy(campaign)["output_limit_recovery_retries"],
+            5,
+        )
+
     def test_full_and_shape_selected_evaluates_use_five_cases(self):
         self.assertEqual(
             evaluation_policy(["python3", "test_kernel.py"])["num_correctness_cases"],
