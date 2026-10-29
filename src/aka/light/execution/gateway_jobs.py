@@ -20,6 +20,20 @@ from aka.light.experiment.store import JOB_ROOT_ENV, EvidenceUnavailable, digest
 from aka.light.evaluation.evaluation_failures import embedded_device_failure
 
 DEFAULT_MAX_INFRA_RETRIES = 2
+DEFAULT_MAX_DEADLINE_RETRIES: int | None = None
+TERMINAL_VALIDATION_ENV = "ATREX_AKA_TERMINAL_VALIDATION"
+
+
+def configured_max_deadline_retries() -> int | None:
+    """Explicit Agate job deadlines have no retry-count cap."""
+    return DEFAULT_MAX_DEADLINE_RETRIES
+
+
+def configured_max_infra_retries(
+    default: int | None = DEFAULT_MAX_INFRA_RETRIES,
+) -> int | None:
+    """Terminal validation retains its candidate until infrastructure recovers."""
+    return None if os.environ.get(TERMINAL_VALIDATION_ENV) == "1" else default
 
 
 def retry_delay(count: int) -> float:
@@ -96,14 +110,36 @@ def submission_rejection(process: subprocess.CompletedProcess) -> SubmissionReje
     return None
 
 
+def _job_deadline_exceeded(error: object) -> bool:
+    """Recognize Agate's explicit terminal job-deadline diagnostic."""
+    if not isinstance(error, dict):
+        return False
+    message = error.get("message")
+    return bool(
+        isinstance(message, str)
+        and "job deadline exceeded" in message.casefold()
+    )
+
+
 def retry_kind(job: object) -> str | None:
-    """Match Runtime: only explicitly failed infra Jobs are resubmitted."""
-    if not isinstance(job, dict) or job.get("status") != "failed":
+    """Classify retryable terminal Jobs consistently for every operation."""
+    if not isinstance(job, dict) or job.get("status") not in {
+        "failed", "cancelled", "canceled",
+    }:
         return None
     error = job.get("error") or {}
     if not isinstance(error, dict):
         return None
-    if error.get("error_class") == "infra":
+    if _job_deadline_exceeded(error):
+        return "deadline"
+    details = error.get("details")
+    if (
+        error.get("error_class") == "infra"
+        or error.get("failure_origin") == "infrastructure"
+        or (isinstance(details, dict) and details.get("failure_origin") == "infrastructure")
+        or job.get("failure_origin") == "infrastructure"
+        or error.get("reason") == "oss_unavailable"
+    ):
         return "infra"
     return None
 
@@ -299,6 +335,7 @@ def execute_job(
     retry_classifier=retry_kind,
     max_retries: int | None = None,
     max_infra_retries: int | None = DEFAULT_MAX_INFRA_RETRIES,
+    max_deadline_retries: int | None = DEFAULT_MAX_DEADLINE_RETRIES,
     idempotent_submission: bool = False,
     max_device_retries: int | None = None,
     device_retry_delay: float | None = None,
@@ -317,13 +354,21 @@ def execute_job(
     complete poll budget.  A prior CLI submission without a confirmed ID also
     gets one bounded fresh submission on the later invocation.
 
-    Explicit ``error_class=infra`` terminal failures are retried only while both
-    ``max_infra_retries`` and the current wait deadline allow another attempt.
+    Explicit infrastructure terminal failures are retried only while
+    ``max_infra_retries`` allows another attempt.  When that value is ``None``,
+    each replacement receives a fresh bounded wait window, so terminal
+    validation can wait indefinitely without making any individual Job
+    unbounded.
+    An explicit Agate ``job deadline exceeded`` terminal is retried without a
+    count limit by default. Every retry receives a fresh bounded wait window
+    and remains interruptible through Session revocation or process shutdown.
     """
     if max_wait_retries < 0:
         raise ValueError("max_wait_retries must be non-negative")
     if max_infra_retries is not None and max_infra_retries < 0:
         raise ValueError("max_infra_retries must be non-negative")
+    if max_deadline_retries is not None and max_deadline_retries < 0:
+        raise ValueError("max_deadline_retries must be non-negative")
     retry_classifier = retry_kind if retry_classifier is None else retry_classifier
     directory = Path(os.environ[JOB_ROOT_ENV]) / "jobs" / digest(identity) if os.environ.get(JOB_ROOT_ENV) else None
     state = {}
@@ -467,7 +512,7 @@ def execute_job(
             if not rejection.retryable:
                 return process
             rejection = None
-            kind = "submission"
+            kind = "infra" if max_infra_retries is None else "submission"
         else:
             job = job_from_process(process)
             if state.get("phase") != "terminal":
@@ -524,19 +569,29 @@ def execute_job(
                 # Stable resubmission identity for the failed job, including crash replay.
                 error = job.get("error")
                 reason = error.get("reason") if isinstance(error, dict) else None
-                prefix = "eval-device-retry:" if kind == "device" else (
-                    "logs-retry:" if reason == "logs_unavailable" else "infra-retry:"
+                prefix = (
+                    "eval-device-retry:" if kind == "device" else
+                    "deadline-retry:" if kind == "deadline" else
+                    "logs-retry:" if reason == "logs_unavailable" else
+                    "infra-retry:"
                 )
                 wire_key = prefix + hashlib.sha256(job["job_id"].encode()).hexdigest()
         if (
             kind is None
             or (kind == "infra" and max_infra_retries is not None
                 and retries.get("infra", 0) >= max_infra_retries)
+            or (kind == "deadline" and max_deadline_retries is not None
+                and retries.get("deadline", 0) >= max_deadline_retries)
             or (max_retries is not None and sum(retries.values()) >= max_retries)
         ):
             return process
         retries[kind] = retries.get(kind, 0) + 1
         count = sum(retries.values())
+        if kind == "deadline" or (kind == "infra" and max_infra_retries is None):
+            # The service consumed the previous Job's own execution window.
+            # Give each unbounded replacement the same bounded collection
+            # window. Cancellation remains controlled by the Session/process.
+            deadline = time.monotonic() + wait_budget
         delay = device_retry_delay if kind == "device" and device_retry_delay is not None else retry_delay(count)
         if deadline - time.monotonic() <= delay:
             if kind == "device":

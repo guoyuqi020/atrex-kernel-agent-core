@@ -20,6 +20,7 @@ class MeasurementEffects:
     publish_outputs: Callable[[Path, object], None]
     deadline: float | None = None
     request_id: str = ""
+    terminal_validation: bool = False
 
 
 class RecordedExperiments:

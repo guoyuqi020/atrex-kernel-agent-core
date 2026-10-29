@@ -205,13 +205,14 @@ def filter_options(argv: list[str], owned: frozenset[str], forbidden: frozenset[
 
 
 def scrub_environment(environment: dict[str, str]) -> dict[str, str]:
+    from aka.light.execution.gateway_jobs import TERMINAL_VALIDATION_ENV
     return {key: value for key, value in environment.items() if
             not key.startswith(("AGATE_", "ATREX_SANDBOX_", "ATREX_WIKI_", "GPU_WIKI_", "ATREX_GPU_WIKI_"))
             and key not in {OWNER_ENV, URL_ENV, TOKEN_ENV, JOB_ROOT_ENV, BATCH_ROOT_ENV,
                             ABBA_BATCH_ROOT_ENV,
                             "ATREX_AKA_MEASUREMENT_REPETITIONS",
                             "ATREX_PRIVATE_REFERENCE_DIR", "ATREX_BENCH_RUNTIME_ROOT",
-                            "ATREX_AKA_IDENTITY_KEY"}}
+                            "ATREX_AKA_IDENTITY_KEY", TERMINAL_VALIDATION_ENV}}
 
 
 @dataclass(frozen=True)
@@ -349,7 +350,14 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         owner = self.server.owner
         self.request_id = uuid.uuid4().hex
-        deadline = time.monotonic() + owner.request_timeout_seconds
+        # Gateway jobs own bounded remote execution and polling windows. Keep
+        # the local request alive across any number of explicit Agate
+        # job-deadline replacements; Session revocation still terminates it.
+        deadline = (
+            float("inf")
+            if self.path == "/v1/gateway/execute"
+            else time.monotonic() + owner.request_timeout_seconds
+        )
         token = self.headers.get("Authorization", "").removeprefix("Bearer ")
         self.bearer = token
         with owner.lock:
@@ -374,6 +382,14 @@ class _Handler(BaseHTTPRequestHandler):
                 if not isinstance(request, dict):
                     raise ValueError("Request must be a JSON object")
                 self.decoded_request = request
+                if (
+                    self.path == "/v1/journal/execute"
+                    and request.get("operation") == "episode_report"
+                ):
+                    # Candidate acceptance owns an authoritative terminal Eval.
+                    # It must remain alive while the Runtime retries confirmed
+                    # infrastructure failures for the same frozen candidate.
+                    deadline = float("inf")
             # Suspension is optional. When enabled, stop only this Session's
             # Provider tree; the handler/executor remains outside that tree.
             # Release before reply because a stopped CLI cannot drain a large
@@ -815,7 +831,8 @@ class SupervisorRuntime:
         return False
 
     def execute_trusted(self, workspace: Path, argv: list[str], *, execution_timeout: int | None = None,
-                        parent=None, reference_snapshot: Path | None = None) -> dict:
+                        parent=None, reference_snapshot: Path | None = None,
+                        terminal_validation: bool = False) -> dict:
         """Controller-only execution/reuse; no Session, draft publication or HTTP switch."""
         capability = Capability(workspace.resolve(strict=True), {}, parent=parent)
         token = secrets.token_urlsafe(32)
@@ -824,19 +841,25 @@ class SupervisorRuntime:
                 raise RuntimeError("Supervisor Runtime is closed")
             self.capabilities[token] = capability
         try:
-            deadline = time.monotonic() + self.request_timeout_seconds
+            deadline = (
+                float("inf")
+                if terminal_validation
+                else time.monotonic() + self.request_timeout_seconds
+            )
             if parent is not None and parent.deadline is not None:
                 deadline = min(deadline, parent.deadline)
             with self.request_lock(capability, deadline, "acceptance"):
                 return self.execute(capability, "/v1/gateway/execute", {"argv": argv}, reuse_completed=True,
-                                    execution_timeout=execution_timeout, reference_snapshot=reference_snapshot)
+                                    execution_timeout=execution_timeout, reference_snapshot=reference_snapshot,
+                                    terminal_validation=terminal_validation)
         finally:
             self.revoke(token)
 
     def execute(self, capability: Capability, route: str, request: dict, *,
                 reuse_completed=False, reuse_correctness=False, candidate_source: bytes | None = None,
                 execution_timeout: int | None = None, reference_snapshot: Path | None = None,
-                prepare_identity_only: bool = False) -> dict | None:
+                prepare_identity_only: bool = False,
+                terminal_validation: bool = False) -> dict | None:
         if prepare_identity_only and route != "/v1/gateway/execute":
             return None
         if route == "/v1/plugins/execute":
@@ -850,6 +873,10 @@ class SupervisorRuntime:
             argv = validated_argv(request["argv"])
         environment = dict(self.environment)
         environment.update(capability.context)
+        from aka.light.execution.gateway_jobs import TERMINAL_VALIDATION_ENV
+        environment.pop(TERMINAL_VALIDATION_ENV, None)
+        if terminal_validation:
+            environment[TERMINAL_VALIDATION_ENV] = "1"
         for key in (OWNER_ENV, URL_ENV, TOKEN_ENV, "ATREX_PRIVATE_REFERENCE_DIR"):
             environment.pop(key, None)
         with tempfile.TemporaryDirectory(dir=self.root, prefix="request-") as temporary:
@@ -983,7 +1010,13 @@ class SupervisorRuntime:
                     audit=lambda argv, process, record: self.audit_process(capability, "gateway", argv, process, record),
                     publish_log=lambda staged: self.publish_evaluation_log(capability.workspace, staged),
                     publish_outputs=lambda staged, args: self.publish_legacy_outputs(capability.workspace, staged, args),
-                    deadline=capability.deadline, request_id=capability.request_id,
+                    deadline=(
+                        None
+                        if capability.deadline == float("inf")
+                        else capability.deadline
+                    ),
+                    request_id=capability.request_id,
+                    terminal_validation=terminal_validation,
                 )
                 return self.experiments.execute(staged, effective, argv, environment, command, effects=effects,
                                                reuse_completed=reuse_completed, reuse_correctness=reuse_correctness)
@@ -1021,7 +1054,8 @@ class SupervisorRuntime:
             production=self.config.optimization_mode == "production",
             measure=lambda argv, frozen, correctness: self.execute(
                 capability, "/v1/gateway/execute", {"argv": argv},
-                reuse_completed=True, reuse_correctness=correctness, candidate_source=frozen),
+                reuse_completed=True, reuse_correctness=correctness,
+                candidate_source=frozen, terminal_validation=True),
             read_record=self.measurements.read, ensure_live=ensure_live,
             research_records=self.journal_factory.research_records,
             experiments_enabled=self.journal_factory.experiments_enabled,

@@ -98,7 +98,11 @@ zero-submission guarantee. ABBA does not replace the standard full Evaluate requ
                     install(staged / self.BASELINE_PATH, baseline)
                 else:
                     publish(staged, self.BASELINE_PATH, baseline)
-                response = self.execute(staged, self.request_argv())
+                response = self.execute(
+                    staged,
+                    self.request_argv(),
+                    terminal_validation=True,
+                )
             result = result_from_response(response, "same_allocation_abba")
             if not result or not result.get("gateway_record_id"):
                 raise ValueError("No authoritative ABBA record: " + response.get("stderr", "")[-1000:])

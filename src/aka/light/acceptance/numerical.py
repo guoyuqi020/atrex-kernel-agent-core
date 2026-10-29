@@ -325,7 +325,8 @@ def _run_probes(campaign, workspace, suite, shapes_path, digest, directory, *, c
                 lambda: campaign.measure_for_acceptance(probe, [
                     "--kind", "dev", "--no-sync", "--input", "numerical_inputs.py", "--",
                     "python3", "numerical_probe.py", "probe-request.json",
-                ], execution_timeout=600, parent=cancel.parent, reference_snapshot=probe), cancel=cancel)
+                ], execution_timeout=600, parent=cancel.parent, reference_snapshot=probe,
+                    terminal_validation=True), cancel=cancel)
         durable_write_json(directory / f"response-{index:04d}.json", response)
         batch, record_id = None, None
         for line in response["stdout"].splitlines():

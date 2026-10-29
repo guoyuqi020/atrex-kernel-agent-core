@@ -519,10 +519,12 @@ class Campaign:
         return self.plugin_registry.wiki_prompt(slot) if self.tool_runtime.wiki else None
 
     def measure_for_acceptance(self, workspace: Path, argv: list[str], *, execution_timeout: int | None = None,
-                               parent=None, reference_snapshot: Path | None = None) -> dict:
+                               parent=None, reference_snapshot: Path | None = None,
+                               terminal_validation: bool = False) -> dict:
         self.start_runtime()
         return self._supervisor_runtime.execute_trusted(workspace, argv, execution_timeout=execution_timeout,
-                                                       parent=parent, reference_snapshot=reference_snapshot)
+                                                       parent=parent, reference_snapshot=reference_snapshot,
+                                                       terminal_validation=terminal_validation)
 
     def recorded_kernel(self, kernel_id: str) -> bytes:
         self.start_runtime()
@@ -2578,6 +2580,7 @@ class Campaign:
                 health_command=self.sandbox_health_command,
                 gateway_kind="run",
                 private_reference_dir=self.private_reference_dir,
+                terminal_validation=True,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return None, f"combined validation failed to run: {exc}"

@@ -278,6 +278,7 @@ def _sandbox_command(
     gateway_kind: str = "auto",
     private_reference_dir: Path | None = None,
     preflight: bool = False,
+    terminal_validation: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run the private GPU executor for trusted Supervisor verification."""
     if sum(bool(value) for value in (ssh, url, profile)) > 1:
@@ -316,16 +317,22 @@ def _sandbox_command(
     environment = os.environ.copy()
     from aka.light.runtime.paths import supervisor_campaign_root
     from aka.light.experiment.store import JOB_ROOT_ENV
+    from aka.light.execution.gateway_jobs import TERMINAL_VALIDATION_ENV
     # Bootstrap runs before the HTTP Runtime exists. Keep accepted IDs and the
     # exact uploaded wire request outside the workspace so recovery polls/replays
     # that same submission instead of creating an untracked replacement.
     environment[JOB_ROOT_ENV] = str(supervisor_campaign_root(workspace) / "trusted-jobs")
+    environment.pop(TERMINAL_VALIDATION_ENV, None)
+    if terminal_validation:
+        environment[TERMINAL_VALIDATION_ENV] = "1"
     environment.pop("ATREX_PRIVATE_REFERENCE_DIR", None)
     if private_reference_dir is not None:
         environment["ATREX_PRIVATE_REFERENCE_DIR"] = str(private_reference_dir)
     # The gateway wait includes GPU queueing; --timeout bounds remote execution.
     # Keep the outer process alive for the same queue grace used by sandbox.py.
-    if wall_timeout is not None:
+    if terminal_validation:
+        effective_timeout = None
+    elif wall_timeout is not None:
         effective_timeout = wall_timeout
     else:
         uses_ssh = bool(ssh or (not profile and not url and environment.get("ATREX_SANDBOX_SSH")))
@@ -359,17 +366,23 @@ def _sandbox_command(
                 pass
             return process.communicate()
 
-    deadline = time.monotonic() + effective_timeout
+    deadline = (
+        time.monotonic() + effective_timeout
+        if effective_timeout is not None
+        else None
+    )
     try:
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
                 stdout, stderr = stop_process_group()
                 raise subprocess.TimeoutExpired(
                     cmd, effective_timeout, output=stdout, stderr=stderr
                 )
             try:
-                stdout, stderr = process.communicate(timeout=min(0.25, remaining))
+                stdout, stderr = process.communicate(
+                    timeout=min(0.25, remaining) if remaining is not None else 0.25
+                )
             except subprocess.TimeoutExpired:
                 raise_if_environment_blocked()
                 continue

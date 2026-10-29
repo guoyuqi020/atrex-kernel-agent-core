@@ -142,6 +142,7 @@ from aka.light.execution.gateway_jobs import (  # noqa: E402
     SubmissionUncertain,
     bundle_digest,
     command_identity,
+    configured_max_infra_retries,
     eval_retry_kind,
     execute_job,
     job_from_process,
@@ -3053,10 +3054,12 @@ def run_direct_job(
                 "kind": kind, "payload": payload_identity(payload)}
     if identity_extra:
         identity["execution_context"] = identity_extra
+    from aka.light.execution.gateway_jobs import configured_max_deadline_retries
     return execute_job(identity, submit, poll,
                        wait_budget=timeout + queue_wait_grace,
                        retry_classifier=eval_retry_kind if eval_request else None,
-                       max_infra_retries=max_infra_retries,
+                       max_infra_retries=configured_max_infra_retries(max_infra_retries),
+                       max_deadline_retries=configured_max_deadline_retries(),
                        idempotent_submission=True,
                        max_device_retries=max_device_retries if eval_request else None,
                        device_retry_delay=device_retry_delay)
@@ -3370,11 +3373,13 @@ def run_agate_with_cancel_retry(
     identity = dict(request_identity) if request_identity is not None else {"command": command_identity(agate)}
     if isinstance(identity.get("request"), dict):
         identity["request"] = payload_identity(identity["request"])
+    from aka.light.execution.gateway_jobs import configured_max_deadline_retries
     return execute_job(identity | {"url_fingerprint": private_value_fingerprint(url),
                                    "profile": gateway_profile},
                        submit, poll, wait_budget=wait_budget,
                        retry_classifier=eval_retry_kind if eval_request else None,
-                       max_infra_retries=max_infra_retries,
+                       max_infra_retries=configured_max_infra_retries(max_infra_retries),
+                       max_deadline_retries=configured_max_deadline_retries(),
                        max_device_retries=max_device_retries if eval_request else None,
                        device_retry_delay=device_retry_delay)
 

@@ -1,6 +1,7 @@
 """Regression tests for Runtime-owned AKA-Light correctness coverage."""
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -19,6 +20,14 @@ from aka.light.evaluation.gateway import (
     evaluation_policy,
 )
 from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES
+from aka.light.execution.gateway_jobs import (
+    DEFAULT_MAX_INFRA_RETRIES,
+    TERMINAL_VALIDATION_ENV,
+    configured_max_infra_retries,
+    execute_job,
+    retry_kind,
+)
+from aka.light.runtime.server import SupervisorRuntime
 from aka.light.runtime.request_feedback import gateway_schema
 from aka.light.workflow.bootstrap import Campaign, framework_baseline_validation_command
 from aka.light.workflow.context import session_execution_policy
@@ -27,6 +36,184 @@ from aka.light.workflow.provider import WorkflowOptions
 
 
 class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
+    @staticmethod
+    def _deadline_job(*, max_deadline_retries, failures):
+        submitted = []
+
+        def submit(wire_key):
+            submitted.append(wire_key)
+            return subprocess.CompletedProcess(
+                [], 0, json.dumps({"job_id": f"job-{len(submitted)}"}), ""
+            )
+
+        def poll(process, _remaining, *, recovery_probe=False):
+            attempt = int(json.loads(process.stdout)["job_id"].split("-")[-1])
+            failed = attempt <= failures
+            job = {
+                "job_id": f"job-{attempt}",
+                "status": "failed" if failed else "succeeded",
+            }
+            if failed:
+                job["error"] = {
+                    "error_class": "timeout",
+                    "reason": "timeout",
+                    "message": "job deadline exceeded",
+                }
+            else:
+                job["result"] = {"ok": True}
+            return subprocess.CompletedProcess(
+                [], 1 if failed else 0, json.dumps(job), ""
+            )
+
+        with patch("aka.light.execution.gateway_jobs.time.sleep"):
+            process = execute_job(
+                {"request": "deadline-test"},
+                submit,
+                poll,
+                wait_budget=60,
+                idempotent_submission=True,
+                max_deadline_retries=max_deadline_retries,
+            )
+        return process, submitted
+
+    @staticmethod
+    def _infra_job(*, max_infra_retries, failures, status="failed"):
+        submitted = []
+
+        def submit(wire_key):
+            submitted.append(wire_key)
+            return subprocess.CompletedProcess(
+                [], 0, json.dumps({"job_id": f"job-{len(submitted)}"}), ""
+            )
+
+        def poll(process, _remaining, *, recovery_probe=False):
+            attempt = int(json.loads(process.stdout)["job_id"].split("-")[-1])
+            failed = attempt <= failures
+            job = {
+                "job_id": f"job-{attempt}",
+                "status": status if failed else "succeeded",
+            }
+            if failed:
+                job["error"] = {
+                    "error_class": "infra",
+                    "reason": "backend_unavailable",
+                    "message": "temporary infrastructure failure",
+                }
+            else:
+                job["result"] = {"ok": True}
+            return subprocess.CompletedProcess(
+                [], 1 if failed else 0, json.dumps(job), ""
+            )
+
+        with patch("aka.light.execution.gateway_jobs.time.sleep"):
+            process = execute_job(
+                {"request": "infra-test", "limit": max_infra_retries},
+                submit,
+                poll,
+                wait_budget=60,
+                idempotent_submission=True,
+                max_infra_retries=max_infra_retries,
+            )
+        return process, submitted
+
+    def test_ordinary_gateway_deadline_has_no_retry_count_cap(self):
+        process, submitted = self._deadline_job(
+            max_deadline_retries=None,
+            failures=3,
+        )
+        self.assertEqual(process.returncode, 0)
+        self.assertEqual(len(submitted), 4)
+
+    def test_terminal_gateway_deadline_has_no_retry_count_cap(self):
+        process, submitted = self._deadline_job(
+            max_deadline_retries=None,
+            failures=3,
+        )
+        self.assertEqual(process.returncode, 0)
+        self.assertEqual(len(submitted), 4)
+
+    def test_exploration_infrastructure_retry_remains_bounded(self):
+        process, submitted = self._infra_job(
+            max_infra_retries=DEFAULT_MAX_INFRA_RETRIES,
+            failures=3,
+        )
+        self.assertEqual(process.returncode, 1)
+        self.assertEqual(len(submitted), 3)
+
+    def test_terminal_infrastructure_retry_has_no_count_cap(self):
+        process, submitted = self._infra_job(
+            max_infra_retries=None,
+            failures=3,
+        )
+        self.assertEqual(process.returncode, 0)
+        self.assertEqual(len(submitted), 4)
+
+    def test_terminal_infrastructure_policy_is_selected_by_private_environment(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(TERMINAL_VALIDATION_ENV, None)
+            self.assertEqual(
+                configured_max_infra_retries(), DEFAULT_MAX_INFRA_RETRIES
+            )
+        with patch.dict(os.environ, {TERMINAL_VALIDATION_ENV: "1"}):
+            self.assertIsNone(configured_max_infra_retries())
+
+    def test_infrastructure_cancel_and_failure_origin_are_retryable(self):
+        self.assertEqual(
+            retry_kind({
+                "status": "cancelled",
+                "error": {"error_class": "infra", "message": "worker lost"},
+            }),
+            "infra",
+        )
+        self.assertEqual(
+            retry_kind({
+                "status": "failed",
+                "failure_origin": "infrastructure",
+                "error": {"message": "ray node exited"},
+            }),
+            "infra",
+        )
+        self.assertEqual(
+            retry_kind({
+                "status": "failed",
+                "error": {
+                    "message": "job supervisor exited",
+                    "details": {"failure_origin": "infrastructure"},
+                },
+            }),
+            "infra",
+        )
+
+    def test_episode_report_candidate_eval_is_terminal_validation(self):
+        runtime = SupervisorRuntime.__new__(SupervisorRuntime)
+        runtime.config = SimpleNamespace(
+            atrex_bench_root=Path("/private/atrex-bench"),
+            optimization_mode="production",
+        )
+        runtime.numerical_validator = None
+        runtime.measurements = SimpleNamespace(read=lambda _: {})
+        runtime.journal_factory = SimpleNamespace(
+            research_records=False,
+            experiments_enabled=False,
+        )
+        runtime._live = lambda _: True
+        captured = {}
+
+        def validate_candidate(context, source):
+            context.measure(["--kind", "run"], source, True)
+            return {"status": "ok"}
+
+        runtime.acceptance = SimpleNamespace(validate_candidate=validate_candidate)
+        runtime.execute = lambda *args, **kwargs: captured.update(kwargs) or {
+            "exit_code": 0, "stdout": "", "stderr": "",
+        }
+        capability = SimpleNamespace()
+        self.assertEqual(
+            runtime._validate_candidate_correctness(capability, b"candidate"),
+            {"status": "ok"},
+        )
+        self.assertIs(captured["terminal_validation"], True)
+
     def test_output_limit_recovery_defaults_to_five_continuations(self):
         self.assertEqual(WorkflowOptions().output_limit_recovery_retries, 5)
         self.assertEqual(WORKFLOW_PLUGIN_DEFAULTS["output_limit_recovery_retries"], 5)
@@ -257,10 +444,11 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 work_dir=directory,
             )
             with (
-                patch("aka.light.workflow.bootstrap._sandbox_command", return_value=completed),
+                patch("aka.light.workflow.bootstrap._sandbox_command", return_value=completed) as sandbox,
                 patch.object(Campaign, "_print_v0_evaluator_output"),
             ):
                 parsed, problem = campaign._validate_framework_baseline(1)
+        self.assertIs(sandbox.call_args.kwargs["terminal_validation"], True)
         self.assertEqual(parsed, result)
         self.assertIn("shape 6 failed correctness", problem)
         self.assertIn('\"shape_id\": \"6\"', problem)

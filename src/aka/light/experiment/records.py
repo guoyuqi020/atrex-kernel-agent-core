@@ -209,12 +209,26 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
         response = reuse_correctness_result(store, request, kernels["candidate"]["kernel_id"])
         if response is not None:
             return response
+    def reuse_cached(record: dict) -> bool:
+        if not effects.terminal_validation or operation != "same_allocation_abba":
+            return True
+        sample = evaluation.result(record["response"], operation)
+        from aka.light.evaluation.native_abba import is_terminal_abba_timeout
+        return not is_terminal_abba_timeout(sample)
+
     try:
-        with store.reserve(request, kernels, deadline=effects.deadline, request_id=effects.request_id) as task:
+        with store.reserve(
+            request,
+            kernels,
+            deadline=effects.deadline,
+            request_id=effects.request_id,
+            reuse_cached=reuse_cached,
+        ) as task:
             for name, source in inputs.items():
                 private_write_bytes(task.directory / "inputs" / name, source)
             repetitions = plan.repetitions
             samples, responses, cacheable, pending = [], [], True, False
+            terminal_validation_timeout = False
             # The identity carries only a keyed fingerprint of launcher values.
             # Retain evidence, but never cache a result measured with custom
             # environment or SSH initialization as an interchangeable task.
@@ -287,11 +301,11 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
                         truncated=response.get("truncated") is True,
                     )
                     if terminal_abba_timeout:
-                        # The native ABBA executor has already submitted one
-                        # fresh retry.  Two terminal wall-clock failures are a
-                        # complete negative promotion result, not uncertain
-                        # infrastructure that the Supervisor should retry forever.
-                        cacheable = True
+                        # Agent-requested ABBA returns the exhausted two-attempt
+                        # result as evidence. Terminal promotion keeps the
+                        # candidate and retries the authoritative gate instead.
+                        terminal_validation_timeout = effects.terminal_validation
+                        cacheable = not terminal_validation_timeout
                     else:
                         cacheable = (
                             cacheable
@@ -348,6 +362,11 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
                     for state in states
                 ):
                     raise InfrastructureUnavailable("Recorded GPU validation infrastructure failure")
+                if terminal_validation_timeout:
+                    raise InfrastructureUnavailable(
+                        "Terminal ABBA exceeded its per-run wall-clock limit twice; "
+                        "the candidate is preserved and the authoritative gate will retry"
+                    )
                 raise InfrastructureUnavailable(
                     "Acceptance measurement is incomplete or uncertain; inspect its private Gateway Record"
                 )

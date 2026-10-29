@@ -13,6 +13,7 @@ import secrets
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -329,7 +330,15 @@ class MeasurementStore:
             raise TaskRunning(active.deadline, active.request_id)
 
     @contextmanager
-    def reserve(self, request: dict, kernels: dict, *, deadline: float | None = None, request_id: str = ""):
+    def reserve(
+        self,
+        request: dict,
+        kernels: dict,
+        *,
+        deadline: float | None = None,
+        request_id: str = "",
+        reuse_cached: Callable[[dict], bool] | None = None,
+    ):
         key = digest(request)
         with open_private_directory(self.root / "tasks") as directory:
             descriptor = os.open(key + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=directory)
@@ -353,7 +362,9 @@ class MeasurementStore:
             record_id = state.get("gateway_record_id")
             if isinstance(record_id, str) and RECORD_ID.fullmatch(record_id):
                 cached = self._cached(record_id, key)
-                if cached is not None:
+                if cached is not None and (
+                    reuse_cached is None or reuse_cached(cached)
+                ):
                     raise DuplicateTask(record_id)
             # Resume an interrupted request's physical jobs/checkpoints only
             # when its exact request identity remains intact.
