@@ -27,7 +27,7 @@ from aka.light.workflow.provider import WorkflowOptions
 
 
 class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
-    def test_output_limit_recovery_defaults_to_five_fresh_sessions(self):
+    def test_output_limit_recovery_defaults_to_five_continuations(self):
         self.assertEqual(WorkflowOptions().output_limit_recovery_retries, 5)
         self.assertEqual(WORKFLOW_PLUGIN_DEFAULTS["output_limit_recovery_retries"], 5)
         campaign = SimpleNamespace(module_options=SimpleNamespace())

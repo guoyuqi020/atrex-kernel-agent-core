@@ -329,7 +329,7 @@ Optimization Episodes have **no active-time limit by default**. To impose one, c
 {"api_version":1,"patches":[{"id":"workflow","config":{"episode_timeout_seconds":14400}}]}
 ```
 
-Report-repair continuations and fresh output-limit recovery sessions share that
+Report-repair continuations and same-session output-limit continuations share that
 Episode budget when configured; they do not reset it. The budget is in memory,
 not a persisted allowance across controller restarts. Omitting the field disables the
 Episode-level limit. Separately,
@@ -366,18 +366,19 @@ active-time budget when running managed Light Episodes.
 
 Light ports Runtime's Claude `max_output_tokens` recovery into the Episode
 Workflow. A matching root-session API-error assistant event followed by a final
-error result can start a **new provider session in the same Episode/draft**.
+error result can continue the **same provider session in the same Episode/draft**.
 Child errors, quoted text, a `max_tokens` stop reason alone, and incomplete streams
 cannot trigger it. A valid terminal Report still wins before recovery. Other exit
 codes do not enter this output-limit recovery path.
 
-`output_limit_recovery_retries` defaults to **2**, accepts 0–10, and **0 disables**
+`output_limit_recovery_retries` defaults to **5**, accepts 0–10, and **0 disables**
 it. Its allowance is separate from ordinary same-session handoff repairs, including
-Goal Episodes. Recovery retains the candidate source tree, `scratch/`, `skills/`
-and `tools/`; it does not rerun Bootstrap or increase the provider output limit.
-The bounded continuation prompt includes saved filenames and recent tool receipts,
-not the previous thinking transcript. Unknown GPU outcomes must be reconciled
-before resubmission, and disabled Journal tools remain disabled.
+Goal Episodes. Continuation retains the native conversation, candidate source tree,
+`scratch/`, `skills/` and `tools/`; it does not rerun Bootstrap or increase the
+provider output limit. It does not reconstruct context from saved files or tool
+receipts. The added prompt states that the previous response exceeded the 32K
+output-token limit and asks the Agent to make one small change or probe at a time,
+record multiple ideas in a scratch checklist, and implement them sequentially.
 
 All invocations contribute to the same Episode's Token total and usage receipt.
 When a remaining campaign Token budget is supplied, it is checked before starting

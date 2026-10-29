@@ -16,7 +16,7 @@ from aka.light.workflow.protocol import handoff_diagnosis, read_handoff
 from aka.light.workflow.output_limit import (
     EPISODE_COMPLETION_INSTRUCTION,
     dependency_policy_recovery_prompt,
-    recovery_prompt,
+    output_limit_continuation_prompt,
 )
 from aka.light.agent.runtime.adapter import ClaudeAdapter, PiAdapter
 from aka.light.execution.retry import InfrastructureUnavailable
@@ -439,6 +439,11 @@ class LongSessionRunner:
                         if (exit_status != 1
                                 or output_limit_recoveries >= output_limit_recovery_retries):
                             break
+                        if not native.supports_resume or not active_session_id:
+                            completion_diagnosis += (
+                                "; existing provider session cannot be resumed safely"
+                            )
+                            break
                         if turn.terminal_usage.total_tokens is None:
                             completion_diagnosis += "; usage unavailable, cannot safely extend execution"
                             break
@@ -447,24 +452,18 @@ class LongSessionRunner:
                             completion_diagnosis += f"; {stage_name} token budget exhausted"
                             break
                         output_limit_recoveries += 1
-                        next_prompt = recovery_prompt(
-                            workspace, prompt, stdout, active_session_id,
+                        next_prompt = output_limit_continuation_prompt(
                             output_limit_recoveries, output_limit_recovery_retries,
                             stage_name=stage_name,
                             completion_instruction=completion_instruction,
                         )
-                        # Unlike a report-format repair, this starts a fresh
-                        # model context without resetting the current stage's draft.
-                        native.close()
-                        active_session_id = str(uuid.uuid4())
-                        native = self.agent.open_session(
-                            self.agent_cli, workspace, session_id=active_session_id,
-                            environment=telemetry_environment,
-                            output_directory=output_directory,
-                        )
+                        # Keep the complete native conversation. The short
+                        # continuation prompt changes response granularity; it
+                        # does not reconstruct context from files or receipts.
+                        retry_resume = True
                         purpose = "output_limit_recovery"
                         print(f"[long-horizon] max_output_tokens; preserving {stage_name} draft; "
-                              "fresh-session recovery "
+                              "same-session continuation "
                               f"{output_limit_recoveries}/{output_limit_recovery_retries}",
                               flush=True)
                         continue
