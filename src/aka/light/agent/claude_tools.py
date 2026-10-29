@@ -1,4 +1,5 @@
 """Invocation-local Claude hooks for policy and Supervisor HTTP clients."""
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,183 @@ except ImportError:  # Executed directly by Claude's system-Python hook.
         dependency_guard_enabled,
         protected_gateway_identity,
     )
+
+
+OUTPUT_LIMIT_RECOVERY_ENV = "ATREX_OUTPUT_LIMIT_RECOVERY_RETRIES"
+OUTPUT_LIMIT_SCOPE_ENV = "ATREX_OUTPUT_LIMIT_RECOVERY_SCOPE"
+_STOP_HOOK_STATE = "output-limit-stop-hook.json"
+_TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024
+
+
+def output_limit_continuation_guidance(retry, maximum, stage_name="Episode"):
+    """Return concise same-loop guidance shared by Stop-hook recovery."""
+    return f"""Continue the same {stage_name} after a truncated response.
+
+Your previous response exceeded the 32K output-token limit and was truncated. Continue in this
+same provider session with the existing conversation, workspace, candidate, tools and remaining
+budget. Do not restart the task or repeat the whole previous explanation.
+
+Do not try to think through, explain or implement everything in one response. Choose one small,
+concrete modification or targeted probe and complete it. If you have several useful ideas, first
+write a short checklist into a scratch file so they survive, then implement and verify them one at
+a time. Keep each response concise and save progress to files before moving to the next item.
+
+This is output-limit continuation {retry}/{maximum}."""
+
+
+def _latest_root_assistant_event(transcript_path):
+    """Read a bounded transcript tail and return its latest root assistant event."""
+    path = Path(transcript_path).expanduser()
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - _TRANSCRIPT_TAIL_BYTES))
+            raw = stream.read(_TRANSCRIPT_TAIL_BYTES)
+    except (OSError, TypeError, ValueError):
+        return None
+    if size > len(raw):
+        # The first line starts in the middle of a JSON record.
+        raw = raw.partition(b"\n")[2]
+    for line in reversed(raw.splitlines()):
+        try:
+            event = json.loads(line)
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if (
+            isinstance(event, dict)
+            and event.get("type") == "assistant"
+            and event.get("parent_tool_use_id") is None
+            and isinstance(event.get("message"), dict)
+        ):
+            return event
+    return None
+
+
+def _stop_event_key(event):
+    message = event["message"]
+    identifier = message.get("id")
+    if isinstance(identifier, str) and identifier:
+        return identifier[:512]
+    stable = {
+        "timestamp": event.get("timestamp"),
+        "uuid": event.get("uuid"),
+        "stop_reason": message.get("stop_reason"),
+        "usage": message.get("usage"),
+        "content": message.get("content"),
+    }
+    return hashlib.sha256(
+        json.dumps(stable, sort_keys=True, ensure_ascii=False, default=str).encode()
+    ).hexdigest()
+
+
+def _output_limit_state_path(workspace):
+    return Path(workspace).expanduser() / ".atrex_long_horizon" / _STOP_HOOK_STATE
+
+
+def _claim_output_limit_event(path, scope, event_key, maximum):
+    """Atomically claim one transcript event; fail closed if state is unavailable."""
+    try:
+        try:
+            state = json.loads(path.read_text())
+        except FileNotFoundError:
+            state = {"schema_version": 1, "scopes": {}}
+        if not isinstance(state, dict) or not isinstance(state.get("scopes"), dict):
+            return None
+        scopes = state["scopes"]
+        if scope not in scopes and len(scopes) >= 128:
+            # A workspace can host many sequential Episodes. Keep the hook
+            # receipt bounded without touching the active scope.
+            scopes.pop(next(iter(scopes)))
+        record = scopes.get(scope, {"recoveries": 0, "event_keys": []})
+        if not isinstance(record, dict):
+            return None
+        recoveries = record.get("recoveries", 0)
+        event_keys = record.get("event_keys", [])
+        if type(recoveries) is not int or not isinstance(event_keys, list):
+            return None
+        if event_key in event_keys or recoveries >= maximum:
+            return None
+        recoveries += 1
+        scopes[scope] = {
+            "recoveries": recoveries,
+            "event_keys": [*event_keys[-15:], event_key],
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(state, sort_keys=True))
+        os.replace(temporary, path)
+        return recoveries
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def output_limit_recovery_count(workspace, scope):
+    """Return the number of claimed hook/outer recoveries in one runner scope."""
+    try:
+        state = json.loads(_output_limit_state_path(workspace).read_text())
+        record = state["scopes"][scope]
+        recoveries = record["recoveries"]
+        return recoveries if type(recoveries) is int and recoveries >= 0 else 0
+    except (OSError, KeyError, TypeError, ValueError):
+        return 0
+
+
+def claim_outer_output_limit_recovery(workspace, scope, event_key, maximum):
+    """Share the Stop-hook allowance with terminal StopFailure recovery."""
+    return _claim_output_limit_event(
+        _output_limit_state_path(workspace),
+        scope,
+        f"outer:{event_key}",
+        maximum,
+    )
+
+
+def _output_limit_stop_hook(payload, maximum):
+    if type(maximum) is not int or not 0 < maximum <= 10:
+        return None
+    transcript_path = payload.get("transcript_path")
+    session_id = payload.get("session_id")
+    if (
+        not isinstance(transcript_path, str)
+        or not isinstance(session_id, str)
+        or not session_id
+    ):
+        return None
+    event = None
+    # Some Claude Code versions fire Stop just before flushing the final JSONL
+    # record. Briefly retry rather than guessing from an empty rendered message.
+    for attempt in range(5):
+        event = _latest_root_assistant_event(transcript_path)
+        if event is not None and event["message"].get("stop_reason") == "max_tokens":
+            break
+        if attempt < 4:
+            time.sleep(0.05)
+    else:
+        return None
+    cwd = payload.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return None
+    scope = os.environ.get(OUTPUT_LIMIT_SCOPE_ENV, "").strip() or session_id
+    retry = _claim_output_limit_event(
+        _output_limit_state_path(cwd),
+        scope,
+        f"stop:{session_id}:{_stop_event_key(event)}",
+        maximum,
+    )
+    if retry is None:
+        return None
+    stage_name = (
+        os.environ.get("ATREX_AGENT_STAGE_NAME", "Episode").strip() or "Episode"
+    )
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "Stop",
+            "additionalContext": output_limit_continuation_guidance(
+                retry, maximum, stage_name
+            ),
+        }
+    }
 
 
 def preflight_dependency_violation(command):
@@ -127,10 +305,24 @@ def _with_reminder(output, reminder):
     return output
 
 
-def hook_output(payload, timeout_ms, budget_state_path=None):
+def hook_output(
+    payload,
+    timeout_ms,
+    budget_state_path=None,
+    output_limit_recovery_retries=None,
+):
     reminder = _budget_reminder(budget_state_path)
     if not isinstance(payload, dict):
         return None
+    if payload.get("hook_event_name") == "Stop":
+        if output_limit_recovery_retries is None:
+            try:
+                output_limit_recovery_retries = int(
+                    os.environ.get(OUTPUT_LIMIT_RECOVERY_ENV, "0")
+                )
+            except ValueError:
+                return None
+        return _output_limit_stop_hook(payload, output_limit_recovery_retries)
     if payload.get("tool_name") != "Bash":
         return _with_reminder({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -174,8 +366,11 @@ def foreground_command(command, workspace, timeout_seconds, budget_state_path=No
     if not isinstance(settings, dict):
         raise ValueError("Claude settings must be a JSON object")
     hooks = settings.setdefault("hooks", {})
-    if not isinstance(hooks, dict) or not isinstance(hooks.setdefault("PreToolUse", []), list):
-        raise ValueError("Claude PreToolUse hooks must be an array")
+    if not isinstance(hooks, dict):
+        raise ValueError("Claude hooks must be an object")
+    for event in ("PreToolUse", "Stop"):
+        if not isinstance(hooks.setdefault(event, []), list):
+            raise ValueError(f"Claude {event} hooks must be an array")
     # A Supervisor virtualenv path is deliberately absent from the Agent view.
     # This hook is stdlib-only: use the mounted system interpreter on Linux.
     interpreter = Path("/usr/bin/python3") if sys.platform == "linux" else Path(sys.executable).resolve()
@@ -189,6 +384,10 @@ def foreground_command(command, workspace, timeout_seconds, budget_state_path=No
     if budget_state_path is not None:
         hook_command += f" {shlex.quote(str(budget_state_path))}"
     hooks["PreToolUse"].append({"matcher": "*", "hooks": [{
+        "type": "command",
+        "command": hook_command,
+    }]})
+    hooks["Stop"].append({"hooks": [{
         "type": "command",
         "command": hook_command,
     }]})

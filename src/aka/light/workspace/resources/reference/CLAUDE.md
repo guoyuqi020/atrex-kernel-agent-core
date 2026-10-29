@@ -62,6 +62,15 @@ Prompt lists mounted resources. These Skills are always available:
   This Skill reflects the Episode's research-recording setting; when disabled, cite Gateway Records
   directly in the report instead of creating Directions or Experiments.
 
+The local Agent workspace is intentionally CPU-only and does not provide PyTorch/CUDA GPU execution,
+a GPU driver, or GPU compiler/profiler CLIs. Do not run the candidate locally or probe availability with
+`import torch`, `import cuda`, `nvidia-smi`, `nvcc`, `ptxas`, `ncu`, or equivalent commands. Use local
+commands only for source/text processing that does not import or execute the Kernel. Use the appropriate
+Runtime operation for compilation, execution, profiling, and diagnostics. Custom `--kind dev` requests
+are also remote and stateless: every call starts with a fresh workspace and does not retain files,
+processes, packages, compiled artifacts, environment mutations, or the working directory from a prior
+Dev call. Declare every required extra input again and explicitly synchronize outputs you need to keep.
+
 When Wiki is enabled, `skills/KernelWiki/SKILL.md` describes knowledge queries. If it is not
 listed in the session Prompt, use the supplied public information and measured evidence;
 do not invoke a disabled knowledge service or invent missing hardware facts.

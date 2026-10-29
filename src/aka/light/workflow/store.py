@@ -56,6 +56,7 @@ class CampaignStore:
             *wiki_trace_rules,
             # Episode evidence is archived by the supervisor and must never
             # become part of the candidate commit.
+            "/scratch/",
             "/plans/",
             "/profiles/",
             "/.humanize/",

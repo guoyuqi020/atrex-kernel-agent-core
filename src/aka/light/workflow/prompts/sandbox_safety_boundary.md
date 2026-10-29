@@ -2,13 +2,17 @@
 
 - Target remote hardware: **{{HARDWARE}}**{{ENDPOINT}}. Official GPU evaluation goes through
   `python3 tools/sandbox.py`. Do not bypass the scoped Runtime or obtain Agate credentials.
-  Local static inspection and direct use of available compiler/diagnostic CLIs such as `nvcc`, `ptxas`,
-  `ncu`, `rocprofv3`, and `compute-sanitizer` are allowed for auxiliary diagnosis, but their output does
-  not replace official Runtime evidence. Direct Python kernel imports, evaluators, and timers are also
-  allowed for auxiliary diagnosis when the required local hardware and dependencies are available.
+  The local Agent workspace intentionally has no GPU, GPU driver/toolchain, or GPU Python runtime.
+  Do not run candidate code or probe for local GPU support with `import torch`, `import cuda`,
+  `nvidia-smi`, `nvcc`, `ptxas`, `ncu`, `rocprofv3`, `compute-sanitizer`, or equivalent commands.
+  Limit local execution to source/text processing that does not import or execute the Kernel. Submit
+  compilation, execution, profiling, and GPU diagnostics through the permitted Runtime operation.
 - Typed operations such as `--kind run` and `--kind profile` select their inputs automatically and
   take no command after `--`. For custom Dev commands, use `--kind dev --input <path> ... -- <command>`;
-  declare every extra local file/directory with repeatable `--input`. Uploads are allowlist-only.
+  declare every extra local file/directory with repeatable `--input`. Uploads are allowlist-only. Each
+  Dev call runs in a fresh, stateless remote job: files, processes, installed packages, compiled output,
+  environment changes, and the working directory from an earlier Dev call are not retained. Supply all
+  required inputs again on every call and explicitly synchronize any output you need to keep.
   A trivial Dev probe does not establish evaluator health, and diagnostics/custom-input checks do
   not replace official correctness/performance evidence. The current phase may further restrict GPU use.
 - Git is Supervisor-only: do not run Git commands or access `.git`. Keep evaluator/public-contract

@@ -8,7 +8,11 @@ description: Run Kernel evaluation, ABBA comparison, profiling and GPU probes th
 Use `python3 tools/sandbox.py`. The Supervisor chooses the Gateway/SSH endpoint,
 hardware, credentials and timeout, snapshots the current workspace, and supplies
 the evaluator and private inputs. Do not set endpoint/credential flags or run GPU
-code locally. Every remote job starts fresh; no remote filesystem is retained.
+code locally. The local Agent workspace intentionally has no GPU environment; do not
+probe it with `import torch`, `import cuda`, `nvidia-smi`, `nvcc`, `ptxas`, or similar
+commands. Every remote job starts fresh; no remote filesystem is retained. In particular,
+Dev is not an interactive or persistent remote workspace: repeat every required `--input`
+on every call and explicitly synchronize outputs that a later call needs.
 
 Follow the current session's measurement scope and finish procedure. Framework
 Baseline permits only its prescribed smoke; optimization Episodes may use the

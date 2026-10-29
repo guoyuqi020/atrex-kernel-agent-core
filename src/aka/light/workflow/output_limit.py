@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import stat
 
+from aka.light.agent.claude_tools import output_limit_continuation_guidance
 from aka.light.workspace.sources import source_name
 
 
@@ -96,19 +97,13 @@ def output_limit_continuation_prompt(
     stage_name: str = "Episode",
     completion_instruction: str = EPISODE_COMPLETION_INSTRUCTION,
 ) -> str:
-    return f"""## Continue the same {stage_name} after a truncated response
-
-Your previous response exceeded the 32K output-token limit and was truncated. Continue in this
-same provider session with the existing conversation, workspace, candidate, tools and remaining
-budget. Do not restart the task or repeat the whole previous explanation.
-
-Do not try to think through, explain or implement everything in one response. Choose one small,
-concrete modification or targeted probe and complete it. If you have several useful ideas, first
-write a short checklist into a scratch file so they survive, then implement and verify them one at
-a time. Keep each response concise and save progress to files before moving to the next item.
-
-This is output-limit continuation {retry}/{maximum}. {completion_instruction.strip()}
-"""
+    return (
+        "## "
+        + output_limit_continuation_guidance(retry, maximum, stage_name)
+        + " "
+        + completion_instruction.strip()
+        + "\n"
+    )
 
 
 def dependency_policy_recovery_prompt(

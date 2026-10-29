@@ -19,6 +19,10 @@ from aka.light.workflow.output_limit import (
     output_limit_continuation_prompt,
 )
 from aka.light.agent.runtime.adapter import ClaudeAdapter, PiAdapter
+from aka.light.agent.claude_tools import (
+    claim_outer_output_limit_recovery,
+    output_limit_recovery_count,
+)
 from aka.light.execution.retry import InfrastructureUnavailable
 from aka.light.workflow.constants import DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES
 
@@ -230,7 +234,13 @@ class LongSessionRunner:
                         "work from the current draft. Do not merely explain the problem. "
                         f"{completion_instruction.strip()}"
                     )
-                environment = {"ATREX_AGENT_STAGE_NAME": stage_name}
+                environment = {
+                    "ATREX_AGENT_STAGE_NAME": stage_name,
+                    "ATREX_OUTPUT_LIMIT_RECOVERY_RETRIES": str(
+                        output_limit_recovery_retries
+                    ),
+                    "ATREX_OUTPUT_LIMIT_RECOVERY_SCOPE": session_id,
+                }
                 if telemetry_attempt_prefix:
                     environment["ATREX_TELEMETRY_ATTEMPT_ID"] = (
                         f"{telemetry_attempt_prefix}-{attempt + 1}"
@@ -248,6 +258,10 @@ class LongSessionRunner:
                 stdout_parts.append(stdout)
                 stderr_parts.append(stderr)
                 active_session_id = turn.session_id or active_session_id
+                output_limit_recoveries = max(
+                    output_limit_recoveries,
+                    output_limit_recovery_count(workspace, session_id),
+                )
                 failure_kind, provider_error_code = (
                     ClaudeAdapter().classify_terminal_failure(stdout, active_session_id)
                     if self.agent_cli == "claude" else
@@ -451,7 +465,20 @@ class LongSessionRunner:
                                 and total_tokens >= remaining_token_budget):
                             completion_diagnosis += f"; {stage_name} token budget exhausted"
                             break
-                        output_limit_recoveries += 1
+                        claimed = claim_outer_output_limit_recovery(
+                            workspace,
+                            session_id,
+                            f"{active_session_id}:{attempt}",
+                            output_limit_recovery_retries,
+                        )
+                        # A state-file failure must not turn a recoverable
+                        # terminal API error into a dead end. The in-memory
+                        # count still bounds this controller invocation.
+                        output_limit_recoveries = (
+                            claimed
+                            if claimed is not None
+                            else output_limit_recoveries + 1
+                        )
                         next_prompt = output_limit_continuation_prompt(
                             output_limit_recoveries, output_limit_recovery_retries,
                             stage_name=stage_name,

@@ -364,12 +364,21 @@ active-time budget when running managed Light Episodes.
 
 ### Output-limit recovery and response accounting
 
-Light ports Runtime's Claude `max_output_tokens` recovery into the Episode
-Workflow. A matching root-session API-error assistant event followed by a final
-error result can continue the **same provider session in the same Episode/draft**.
-Child errors, quoted text, a `max_tokens` stop reason alone, and incomplete streams
-cannot trigger it. A valid terminal Report still wins before recovery. Other exit
-codes do not enter this output-limit recovery path.
+Light installs an invocation-local Claude `Stop` hook for ordinary root responses
+whose transcript ends with `stop_reason=max_tokens`. The hook injects concise
+continuation guidance through `additionalContext`, so Claude continues inside the
+**same CLI process, provider session, Episode and draft** without waiting for the
+outer invocation to return. Each transcript event is claimed once, and the hook
+uses the configured recovery allowance. It does not run for subagents or infer a
+limit from rendered text. Because some Claude versions can fire `Stop` just before
+flushing the last JSONL record, the hook briefly retries the bounded transcript
+read and otherwise fails open.
+
+True terminal `max_output_tokens` API failures fire `StopFailure`, whose output
+Claude ignores. Light therefore retains its outer recovery for a matching
+root-session API-error assistant event followed by a final error result; that path
+resumes the same provider session after the CLI returns. A valid terminal Report
+still wins before recovery. Other exit codes do not enter either output-limit path.
 
 `output_limit_recovery_retries` defaults to **5**, accepts 0–10, and **0 disables**
 it. Its allowance is separate from ordinary same-session handoff repairs, including

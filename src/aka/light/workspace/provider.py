@@ -33,16 +33,21 @@ class ManagedCandidateWorkspace(GitCandidateWorkspace):
         )
         # The shared initializer now seals its explicit contributions itself.
         # Select Light guidance before that commit, not as a later dirty edit.
-        return super().prepare_sol(workspace, replace(content, readme=readme),
+        result = super().prepare_sol(workspace, replace(content, readme=readme),
             problem_files=problem_files,
             harness=WorkspaceFile("test_kernel.py", source=resource("reference/test_kernel.py")),
             runtime_files=(
                 WorkspaceFile("CLAUDE.md", source=resource("reference/CLAUDE.md")),
                 WorkspaceFile("profile_driver.py", source=profile_driver_script()),
             ))
+        from aka.light.workspace.auxiliary import ensure_workspace_scratch
+        ensure_workspace_scratch(workspace)
+        return result
 
     def initialize_at(self, workspace, content):
         workspace.mkdir(parents=True, exist_ok=True)
+        from aka.light.workspace.auxiliary import ensure_workspace_scratch
+        ensure_workspace_scratch(workspace)
         self.install_files(workspace, content.files)
         for name in ("CLAUDE.md", "test_kernel.py"):
             publish(workspace, name, resource(f"reference/{name}").read_bytes())

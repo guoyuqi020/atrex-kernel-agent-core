@@ -172,8 +172,13 @@ def _run_bounded(
     from aka.light.agent.home import prepare_agent_environment
     from aka.light.agent.sandbox import wrap_agent_command
     from aka.light.agent.session_capture import clear_capture, finish_session_capture, start_session_capture
+    from aka.light.workspace.auxiliary import ensure_workspace_scratch
 
     clear_capture()
+    # Agent prompts and Runtime examples may redirect directly into scratch/.
+    # Create it at the final launch boundary as well as workspace initialization,
+    # covering restored and older workspaces without clearing resumed contents.
+    ensure_workspace_scratch(cwd)
     control = session_control or SessionControl()
     budget = current_budget()
     default_timeout = float((env or {}).get("ATREX_AGENT_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))

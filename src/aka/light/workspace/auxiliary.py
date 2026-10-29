@@ -24,6 +24,20 @@ WORKSPACE_LAYOUTS = {
 }
 
 
+def ensure_workspace_scratch(workspace: Path) -> None:
+    """Ensure every Agent view starts with a private writable scratch directory."""
+    scratch = workspace.resolve() / "scratch"
+    if scratch.is_symlink():
+        raise ValueError("Agent scratch path cannot be a symlink")
+    try:
+        scratch.mkdir(mode=0o700, exist_ok=True)
+    except FileExistsError as error:
+        raise ValueError("Agent scratch path must be a directory") from error
+    if not scratch.is_dir():
+        raise ValueError("Agent scratch path must be a directory")
+    scratch.chmod(0o700)
+
+
 def reset_episode_scratch(workspace: Path) -> None:
     """Only at a new Episode boundary, never on a same-Episode retry/resume."""
     scratch = workspace.resolve() / "scratch"
@@ -31,7 +45,7 @@ def reset_episode_scratch(workspace: Path) -> None:
         scratch.unlink()
     elif scratch.exists():
         shutil.rmtree(scratch)
-    scratch.mkdir(mode=0o700)
+    ensure_workspace_scratch(workspace)
 
 
 class AuxiliaryWorkspace:
