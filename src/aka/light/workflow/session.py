@@ -19,6 +19,10 @@ from aka.light.workflow.output_limit import (
     output_limit_continuation_prompt,
 )
 from aka.light.agent.runtime.adapter import ClaudeAdapter, PiAdapter
+from aka.light.agent.runtime.process import (
+    OUTPUT_LIMIT_EXIT_STATUS,
+    OUTPUT_LIMIT_INTERRUPT_MARKER,
+)
 from aka.light.agent.claude_tools import (
     claim_outer_output_limit_recovery,
     output_limit_recovery_count,
@@ -268,6 +272,14 @@ class LongSessionRunner:
                     PiAdapter().classify_terminal_failure(stdout, active_session_id)
                     if self.agent_cli == "pi" else (None, None)
                 )
+                if (
+                    self.agent_cli == "claude"
+                    and exit_status == OUTPUT_LIMIT_EXIT_STATUS
+                    and OUTPUT_LIMIT_INTERRUPT_MARKER in stderr
+                ):
+                    failure_kind, provider_error_code = (
+                        "output_limit", "max_output_tokens"
+                    )
                 dependency_policy_violation = _dependency_policy_violation(
                     exit_status, stderr
                 )
@@ -448,9 +460,9 @@ class LongSessionRunner:
                         completion_diagnosis = (
                             "Claude max_output_tokens: response output limit exceeded; "
                             f"{output_limit_recoveries}/{output_limit_recovery_retries} "
-                            "fresh-session recoveries used"
+                            "same-session recoveries used"
                         )
-                        if (exit_status != 1
+                        if (exit_status not in {1, OUTPUT_LIMIT_EXIT_STATUS}
                                 or output_limit_recoveries >= output_limit_recovery_retries):
                             break
                         if not native.supports_resume or not active_session_id:

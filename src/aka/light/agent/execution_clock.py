@@ -270,9 +270,11 @@ class SessionControl:
 
 
 class ActiveCommunication:
-    """Drain once to EOF while the caller supervises active-time and suspension."""
-    def __init__(self, communicate, process, control):
+    """Drain once to EOF while supervising active-time and terminal interrupts."""
+    def __init__(self, communicate, process, control, *, interrupt_when=None):
         self.process, self.control = process, control
+        self.interrupt_when = interrupt_when
+        self.interrupted = False
         self.done = threading.Event()
         self.result = None
         self.error = None
@@ -291,6 +293,15 @@ class ActiveCommunication:
     def __call__(self, timeout=None):
         deadline = timeout  # Total invocation active time, including process setup.
         while not self.done.wait(0.05):
+            if (
+                not self.interrupted
+                and self.interrupt_when is not None
+                and self.interrupt_when()
+            ):
+                self.interrupted = True
+                # The native response is already persisted. Terminate the
+                # stuck CLI wrapper so its owner can resume the same session.
+                self.control.kill()
             self.control.poll()
             if deadline is not None and self.control.active_seconds() >= deadline:
                 raise subprocess.TimeoutExpired(self.process.args, timeout)

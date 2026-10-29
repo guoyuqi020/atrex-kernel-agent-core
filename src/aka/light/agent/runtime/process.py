@@ -4,6 +4,7 @@ import os
 import signal
 import subprocess
 import threading
+import uuid
 from pathlib import Path
 from aka.legacy.agent import process as legacy_process
 from aka.legacy.agent.process import (
@@ -20,6 +21,11 @@ from aka.light.agent.dependency_policy import (
 )
 
 ENVIRONMENT_TEMPFAIL = 75
+OUTPUT_LIMIT_EXIT_STATUS = 91
+OUTPUT_LIMIT_INTERRUPT_MARKER = (
+    "[orchestrator] Claude max_output_tokens observed; "
+    "terminated CLI wrapper for same-session recovery"
+)
 TRUSTED_SANDBOX_ENTRYPOINTS = frozenset({
     (Path(__file__).resolve().parents[2] / "runtime" / "client" / "sandbox.py").resolve(),
 })
@@ -201,8 +207,36 @@ def _run_bounded(
         cwd, dict(os.environ if env is None else env),
         (env or {}).get("ATREX_TELEMETRY_ATTEMPT_ID") or "\0".join(command),
     )
-    if environment_values.get("ATREX_AKA_RUNTIME_URL") or budget is not None:
-        from aka.light.agent.claude_tools import foreground_command
+    output_limit_signal = None
+    if Path(command[0]).name == "claude":
+        from aka.light.agent.claude_tools import (
+            OUTPUT_LIMIT_RECOVERY_ENV,
+            OUTPUT_LIMIT_SIGNAL_ENV,
+            OUTPUT_LIMIT_WORKSPACE_ENV,
+        )
+        try:
+            recovery_enabled = int(
+                environment_values.get(OUTPUT_LIMIT_RECOVERY_ENV, "0")
+            ) > 0
+        except (TypeError, ValueError):
+            recovery_enabled = False
+        if recovery_enabled:
+            output_limit_signal = (
+                cwd
+                / ".atrex_long_horizon"
+                / "output-limit-signals"
+                / f"{uuid.uuid4().hex}.json"
+            )
+            output_limit_signal.unlink(missing_ok=True)
+            environment_values[OUTPUT_LIMIT_SIGNAL_ENV] = str(output_limit_signal)
+            environment_values[OUTPUT_LIMIT_WORKSPACE_ENV] = str(cwd.resolve())
+    if (
+        environment_values.get("ATREX_AKA_RUNTIME_URL")
+        or budget is not None
+        or output_limit_signal is not None
+    ):
+        from aka.light.agent.claude_tools import FOREGROUND_HOOKS_ENV, foreground_command
+        environment_values[FOREGROUND_HOOKS_ENV] = "1"
         # Runtime calls remain foreground, and the same invocation-local hook
         # carries active-time reminders even in stages without Runtime tools.
         command = foreground_command(
@@ -264,11 +298,26 @@ def _run_bounded(
     completed = False
     timed_out = False
     interrupted = False
+    output_limit_detected = False
     raw_communicate = (
         (lambda timeout=None: capture.communicate(proc, timeout))
         if capture is not None else proc.communicate
     )
-    communicate = ActiveCommunication(raw_communicate, proc, control)
+    def output_limit_ready():
+        return bool(
+            (output_limit_signal is not None and output_limit_signal.is_file())
+            or (
+                capture is not None
+                and capture.output_limit_detected.is_set()
+            )
+        )
+
+    communicate = ActiveCommunication(
+        raw_communicate,
+        proc,
+        control,
+        interrupt_when=(output_limit_ready if output_limit_signal is not None else None),
+    )
     try:
         stdout, stderr = communicate(timeout=limit)
         completed = True
@@ -295,6 +344,14 @@ def _run_bounded(
             finish_session_capture(
                 capture, exit_status=proc.returncode, timed_out=timed_out, interrupted=interrupted,
             )
+            output_limit_detected = bool(
+                communicate.interrupted
+                or (output_limit_signal is not None and output_limit_signal.is_file())
+                or (
+                    capture is not None
+                    and capture.output_limit_detected.is_set()
+                )
+            )
             # A killed/failed auxiliary session may leave a syntactically valid
             # but incomplete report. Only normal, successful completion can
             # replace the caller's report; timeout draining is not completion.
@@ -306,6 +363,7 @@ def _run_bounded(
                 and proc.returncode == 0
                 and not dependency_violations
                 and not environment_failures
+                and not output_limit_detected
             ):
                 view.publish()
             elif (view is not None and view.role == "numerical-review" and timed_out
@@ -320,6 +378,8 @@ def _run_bounded(
         finally:
             if view is not None:
                 view.close()
+            if output_limit_signal is not None:
+                output_limit_signal.unlink(missing_ok=True)
     returncode = proc.returncode
     if dependency_violations:
         policy_message = (
@@ -332,6 +392,11 @@ def _run_bounded(
         # from an external shutdown. Pair the dedicated status with the
         # explicit marker above so ordinary shell exit 126 remains ordinary.
         returncode = 126
+    elif output_limit_detected:
+        stderr = (stderr or "") + ("\n" if stderr else "") + (
+            OUTPUT_LIMIT_INTERRUPT_MARKER + "\n"
+        )
+        returncode = OUTPUT_LIMIT_EXIT_STATUS
     if timed_out:
         stderr = (stderr or "") + (
             f"\n[orchestrator] Agent active-time limit exceeded ({limit:g}s); "

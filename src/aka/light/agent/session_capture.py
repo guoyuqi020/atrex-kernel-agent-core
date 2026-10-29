@@ -46,6 +46,29 @@ class CapturedObservation(NamedTuple):
 _LAST_CAPTURE: ContextVar[tuple[str, dict] | None] = ContextVar("aka_session_capture", default=None)
 
 
+def _claude_root_output_limit(text: str) -> bool:
+    """Recognize the native root response that precedes StopFailure."""
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if (
+            not isinstance(event, dict)
+            or event.get("type") != "assistant"
+            or event.get("parent_tool_use_id") is not None
+        ):
+            continue
+        message = event.get("message")
+        if isinstance(message, dict) and message.get("stop_reason") == "max_tokens":
+            return True
+        if event.get("isApiErrorMessage") is True and {
+            event.get("error"), event.get("api_error")
+        } & {"max_output_tokens"}:
+            return True
+    return False
+
+
 def clear_capture() -> None:
     _LAST_CAPTURE.set(None)
 
@@ -194,6 +217,9 @@ class SessionCapture:
         self.started_at = datetime.now(UTC).isoformat()
         self._lock = threading.RLock()
         self._stop = threading.Event()
+        # This is a functional fallback for Claude versions or compatible
+        # endpoints that persist max_tokens but fail to emit StopFailure.
+        self.output_limit_detected = threading.Event()
         self._readers: list[threading.Thread] = []
         self._monitor: threading.Thread | None = None
         # Functional output has the same full-stream contract as Popen.communicate.
@@ -268,6 +294,12 @@ class SessionCapture:
         return self._tails[name]
 
     def _feed_usage(self, path: str, text: str, *, previous: bool = False) -> None:
+        if (
+            self.backend == "claude"
+            and not previous
+            and _claude_root_output_limit(text)
+        ):
+            self.output_limit_detected.set()
         try:
             self._usage.feed(path, text, previous=previous)
             self._usage_dirty = True
