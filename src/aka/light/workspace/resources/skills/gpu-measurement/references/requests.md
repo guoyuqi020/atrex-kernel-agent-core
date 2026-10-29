@@ -73,10 +73,9 @@ python3 tools/sandbox.py --kind disassemble --format ptx --no-sync
 python3 tools/sandbox.py --kind env
 ```
 
-For ABBA, optional `--comparison-run-timeout SECONDS` controls each run and must fit the
-configured allocation's complete schedule. Without that option, each run uses the smaller of
-the 300-second Performance timeout and its equal share of the configured allocation. Acceptance can
-reuse only an exact matching request, including baseline bytes, path, repeats and run timeout.
+Runtime owns the timeout for candidate initialization/correctness, one Shape
+Performance phase, and each ABBA A/B run. Agents cannot override it. Acceptance can
+reuse only an exact matching request, including baseline bytes, path and repeats.
 The injected acceptance block supplies the exact command for the current
 configuration, including Shape batch size, and a `kernel-read` command for the committed
 incumbent. Use that block instead of this generic example when seeking acceptance reuse.

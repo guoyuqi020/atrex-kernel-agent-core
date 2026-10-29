@@ -33,7 +33,7 @@ class WorkflowLaunch:
                 raise TypeError(f"{name} must be a string")
         for name, value in (("timeout", runtime.timeout), ("verify_repeats", runtime.verify_repeats),
                             ("shape_batch_size", runtime.shape_batch_size),
-                            ("verify_run_timeout", runtime.verify_run_timeout),
+                            ("evaluation_step_timeout", runtime.evaluation_step_timeout),
                             ("fast_trials", settings.fast_trials),
                             ("framework_baseline_timeout", settings.framework_baseline_timeout)):
             if type(value) is not int or value <= 0:
@@ -46,7 +46,7 @@ class WorkflowLaunch:
             )
         if type(settings.resume_framework_candidate) is not bool:
             raise TypeError("resume_framework_candidate must be a boolean")
-        if 2 * runtime.verify_repeats * runtime.verify_run_timeout + 30 > runtime.timeout:
+        if 2 * runtime.verify_repeats * runtime.evaluation_step_timeout + 30 > runtime.timeout:
             raise ValueError("ABBA verification must fit the configured allocation timeout")
         if not 0 <= runtime.min_improvement_pct < 100:
             raise ValueError("min_improvement_pct must be in [0, 100)")

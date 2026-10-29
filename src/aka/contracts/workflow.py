@@ -8,7 +8,7 @@ from collections.abc import Callable
 
 from .evaluation import (
     DEFAULT_ABBA_REPEATS,
-    DEFAULT_ABBA_RUN_TIMEOUT,
+    DEFAULT_EVALUATION_STEP_TIMEOUT,
     derived_evaluation_timeout,
 )
 
@@ -73,7 +73,7 @@ class CampaignRuntimeSettings:
     # An explicit value remains an advanced operator override.
     timeout: int | None = None
     verify_repeats: int = DEFAULT_ABBA_REPEATS
-    verify_run_timeout: int = DEFAULT_ABBA_RUN_TIMEOUT
+    evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT
     min_improvement_pct: float = 0.0
     shape_batch_size: int = 4
 
@@ -81,8 +81,13 @@ class CampaignRuntimeSettings:
         if self.timeout is None:
             object.__setattr__(self, "timeout", derived_evaluation_timeout(
                 repeats=self.verify_repeats,
-                per_run_timeout=self.verify_run_timeout,
+                step_timeout=self.evaluation_step_timeout,
             ))
+        if (
+            type(self.evaluation_step_timeout) is not int
+            or self.evaluation_step_timeout <= 0
+        ):
+            raise ValueError("evaluation_step_timeout must be a positive integer")
         if type(self.shape_batch_size) is not int or self.shape_batch_size <= 0:
             raise ValueError("shape_batch_size must be a positive integer")
 

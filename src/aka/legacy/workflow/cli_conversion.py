@@ -2,7 +2,8 @@
 from __future__ import annotations
 import argparse, json, os, re, sys
 from pathlib import Path
-from aka.legacy.workflow.constants import AGENT_CLI_CHOICES, DEFAULT_CONVERT_AFTER, DEFAULT_FAST_EPISODES, DEFAULT_FAST_TRIALS, DEFAULT_HANDOFF_RESUMES, DEFAULT_VERIFY_REPEATS, DEFAULT_VERIFY_RUN_TIMEOUT, FRAMEWORK_BASELINE_MODES, FRAMEWORK_BASELINE_TIMEOUT_S, GATEWAY_CANDIDATE_RECOVERY_MODES
+from aka.legacy.workflow.constants import AGENT_CLI_CHOICES, DEFAULT_CONVERT_AFTER, DEFAULT_FAST_EPISODES, DEFAULT_FAST_TRIALS, DEFAULT_HANDOFF_RESUMES, DEFAULT_VERIFY_REPEATS, FRAMEWORK_BASELINE_MODES, FRAMEWORK_BASELINE_TIMEOUT_S, GATEWAY_CANDIDATE_RECOVERY_MODES
+from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT
 from aka.legacy.execution.recovery import DEFAULT_SSH_HEALTH_COMMAND
 from aka.legacy.task.hardware import _workspace_slug
 from aka.legacy.workflow.policy import OPTIMIZATION_MODE_CHOICES
@@ -232,12 +233,14 @@ def parse_arguments(argv):
         help="Incumbent/candidate ABBA repeat pairs in one gateway allocation (default: 2).",
     )
     ap.add_argument(
-        "--verify-run-timeout",
+        "--evaluation-step-timeout",
         type=int,
-        default=DEFAULT_VERIFY_RUN_TIMEOUT,
-        help=f"Evaluator budget for each ABBA run (default: {DEFAULT_VERIFY_RUN_TIMEOUT}s, "
-        "matching the Performance timeout; the enclosing allocation is derived from "
-        "the complete schedule).",
+        default=DEFAULT_EVALUATION_STEP_TIMEOUT,
+        help=(
+            "Unified seconds limit for candidate initialization/correctness, one "
+            "Shape Performance phase, and one ABBA A/B run "
+            f"(default: {DEFAULT_EVALUATION_STEP_TIMEOUT})."
+        ),
     )
     ap.add_argument(
         "--min-improvement-pct",
@@ -326,15 +329,15 @@ def parse_arguments(argv):
         ap.error("--verify-repeats must be positive")
     if args.shape_batch_size <= 0:
         ap.error("--verify-shape-batch-size must be positive")
-    if args.verify_run_timeout <= 0:
-        ap.error("--verify-run-timeout must be positive")
+    if args.evaluation_step_timeout <= 0:
+        ap.error("--evaluation-step-timeout must be positive")
     if not 0.0 <= args.min_improvement_pct < 100.0:
         ap.error("--min-improvement-pct must be in [0, 100)")
     if (args.sandbox_timeout is not None
-            and args.verify_run_timeout * args.verify_repeats * 2 + 30 > args.sandbox_timeout):
+            and args.evaluation_step_timeout * args.verify_repeats * 2 + 30 > args.sandbox_timeout):
         ap.error(
             "ABBA verification must fit one sandbox allocation: "
-            "2 * --verify-repeats * --verify-run-timeout + 30 <= --sandbox-timeout"
+            "2 * --verify-repeats * --evaluation-step-timeout + 30 <= --sandbox-timeout"
         )
     if args.framework_baseline_timeout <= 0:
         ap.error("--framework-baseline-timeout must be positive")

@@ -34,7 +34,6 @@ class RecordedABBAValidator(GatewayABBAValidator):
             "--kind", "run", "--mode", "full", "--no-sync",
             "--baseline-path", self.BASELINE_PATH,
             "--comparison-repeats", str(self.repeats),
-            "--comparison-run-timeout", str(self.per_run_timeout),
             "--shape-batch-size", str(self.shape_batch_size),
         ]
 
@@ -57,9 +56,9 @@ leave the complete candidate in place and run these exact commands
 
 The first command copies this Episode's committed incumbent, not the current draft; it is
 safe to use after edits or resume. Do not modify `{self.BASELINE_PATH}` before the comparison.
-The second command matches the Supervisor's configured ABBA repeats, per-run timeout and
-Shape batch size. Runtime applies the same five-case correctness policy used by ordinary
-Evaluate and the candidate gate. Do not add
+The second command matches the Supervisor's configured ABBA repeats and Shape batch size.
+Runtime injects the configured step timeout and applies the same five-case correctness
+policy used by ordinary Evaluate and the candidate gate. Do not add
 command/input/Shape/seed/benchmark/dependency overrides.
 The Runtime supplies the evaluator, full workload and target; private inputs stay private.
 

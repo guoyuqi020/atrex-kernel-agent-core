@@ -22,7 +22,10 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from aka.contracts.evaluation import derived_evaluation_timeout
+from aka.contracts.evaluation import (
+    DEFAULT_EVALUATION_STEP_TIMEOUT,
+    derived_evaluation_timeout,
+)
 
 from aka.light.evaluation.gateway import (
     EPISODE_EVALUATIONS_PATH,
@@ -219,6 +222,7 @@ def scrub_environment(environment: dict[str, str]) -> dict[str, str]:
 class RuntimeConfig:
     hardware: str
     timeout: int = derived_evaluation_timeout()
+    evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT
     url: str = ""
     profile: str = ""
     ssh: str = ""
@@ -244,6 +248,13 @@ class RuntimeConfig:
     def __post_init__(self):
         if type(self.pause_agent_during_requests) is not bool:
             raise TypeError("Runtime pause_agent_during_requests must be a boolean")
+        if (
+            type(self.evaluation_step_timeout) is not int
+            or self.evaluation_step_timeout <= 0
+        ):
+            raise ValueError(
+                "Runtime evaluation_step_timeout must be a positive integer"
+            )
         for name in ("request_timeout", "queue_timeout"):
             value = getattr(self, name)
             if name == "request_timeout" and value is None:
@@ -254,7 +265,8 @@ class RuntimeConfig:
     def command(self, workspace: Path) -> list[str]:
         result = [sys.executable, str(ROOT / "evaluation/gateway.py"),
                   "--workspace", str(workspace), "--hardware", self.hardware,
-                  "--timeout", str(self.timeout)]
+                  "--timeout", str(self.timeout),
+                  "--evaluation-step-timeout", str(self.evaluation_step_timeout)]
         for flag, value in (("--url", self.url), ("--gateway-profile", self.profile), ("--ssh", self.ssh)):
             if value:
                 result += [flag, value]

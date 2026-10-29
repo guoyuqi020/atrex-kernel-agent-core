@@ -100,7 +100,7 @@ class LightWorkflow:
             url=connection.url,
             timeout=runtime.timeout,
             verify_repeats=runtime.verify_repeats,
-            verify_run_timeout=runtime.verify_run_timeout,
+            evaluation_step_timeout=runtime.evaluation_step_timeout,
             min_improvement_pct=runtime.min_improvement_pct,
             ssh=connection.ssh,
             ssh_init=connection.ssh_init,

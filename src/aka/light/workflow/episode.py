@@ -1753,6 +1753,9 @@ class LongHorizonCampaign:
             ssh_init=self.base_campaign.sandbox_ssh_init,
             health_command=self.base_campaign.sandbox_health_command,
             timeout=self.base_campaign.sandbox_timeout,
+            repeats=self.base_campaign.verify_repeats,
+            per_run_timeout=self.base_campaign.evaluation_step_timeout,
+            min_improvement_pct=self.base_campaign.min_improvement_pct,
             private_reference_dir=self.base_campaign.private_reference_dir,
         )
         recovered_episode = self._recover_interrupted(

@@ -12,6 +12,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT
+
 from aka.legacy.evaluation.abba import verification_schedule
 from aka.light.evaluation.result_conversion import compile_failures
 from aka.light.evaluation.shapes import (
@@ -360,6 +362,9 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
     request = gateway.build_typed_request(
         workspace, args.hardware, args.timeout, args.env, command, "run", evaluation_mode="full",
         requirements=args.requirement or (), deps_mode=args.deps_mode,
+        evaluation_step_timeout=getattr(
+            args, "evaluation_step_timeout", DEFAULT_EVALUATION_STEP_TIMEOUT
+        ),
     )
     if not baseline.strip() or not request["candidate"]:
         raise ValueError("Native ABBA requires two non-empty Kernel sources")

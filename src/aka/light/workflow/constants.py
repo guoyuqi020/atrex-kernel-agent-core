@@ -11,7 +11,7 @@ from aka.legacy.task.problem.resources import native_harness_script
 from aka.legacy.acceptance.review import DEPENDENCY_REVIEW_SCHEMA_VERSION
 from aka.contracts.evaluation import (
     DEFAULT_ABBA_REPEATS,
-    DEFAULT_ABBA_RUN_TIMEOUT,
+    DEFAULT_EVALUATION_STEP_TIMEOUT,
     derived_evaluation_timeout,
 )
 from aka.light.workspace.resource_catalog import resource
@@ -39,7 +39,6 @@ SUPPLEMENTAL_PENDING_PREFIX = "Supplemental validation is incomplete"
 DEFAULT_HANDOFF_RESUMES = 2
 DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES = 5
 DEFAULT_VERIFY_REPEATS = DEFAULT_ABBA_REPEATS
-DEFAULT_VERIFY_RUN_TIMEOUT = DEFAULT_ABBA_RUN_TIMEOUT
 FRAMEWORK_BASELINE_FILE = "framework_baseline.json"
 FRAMEWORK_BASELINE_VERSION = (
     1  # the framework baseline always occupies v1, retries overwrite it

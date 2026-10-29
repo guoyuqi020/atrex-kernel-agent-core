@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from aka.contracts.evaluation import derived_evaluation_timeout
 from aka.legacy.task.problem.layout import agent_visible_operator_files
 from aka.legacy.task.problem.native_harness import _parser as native_harness_parser
 from aka.light.acceptance.provider import candidate_acceptance_argv
@@ -35,7 +36,7 @@ from aka.light.execution.gateway_jobs import (
     execute_job,
     retry_kind,
 )
-from aka.light.runtime.server import SupervisorRuntime
+from aka.light.runtime.server import RuntimeConfig, SupervisorRuntime
 from aka.light.runtime.request_feedback import gateway_schema
 from aka.light.workflow.bootstrap import Campaign, framework_baseline_validation_command
 from aka.light.workflow.context import session_execution_policy
@@ -45,16 +46,22 @@ from aka.light.workflow.session_io import _evaluation_performance_timeout
 
 
 class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
+    def test_one_runtime_step_timeout_drives_gateway_request(self):
+        self.assertEqual(derived_evaluation_timeout(), 1230)
+        command = RuntimeConfig("L20D").command(Path("/tmp/workspace"))
+        self.assertEqual(
+            command[command.index("--evaluation-step-timeout") + 1], "300"
+        )
+        parser = build_parser()
+        arguments = parser.parse_args(["--hardware", "L20D"])
+        self.assertEqual(arguments.evaluation_step_timeout, 300)
+
     def test_eval_timeout_scales_with_actual_shape_count(self):
         # Only the sequential performance phase repeats.  Fixed candidate,
         # correctness, queue and cleanup budgets remain singletons.
-        self.assertEqual(shape_request_timeout(1800, 5), 3000)
-        self.assertEqual(shape_request_timeout(1800, 3), 2400)
-        self.assertEqual(
-            shape_request_timeout(1800, 5, performance_timeout=1800),
-            9000,
-        )
-        self.assertEqual(effective_shape_batch_size(1800, 5, 120), 5)
+        self.assertEqual(shape_request_timeout(1230, 5), 2430)
+        self.assertEqual(shape_request_timeout(1230, 3), 1830)
+        self.assertEqual(effective_shape_batch_size(1230, 5, 120), 5)
         self.assertEqual(effective_shape_batch_size(3000, 5, 120), 5)
         self.assertEqual(
             effective_shape_batch_size(
@@ -69,19 +76,19 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
 
     def test_only_request_performance_work_scales_by_shape(self):
         self.assertEqual(
-            _evaluation_performance_timeout(["python3", "test_kernel.py"], 1800),
+            _evaluation_performance_timeout(["python3", "test_kernel.py"], 300),
             300,
         )
         self.assertEqual(
             _evaluation_performance_timeout(
-                ["python3", "test_kernel.py", "--version", "v0"], 1800
+                ["python3", "test_kernel.py", "--version", "v0"], 300
             ),
-            1800,
+            300,
         )
         self.assertEqual(
             _evaluation_performance_timeout(
                 ["python3", "test_kernel.py", "--baseline-path", "v0.py"],
-                1800,
+                300,
             ),
             1200,
         )
@@ -89,9 +96,9 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             _evaluation_performance_timeout(
                 [
                     "python3", "test_kernel.py", "--baseline-path", "v0.py",
-                    "--comparison-repeats", "4", "--comparison-run-timeout", "500",
+                    "--comparison-repeats", "4",
                 ],
-                1800,
+                500,
             ),
             4000,
         )
@@ -157,6 +164,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             requirement=[], deps_mode="auto", evaluation_input_path=None,
             evaluation_shapes_path=None, evaluation_mode=None, version=None,
             multi_seed=None, shape_id=[], timed_runs=None, shape_batch_size=5,
+            evaluation_step_timeout=300,
             dry_run=False, url=None, gateway_profile="prod",
         )
         with (
@@ -398,6 +406,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         parser = build_parser()
         schema = gateway_schema("run", parser)
         self.assertNotIn("--multi-seed", schema["cli_options"])
+        self.assertNotIn("--evaluation-step-timeout", schema["cli_options"])
 
     def test_supervisor_gates_do_not_expose_multi_seed(self):
         framework = framework_baseline_validation_command(1, atrex_bench=True)
@@ -549,7 +558,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertNotIn("rtol", request["options"])
         self.assertNotIn("correctness_max_rel_l2", request["options"])
 
-    def test_v0_uses_complete_per_shape_performance_timeout(self):
+    def test_v0_and_candidates_share_300_second_performance_timeout(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
             (workspace / "kernel.py").write_text("class Model: pass\n")
@@ -578,7 +587,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 "run",
             )
 
-        self.assertEqual(v0["runner_overrides"]["perf_timeout_s"], 1800)
+        self.assertEqual(v0["runner_overrides"]["perf_timeout_s"], 300)
         self.assertEqual(candidate["runner_overrides"]["perf_timeout_s"], 300)
 
     def test_native_harness_has_no_light_owned_tolerance_switches(self):

@@ -30,7 +30,7 @@ from aka.light.workflow.constants import (
     DEFAULT_CONVERT_AFTER,
     DEFAULT_HANDOFF_RESUMES,
     DEFAULT_VERIFY_REPEATS,
-    DEFAULT_VERIFY_RUN_TIMEOUT,
+    DEFAULT_EVALUATION_STEP_TIMEOUT,
     DEPENDENCY_REVIEW_PROMPT,
     DEPENDENCY_REVIEW_SCHEMA_VERSION,
     DEPENDENCY_REVIEW_TIMEOUT_S,
@@ -294,7 +294,7 @@ class Campaign:
     handoff_resumes: int = DEFAULT_HANDOFF_RESUMES
     production_review_timeout: int = DEPENDENCY_REVIEW_TIMEOUT_S
     verify_repeats: int = DEFAULT_VERIFY_REPEATS
-    verify_run_timeout: int = DEFAULT_VERIFY_RUN_TIMEOUT
+    evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT
     min_improvement_pct: float = 0.0
     v1_ask_codex: bool = False
     v1_ask_qoder: bool = False
@@ -315,7 +315,7 @@ class Campaign:
             from aka.contracts.evaluation import derived_evaluation_timeout
             self.sandbox_timeout = derived_evaluation_timeout(
                 repeats=self.verify_repeats,
-                per_run_timeout=self.verify_run_timeout,
+                step_timeout=self.evaluation_step_timeout,
             )
         if sum(
             bool(value)
@@ -480,6 +480,7 @@ class Campaign:
             raise SystemExit(f"orchestrator: {error}") from None
         self._supervisor_runtime = self.tool_runtime.open(RuntimeConfig(
             hardware=self.sandbox_hardware or self.platform, timeout=self.sandbox_timeout,
+            evaluation_step_timeout=self.evaluation_step_timeout,
             url=self.sandbox_url, profile=self.sandbox_profile, ssh=self.sandbox_ssh,
             ssh_init=self.sandbox_ssh_init, ssh_gpu=self.sandbox_ssh_gpu,
             health_command=self.sandbox_health_command, private_reference_dir=self.private_reference_dir,
@@ -1210,6 +1211,7 @@ class Campaign:
             health_command=self.sandbox_health_command,
             gateway_kind="run",
             private_reference_dir=self.private_reference_dir,
+            evaluation_step_timeout=self.evaluation_step_timeout,
             terminal_validation=True,
         )
         self._print_v0_evaluator_output(test)
@@ -2581,6 +2583,7 @@ class Campaign:
                 health_command=self.sandbox_health_command,
                 gateway_kind="run",
                 private_reference_dir=self.private_reference_dir,
+                evaluation_step_timeout=self.evaluation_step_timeout,
                 terminal_validation=True,
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -2894,7 +2897,7 @@ class Campaign:
             health_command=self.sandbox_health_command,
             timeout=self.sandbox_timeout,
             repeats=self.verify_repeats,
-            per_run_timeout=self.verify_run_timeout,
+            per_run_timeout=self.evaluation_step_timeout,
             min_improvement_pct=self.min_improvement_pct,
             private_reference_dir=self.private_reference_dir,
         )

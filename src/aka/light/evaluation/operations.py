@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from aka.light.evaluation.policy import PERFORMANCE_TIMEOUT, validate_abba_repeats
+from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT
+from aka.light.evaluation.policy import validate_abba_repeats
 
 from aka.light.evaluation.projection import (
     GATEWAY_ERROR_PREFIX,
@@ -26,6 +27,9 @@ def diagnostic(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
         workspace, args.hardware, args.timeout, args.env, [], args.kind,
         arch=args.arch, sanitize=args.sanitize, disassembly_format=args.disassembly_format,
         requirements=args.requirement or (), deps_mode=args.deps_mode,
+        evaluation_step_timeout=getattr(
+            args, "evaluation_step_timeout", DEFAULT_EVALUATION_STEP_TIMEOUT
+        ),
     )
     if args.dry_run:
         print(json.dumps({"kind": args.kind, "candidate_bytes": len(request["candidate"].encode())}))
@@ -60,14 +64,13 @@ def validate_comparison(args) -> None:
 
 def comparison_run_timeout(args) -> int:
     available = (args.timeout - 30) // (2 * args.comparison_repeats)
-    requested = getattr(args, "comparison_run_timeout", None)
-    # Request-level repeat overrides are valid without a matching allocation
-    # override. Preserve the ordinary Performance timeout when it fits, and
-    # otherwise divide the enclosing allocation across the complete schedule.
-    # An explicit per-run timeout remains strict and is never silently reduced.
-    seconds = min(PERFORMANCE_TIMEOUT, available) if requested is None else requested
+    seconds = getattr(
+        args, "evaluation_step_timeout", DEFAULT_EVALUATION_STEP_TIMEOUT
+    )
     if seconds <= 0 or seconds > available:
-        raise ValueError("--comparison-run-timeout must be positive and fit the full ABBA allocation schedule")
+        raise ValueError(
+            "--evaluation-step-timeout must fit the full ABBA allocation schedule"
+        )
     return seconds
 
 

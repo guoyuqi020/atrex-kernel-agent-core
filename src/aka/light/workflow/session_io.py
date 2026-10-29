@@ -37,11 +37,11 @@ from aka.light.execution.recovery import (environment_state_file, raise_if_envir
 from aka.light.evaluation.hardware import hardware_vendor
 from aka.light.agent.recovery_processes import spawn_owned_session
 from aka.light.execution.config import queue_wait_grace
-from aka.light.evaluation.policy import (
-    PERFORMANCE_TIMEOUT,
-    SHAPE_BATCH_SIZE,
+from aka.light.evaluation.policy import SHAPE_BATCH_SIZE
+from aka.contracts.evaluation import (
+    DEFAULT_ABBA_REPEATS,
+    DEFAULT_EVALUATION_STEP_TIMEOUT,
 )
-from aka.contracts.evaluation import DEFAULT_ABBA_REPEATS
 from aka.light.evaluation.shapes import (
     effective_shape_batch_size,
     shape_request_timeout,
@@ -327,23 +327,13 @@ def _command_option(command: list[str], name: str) -> str | None:
     return value
 
 
-def _evaluation_performance_timeout(command: list[str], base_timeout: int) -> int:
+def _evaluation_performance_timeout(command: list[str], step_timeout: int) -> int:
     """Return only the sequential per-Shape performance work in a request."""
-    if _command_option(command, "--version") == "v0":
-        # V0 is trusted reference code and receives the configured long
-        # performance allowance rather than the Agent-candidate fast limit.
-        return base_timeout
     if _command_option(command, "--baseline-path") is not None:
         repeats_value = _command_option(command, "--comparison-repeats")
-        run_timeout_value = _command_option(command, "--comparison-run-timeout")
         repeats = int(repeats_value) if repeats_value is not None else DEFAULT_ABBA_REPEATS
-        run_timeout = (
-            int(run_timeout_value)
-            if run_timeout_value is not None
-            else PERFORMANCE_TIMEOUT
-        )
-        return 2 * repeats * run_timeout
-    return PERFORMANCE_TIMEOUT
+        return 2 * repeats * step_timeout
+    return step_timeout
 
 
 def _sandbox_command(
@@ -363,6 +353,7 @@ def _sandbox_command(
     private_reference_dir: Path | None = None,
     preflight: bool = False,
     terminal_validation: bool = False,
+    evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT,
 ) -> subprocess.CompletedProcess[str]:
     """Run the private GPU executor for trusted Supervisor verification."""
     if sum(bool(value) for value in (ssh, url, profile)) > 1:
@@ -378,6 +369,8 @@ def _sandbox_command(
         str(workspace),
         "--timeout",
         str(timeout),
+        "--evaluation-step-timeout",
+        str(evaluation_step_timeout),
     ]
     if url:
         cmd += ["--url", url]
@@ -423,7 +416,9 @@ def _sandbox_command(
         grace = 0 if uses_ssh else queue_wait_grace(environment)
         command_timeout = timeout
         if not uses_ssh and gateway_kind == "run":
-            performance_timeout = _evaluation_performance_timeout(command, timeout)
+            performance_timeout = _evaluation_performance_timeout(
+                command, evaluation_step_timeout
+            )
             shape_count = _evaluation_request_shape_count(
                 workspace,
                 private_reference_dir,

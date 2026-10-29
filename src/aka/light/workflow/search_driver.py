@@ -45,7 +45,7 @@ class EpisodeSearchDriver:
                   "repetitions": self.campaign.tool_runtime.measurement_repetitions,
                   "evaluation": {name: getattr(self.campaign, name) for name in (
                       "sandbox_hardware", "sandbox_profile", "sandbox_url", "sandbox_ssh",
-                      "sandbox_timeout", "verify_repeats", "verify_run_timeout", "min_improvement_pct")}}
+                      "sandbox_timeout", "verify_repeats", "evaluation_step_timeout", "min_improvement_pct")}}
         return hashlib.sha256(json.dumps(values, sort_keys=True, default=str).encode()).hexdigest()
 
     def bootstrap(self):
@@ -199,7 +199,7 @@ class EpisodeSearchDriver:
                 profile=child.sandbox_profile, url=child.sandbox_url, ssh=child.sandbox_ssh,
                 ssh_init=child.sandbox_ssh_init, health_command=child.sandbox_health_command,
                 timeout=child.sandbox_timeout, repeats=child.verify_repeats,
-                per_run_timeout=child.verify_run_timeout, min_improvement_pct=child.min_improvement_pct,
+                per_run_timeout=child.evaluation_step_timeout, min_improvement_pct=child.min_improvement_pct,
                 private_reference_dir=child.private_reference_dir)
             LongHorizonCampaign(base_campaign=child, max_episodes=episode,
                                 handoff_resumes=child.handoff_resumes, verifier=verifier,

@@ -14,14 +14,13 @@ from .problem import EvaluationInput
 # These are execution-policy defaults shared by the workflow configuration and
 # Light's native evaluator. The base allocation covers fixed request work and
 # one Shape; a multi-Shape shard adds only its repeated performance work.
-# Some production Shapes spend more than five minutes in input materialization
-# plus the first JIT touch. Keep candidate construction/correctness distinct
-# from the shorter steady-state performance budget.
-DEFAULT_CANDIDATE_TIMEOUT = 600
-DEFAULT_PERFORMANCE_TIMEOUT = 300
-# One A or B run uses the same default execution budget as an ordinary
-# performance measurement. Operators may still override either limit.
-DEFAULT_ABBA_RUN_TIMEOUT = DEFAULT_PERFORMANCE_TIMEOUT
+# One Runtime-owned step limit covers candidate initialization/correctness,
+# one Shape's Performance phase, and one A or B run.  Keep semantic aliases for
+# request construction, but do not maintain independent values.
+DEFAULT_EVALUATION_STEP_TIMEOUT = 300
+DEFAULT_CANDIDATE_TIMEOUT = DEFAULT_EVALUATION_STEP_TIMEOUT
+DEFAULT_PERFORMANCE_TIMEOUT = DEFAULT_EVALUATION_STEP_TIMEOUT
+DEFAULT_ABBA_RUN_TIMEOUT = DEFAULT_EVALUATION_STEP_TIMEOUT
 DEFAULT_ABBA_REPEATS = 2
 ABBA_SCHEDULING_OVERHEAD = 30
 MAX_TYPED_GATEWAY_JOB_TIMEOUT = 10_800
@@ -30,22 +29,18 @@ MAX_TYPED_GATEWAY_JOB_TIMEOUT = 10_800
 def derived_evaluation_timeout(
     *,
     repeats: int = DEFAULT_ABBA_REPEATS,
-    per_run_timeout: int = DEFAULT_ABBA_RUN_TIMEOUT,
-    candidate_timeout: int = DEFAULT_CANDIDATE_TIMEOUT,
-    performance_timeout: int = DEFAULT_PERFORMANCE_TIMEOUT,
+    step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT,
 ) -> int:
     """Return a base allocation large enough for one-Shape Eval or A/B/B/A."""
     values = {
         "repeats": repeats,
-        "per_run_timeout": per_run_timeout,
-        "candidate_timeout": candidate_timeout,
-        "performance_timeout": performance_timeout,
+        "step_timeout": step_timeout,
     }
     if any(type(value) is not int or value <= 0 for value in values.values()):
         raise ValueError("evaluation timing inputs must be positive integers")
     return max(
-        candidate_timeout + performance_timeout,
-        2 * repeats * per_run_timeout + ABBA_SCHEDULING_OVERHEAD,
+        2 * step_timeout,
+        2 * repeats * step_timeout + ABBA_SCHEDULING_OVERHEAD,
     )
 
 

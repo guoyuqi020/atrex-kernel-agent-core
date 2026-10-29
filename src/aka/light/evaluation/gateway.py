@@ -95,7 +95,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 from aka.contracts.evaluation import (  # noqa: E402
     DEFAULT_ABBA_REPEATS,
-    DEFAULT_ABBA_RUN_TIMEOUT,
+    DEFAULT_EVALUATION_STEP_TIMEOUT,
     derived_evaluation_timeout,
     typed_gateway_job_timeout,
 )
@@ -1263,6 +1263,7 @@ def build_typed_request(
     evaluation_input_path: str | None = None,
     evaluation_shapes_path: str | None = None,
     evaluation_mode: str | None = None,
+    evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT,
 ) -> dict[str, Any]:
     """Build a Gateway typed request without importing the agate package."""
     from aka.light.workspace.sources import entrypoint, policy_at
@@ -1444,10 +1445,7 @@ def build_typed_request(
     if kind == "run":
         request["mode"] = policy["mode"]
         request["lock_clocks"] = True
-        requested_version = _option_value(command, "--version")
-        request["runner_overrides"] = runner_overrides(
-            performance_timeout_s=timeout if requested_version == "v0" else None
-        )
+        request["runner_overrides"] = runner_overrides(evaluation_step_timeout)
         if requested_shape_ids:
             request["runner_overrides"]["shape_ids"] = requested_shape_ids
         if dependency_specs:
@@ -1961,6 +1959,21 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
         ),
     )
     parser.add_argument(
+        "--evaluation-step-timeout",
+        type=int,
+        default=int(
+            os.environ.get(
+                "ATREX_EVALUATION_STEP_TIMEOUT",
+                str(DEFAULT_EVALUATION_STEP_TIMEOUT),
+            )
+        ),
+        help=(
+            "Unified seconds limit for candidate initialization/correctness, "
+            "one Shape Performance phase, and one ABBA A/B run "
+            f"(default: {DEFAULT_EVALUATION_STEP_TIMEOUT})."
+        ),
+    )
+    parser.add_argument(
         "--sync",
         action="append",
         default=[],
@@ -2087,13 +2100,6 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
             default=DEFAULT_ABBA_REPEATS,
             metavar="N",
             help="Measurements per side, even 2..16 (default: 2 = one native A/B/B/A block).",
-        )
-    parser.add_argument(
-            "--comparison-run-timeout", type=int, default=None,
-            help=(
-                "Seconds per ABBA run; must fit the allocation timeout. "
-                f"Default: {DEFAULT_ABBA_RUN_TIMEOUT}, matching Performance timeout."
-            ),
         )
     parser.add_argument(
             "--input-path",
@@ -3791,8 +3797,6 @@ def validate_evaluation_options(args: argparse.Namespace) -> None:
             raise ValueError("--profile-shape-id requires --kind profile; use --shape-id for --kind run")
         if not args.profile_shape_id.strip():
             raise ValueError("--profile-shape-id must be a non-empty opaque ID from a saved evaluation")
-    if getattr(args, "comparison_run_timeout", None) is not None and not args.baseline_path:
-        raise ValueError("--comparison-run-timeout requires --baseline-path")
     options = _top_level_evaluation_options(args)
     if not options:
         return
@@ -3854,6 +3858,9 @@ def _run_typed_gateway(
             requirements=args.requirement or (), deps_mode=args.deps_mode,
             evaluation_input_path=args.evaluation_input_path,
             evaluation_shapes_path=args.evaluation_shapes_path, evaluation_mode=args.evaluation_mode,
+            evaluation_step_timeout=getattr(
+                args, "evaluation_step_timeout", DEFAULT_EVALUATION_STEP_TIMEOUT
+            ),
         )
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         if kind == "run" or source_tree or _requires_typed_request(args):
@@ -4234,6 +4241,8 @@ def _main(argv: list[str] | None = None) -> int:
         raise SystemExit("sandbox: --ssh-gpu requires --ssh")
     if args.timeout < 1:
         raise SystemExit("sandbox: --timeout must be positive")
+    if args.evaluation_step_timeout < 1:
+        raise SystemExit("sandbox: --evaluation-step-timeout must be positive")
     if args.shape_batch_size <= 0:
         raise SystemExit("sandbox: --shape-batch-size must be positive")
     try:

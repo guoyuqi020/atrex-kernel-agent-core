@@ -23,7 +23,7 @@ class ManagedCampaign(Campaign):
             work_dir=str(request.workspace.parent),
             atrex_bench_root=str(problem.evaluation.runtime_root or ""),
             verify_repeats=evaluation.verify_repeats,
-            verify_run_timeout=evaluation.verify_run_timeout,
+            evaluation_step_timeout=evaluation.evaluation_step_timeout,
             min_improvement_pct=evaluation.min_improvement_pct,
             problem_generation_timeout=settings.setup_timeout,
             v1_ask_codex="codex" in settings.framework_baseline_reviewers,
