@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from aka.contracts.evaluation import MAX_TYPED_GATEWAY_JOB_TIMEOUT
+from aka.contracts.evaluation import (
+    DEFAULT_PERFORMANCE_TIMEOUT,
+    MAX_TYPED_GATEWAY_JOB_TIMEOUT,
+)
 
 
 def _sort_key(shape_id: str) -> tuple[int, object]:
@@ -51,24 +54,34 @@ def batch_shape_ids(shape_ids: list[str], batch_size: int) -> list[list[str]]:
     ]
 
 
-def shape_request_timeout(per_shape_timeout: int, shape_count: int) -> int:
-    """Return the execution allocation for one concrete Shape request.
+def shape_request_timeout(
+    base_timeout: int,
+    shape_count: int,
+    *,
+    performance_timeout: int = DEFAULT_PERFORMANCE_TIMEOUT,
+) -> int:
+    """Return the allocation for one concrete multi-Shape request.
 
-    ``--timeout`` is a per-Shape budget. Atrex-Bench evaluates the selected
-    Shapes sequentially inside one Eval job, so a shard containing N Shapes
-    needs N times that budget.
+    ``base_timeout`` already covers the request's fixed work and one Shape's
+    performance phase.  Atrex-Bench measures the selected Shapes sequentially,
+    so only the performance phase is repeated for each additional Shape.  Do
+    not multiply candidate initialization, correctness, queueing, or cleanup.
     """
-    if type(per_shape_timeout) is not int or per_shape_timeout <= 0:
-        raise ValueError("Per-Shape timeout must be a positive integer")
+    if type(base_timeout) is not int or base_timeout <= 0:
+        raise ValueError("Base timeout must be a positive integer")
     if type(shape_count) is not int or shape_count <= 0:
         raise ValueError("Shape count must be a positive integer")
-    return per_shape_timeout * shape_count
+    if type(performance_timeout) is not int or performance_timeout <= 0:
+        raise ValueError("Performance timeout must be a positive integer")
+    return base_timeout + performance_timeout * (shape_count - 1)
 
 
 def effective_shape_batch_size(
-    per_shape_timeout: int,
+    base_timeout: int,
     requested_batch_size: int,
     queue_wait_grace: int,
+    *,
+    performance_timeout: int = DEFAULT_PERFORMANCE_TIMEOUT,
 ) -> int:
     """Fit Shape shards under Agate's typed-job deadline.
 
@@ -80,15 +93,17 @@ def effective_shape_batch_size(
         raise ValueError("Shape batch size must be a positive integer")
     if type(queue_wait_grace) is not int or queue_wait_grace < 0:
         raise ValueError("Queue wait grace must be a non-negative integer")
-    per_shape = shape_request_timeout(per_shape_timeout, 1)
     available = MAX_TYPED_GATEWAY_JOB_TIMEOUT - queue_wait_grace
-    if per_shape > available:
+    if base_timeout > available:
         raise ValueError(
             "One Shape exceeds Agate's 10800-second typed-job limit: "
-            f"per-Shape timeout {per_shape_timeout}s + queue grace "
+            f"base timeout {base_timeout}s + queue grace "
             f"{queue_wait_grace}s. Reduce the per-Shape timeout or queue grace."
         )
-    return min(requested_batch_size, available // per_shape)
+    if type(performance_timeout) is not int or performance_timeout <= 0:
+        raise ValueError("Performance timeout must be a positive integer")
+    max_shapes = 1 + (available - base_timeout) // performance_timeout
+    return min(requested_batch_size, max_shapes)
 
 
 def shape_batch_request(

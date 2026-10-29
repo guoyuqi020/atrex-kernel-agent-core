@@ -367,7 +367,9 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
     if tree:
         from .source_transport import attach
         attach(request, workspace, side="baseline", source=baseline_source)
-    request["runner_overrides"]["perf_timeout_s"] = comparison_run_timeout(args)
+    run_timeout = comparison_run_timeout(args)
+    request["runner_overrides"]["perf_timeout_s"] = run_timeout
+    batch_performance_timeout = 2 * args.comparison_repeats * run_timeout
     shapes = request_shape_ids(request)
     if not shapes:
         raise ValueError("Native ABBA requires at least one Shape")
@@ -405,7 +407,11 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
             record_store.retain_terminal_job(identity, retained)
 
     def run_batch(ids):
-        batch_timeout = shape_request_timeout(args.timeout, len(ids))
+        batch_timeout = shape_request_timeout(
+            args.timeout,
+            len(ids),
+            performance_timeout=batch_performance_timeout,
+        )
         batch = shape_batch_request(request, ids, timeout_s=batch_timeout)
         batch_args = copy.copy(args)
         batch_args.timeout = batch_timeout
@@ -477,7 +483,10 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
             return payload, None
 
     batch_size = effective_shape_batch_size(
-        args.timeout, args.shape_batch_size, queue_wait_grace
+        args.timeout,
+        args.shape_batch_size,
+        queue_wait_grace,
+        performance_timeout=batch_performance_timeout,
     )
     batches = batch_shape_ids(shapes, batch_size)
     with ThreadPoolExecutor(max_workers=min(BATCH_WORKERS, len(batches))) as pool:

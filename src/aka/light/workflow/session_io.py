@@ -37,7 +37,11 @@ from aka.light.execution.recovery import (environment_state_file, raise_if_envir
 from aka.light.evaluation.hardware import hardware_vendor
 from aka.light.agent.recovery_processes import spawn_owned_session
 from aka.light.execution.config import queue_wait_grace
-from aka.light.evaluation.policy import SHAPE_BATCH_SIZE
+from aka.light.evaluation.policy import (
+    PERFORMANCE_TIMEOUT,
+    SHAPE_BATCH_SIZE,
+)
+from aka.contracts.evaluation import DEFAULT_ABBA_REPEATS
 from aka.light.evaluation.shapes import (
     effective_shape_batch_size,
     shape_request_timeout,
@@ -271,7 +275,8 @@ def _evaluation_request_shape_count(
     workspace: Path,
     private_reference_dir: Path | None,
     command: list[str],
-    per_shape_timeout: int,
+    base_timeout: int,
+    performance_timeout: int,
     grace: int,
     environment: dict[str, str],
 ) -> int:
@@ -288,7 +293,10 @@ def _evaluation_request_shape_count(
         environment.get("ATREX_EVAL_SHAPE_BATCH_SIZE", str(SHAPE_BATCH_SIZE))
     )
     batch_size = effective_shape_batch_size(
-        per_shape_timeout, requested_batch_size, grace
+        base_timeout,
+        requested_batch_size,
+        grace,
+        performance_timeout=performance_timeout,
     )
     if selected:
         return min(len(selected), batch_size)
@@ -306,6 +314,36 @@ def _evaluation_request_shape_count(
         return batch_size
     shape_count = len(shapes) if isinstance(shapes, dict) else 0
     return min(shape_count, batch_size) if shape_count else batch_size
+
+
+def _command_option(command: list[str], name: str) -> str | None:
+    """Return the final value of a conventional ``--name VALUE`` option."""
+    value = None
+    for index, item in enumerate(command):
+        if item == name and index + 1 < len(command):
+            value = command[index + 1]
+        elif item.startswith(name + "="):
+            value = item.split("=", 1)[1]
+    return value
+
+
+def _evaluation_performance_timeout(command: list[str], base_timeout: int) -> int:
+    """Return only the sequential per-Shape performance work in a request."""
+    if _command_option(command, "--version") == "v0":
+        # V0 is trusted reference code and receives the configured long
+        # performance allowance rather than the Agent-candidate fast limit.
+        return base_timeout
+    if _command_option(command, "--baseline-path") is not None:
+        repeats_value = _command_option(command, "--comparison-repeats")
+        run_timeout_value = _command_option(command, "--comparison-run-timeout")
+        repeats = int(repeats_value) if repeats_value is not None else DEFAULT_ABBA_REPEATS
+        run_timeout = (
+            int(run_timeout_value)
+            if run_timeout_value is not None
+            else PERFORMANCE_TIMEOUT
+        )
+        return 2 * repeats * run_timeout
+    return PERFORMANCE_TIMEOUT
 
 
 def _sandbox_command(
@@ -385,15 +423,21 @@ def _sandbox_command(
         grace = 0 if uses_ssh else queue_wait_grace(environment)
         command_timeout = timeout
         if not uses_ssh and gateway_kind == "run":
+            performance_timeout = _evaluation_performance_timeout(command, timeout)
             shape_count = _evaluation_request_shape_count(
                 workspace,
                 private_reference_dir,
                 command,
                 timeout,
+                performance_timeout,
                 grace,
                 environment,
             )
-            command_timeout = shape_request_timeout(timeout, shape_count)
+            command_timeout = shape_request_timeout(
+                timeout,
+                shape_count,
+                performance_timeout=performance_timeout,
+            )
         effective_timeout = command_timeout + grace + 240
     raise_if_environment_blocked()
     process = spawn_owned_session(

@@ -15,10 +15,10 @@ from aka.contracts.evaluation import (
 CORRECTNESS_CASES = 5
 BENCH_ITERS = 20
 WARMUP_ITERS = 5
-# Budget each Shape independently. Candidate initialization/correctness retains
-# the production-safe 600-second allowance; steady-state measurement is 300
-# seconds. Operators may still override the per-Shape allocation; each concrete
-# Eval request scales it by the number of selected Shapes in that shard.
+# Candidate initialization/correctness retains the production-safe 600-second
+# allowance; steady-state measurement is 300 seconds. A multi-Shape request
+# keeps fixed work single and adds only the sequential performance budget for
+# each extra Shape.
 CANDIDATE_TIMEOUT = DEFAULT_CANDIDATE_TIMEOUT
 PERFORMANCE_TIMEOUT = DEFAULT_PERFORMANCE_TIMEOUT
 SHAPE_BATCH_SIZE = 5

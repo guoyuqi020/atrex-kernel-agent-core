@@ -12,8 +12,8 @@ from .problem import EvaluationInput
 
 
 # These are execution-policy defaults shared by the workflow configuration and
-# Light's native evaluator. The per-Shape allocation is derived from the work
-# it contains; each concrete Eval shard multiplies it by its Shape count.
+# Light's native evaluator. The base allocation covers fixed request work and
+# one Shape; a multi-Shape shard adds only its repeated performance work.
 # Some production Shapes spend more than five minutes in input materialization
 # plus the first JIT touch. Keep candidate construction/correctness distinct
 # from the shorter steady-state performance budget.
@@ -34,7 +34,7 @@ def derived_evaluation_timeout(
     candidate_timeout: int = DEFAULT_CANDIDATE_TIMEOUT,
     performance_timeout: int = DEFAULT_PERFORMANCE_TIMEOUT,
 ) -> int:
-    """Return one-Shape allocation large enough for either Eval or A/B/B/A."""
+    """Return a base allocation large enough for one-Shape Eval or A/B/B/A."""
     values = {
         "repeats": repeats,
         "per_run_timeout": per_run_timeout,

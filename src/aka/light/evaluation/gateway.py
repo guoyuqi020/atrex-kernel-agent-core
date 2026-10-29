@@ -121,7 +121,7 @@ from aka.light.runtime.request_errors import GatewayConfigurationError  # noqa: 
 from aka.light.experiment.store import BATCH_ROOT_ENV, JOB_ROOT_ENV, EvidenceUnavailable  # noqa: E402
 from aka.light.evaluation.policy import (  # noqa: E402
     CORRECTNESS_CASES, BENCH_ITERS, WARMUP_ITERS, SHAPE_BATCH_SIZE, BATCH_WORKERS,
-    runner_overrides, measurement_defaults,
+    PERFORMANCE_TIMEOUT, runner_overrides, measurement_defaults,
 )
 from aka.light.evaluation.projection import (  # noqa: E402
     GATEWAY_ERROR_PREFIX,
@@ -1942,8 +1942,8 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
             os.environ.get("ATREX_SANDBOX_TIMEOUT", str(DEFAULT_COMMAND_TIMEOUT))
         ),
         help=(
-            "Positive per-Shape remote execution timeout in seconds; each Eval "
-            "request gets this budget times its selected Shape count "
+            "Positive base remote execution timeout in seconds; multi-Shape "
+            "Eval requests add only repeated performance measurement time "
             f"(default: {DEFAULT_COMMAND_TIMEOUT}; queue wait is budgeted separately)."
         ),
     )
@@ -3866,15 +3866,27 @@ def _run_typed_gateway(
 
     expected_shape_ids = _request_shape_ids(request)
     if kind == "run":
+        performance_timeout = int(
+            request.get("runner_overrides", {}).get(
+                "perf_timeout_s", PERFORMANCE_TIMEOUT
+            )
+        )
         requested_batch_size = getattr(
             args, "shape_batch_size", DEFAULT_EVAL_SHAPE_BATCH_SIZE
         )
         actual_batch_size = effective_shape_batch_size(
-            args.timeout, requested_batch_size, queue_wait_grace
+            args.timeout,
+            requested_batch_size,
+            queue_wait_grace,
+            performance_timeout=performance_timeout,
         )
         shape_batches = batch_shape_ids(expected_shape_ids, actual_batch_size)
         batch_timeouts = [
-            shape_request_timeout(args.timeout, len(shape_ids))
+            shape_request_timeout(
+                args.timeout,
+                len(shape_ids),
+                performance_timeout=performance_timeout,
+            )
             for shape_ids in shape_batches
         ]
     else:
@@ -3942,7 +3954,11 @@ def _run_typed_gateway(
     try:
         def run_batch(shape_ids: list[str]) -> subprocess.CompletedProcess[str]:
             batch_timeout = (
-                shape_request_timeout(args.timeout, len(shape_ids))
+                shape_request_timeout(
+                    args.timeout,
+                    len(shape_ids),
+                    performance_timeout=performance_timeout,
+                )
                 if kind == "run"
                 else args.timeout
             )

@@ -41,18 +41,60 @@ from aka.light.workflow.bootstrap import Campaign, framework_baseline_validation
 from aka.light.workflow.context import session_execution_policy
 from aka.light.workflow.plugin import Defaults as WORKFLOW_PLUGIN_DEFAULTS
 from aka.light.workflow.provider import WorkflowOptions
+from aka.light.workflow.session_io import _evaluation_performance_timeout
 
 
 class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
     def test_eval_timeout_scales_with_actual_shape_count(self):
-        self.assertEqual(shape_request_timeout(1800, 5), 9000)
-        self.assertEqual(shape_request_timeout(1800, 3), 5400)
+        # Only the sequential performance phase repeats.  Fixed candidate,
+        # correctness, queue and cleanup budgets remain singletons.
+        self.assertEqual(shape_request_timeout(1800, 5), 3000)
+        self.assertEqual(shape_request_timeout(1800, 3), 2400)
+        self.assertEqual(
+            shape_request_timeout(1800, 5, performance_timeout=1800),
+            9000,
+        )
         self.assertEqual(effective_shape_batch_size(1800, 5, 120), 5)
-        self.assertEqual(effective_shape_batch_size(3000, 5, 120), 3)
+        self.assertEqual(effective_shape_batch_size(3000, 5, 120), 5)
+        self.assertEqual(
+            effective_shape_batch_size(
+                3000, 5, 120, performance_timeout=3000
+            ),
+            3,
+        )
 
     def test_eval_timeout_rejects_one_shape_above_gateway_limit(self):
         with self.assertRaisesRegex(ValueError, "One Shape exceeds"):
             effective_shape_batch_size(10681, 5, 120)
+
+    def test_only_request_performance_work_scales_by_shape(self):
+        self.assertEqual(
+            _evaluation_performance_timeout(["python3", "test_kernel.py"], 1800),
+            300,
+        )
+        self.assertEqual(
+            _evaluation_performance_timeout(
+                ["python3", "test_kernel.py", "--version", "v0"], 1800
+            ),
+            1800,
+        )
+        self.assertEqual(
+            _evaluation_performance_timeout(
+                ["python3", "test_kernel.py", "--baseline-path", "v0.py"],
+                1800,
+            ),
+            1200,
+        )
+        self.assertEqual(
+            _evaluation_performance_timeout(
+                [
+                    "python3", "test_kernel.py", "--baseline-path", "v0.py",
+                    "--comparison-repeats", "4", "--comparison-run-timeout", "500",
+                ],
+                1800,
+            ),
+            4000,
+        )
 
     def test_eval_retries_candidate_wall_clock_timeout_once(self):
         payload = {
