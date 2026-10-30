@@ -457,11 +457,17 @@ winners into an unmeasured Kernel. No winner is broadcast until every scheduled 
 has a durable terminal outcome. The Campaign workspace exposes the last completed Epoch's
 winner; a partial Epoch never replaces it.
 
-Each trajectory keeps its own Skills/tools inheritance, optional memory, Journal,
-Conversation history, measurement store and recovery state. Only Kernel bytes and their
-verified performance facts are broadcast; Skills/tools and research records are not merged.
-Measurement deduplication continues across Episodes **within that trajectory**. There is no
-cross-trajectory measurement deduplication/history sharing in this implementation. An
+Each trajectory keeps its own Skills/tools inheritance, optional memory, Conversation history
+and recovery state. At a complete Epoch barrier, finalized Directions, Experiments, Gateway
+Records and every referenced Kernel source tree become read-only evidence for the other
+trajectories. Existing list/load/record-read/kernel-read tools expose that evidence on demand;
+origin coordinates remain private audit metadata. Shared records never populate another
+trajectory's task index, so measurement deduplication and physical-job recovery remain local.
+Conversations, tool-call history, drafts and live adaptive state are not shared. An
+imported Direction is immutable; continuing it requires a new local derived Direction, and
+an imported Experiment remains historical evidence rather than the current Episode's selected
+Experiment. The Runtime validates every Experiment-to-Record-to-Kernel reference before
+publishing the next Epoch.
 Episode's full scheduling identity is `(Epoch, Trajectory, trajectory-local Episode)`;
 local Episode numbers alone are not Campaign-global identifiers. Kernel/Gateway/Journal
 IDs retain their existing uniqueness contracts. Agent evolution, competing Agent Branches,

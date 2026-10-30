@@ -276,6 +276,48 @@ class MeasurementStore:
                     raise ValueError("Gateway record omits or changes tree source evidence")
         return record
 
+    def record_ids(self) -> list[str]:
+        """List validated terminal Record identities without exposing payloads."""
+        values = []
+        for path in (self.root / "records").glob("gateway-*/record.json"):
+            record_id = path.parent.name
+            if not RECORD_ID.fullmatch(record_id):
+                continue
+            try:
+                record = self.read(record_id)
+            except (OSError, ValueError, KeyError, TypeError, RecursionError):
+                logging.getLogger(__name__).warning(
+                    "Skipping unreadable Gateway record while exporting shared evidence: %s",
+                    record_id,
+                )
+                continue
+            if record.get("gateway_record_id") == record_id:
+                values.append(record_id)
+        return sorted(values)
+
+    def import_record(self, source: MeasurementStore, record_id: str) -> dict:
+        """Import one immutable Record and its complete Kernel source closure.
+
+        Task indexes are intentionally not copied.  Imported evidence is readable,
+        but it never turns another trajectory's measurement into a local duplicate
+        cache hit or resumable physical job.
+        """
+        record = source.read(record_id)
+        for identity in record["kernels"].values():
+            kernel_id = identity["kernel_id"]
+            kernel_source = source.read_kernel(kernel_id)
+            if self.kernel(kernel_source) != identity:
+                raise ValueError("Imported Kernel identity differs from the Gateway Record")
+        destination = self.root / "records" / record_id / "record.json"
+        try:
+            existing = self.read(record_id)
+        except (FileNotFoundError, RecordNotFound):
+            private_write(destination, record)
+            existing = self.read(record_id)
+        if existing != record:
+            raise ValueError(f"Gateway Record collision while importing {record_id}")
+        return existing
+
     def _cached(self, record_id: str, task_digest: str) -> dict | None:
         # Broken/old indexes are misses. Transient IO failures retain the index
         # and stop dispatch, including on the publication path.

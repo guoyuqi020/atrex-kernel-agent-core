@@ -44,7 +44,7 @@ from aka.light.experiment.identifiers import (
 )
 from aka.light.experiment.store import MeasurementStore, private_write, read_json
 from aka.light.evaluation.provider import result_from_response
-from aka.light.workspace.files import MAX_FILE_BYTES, publish, read_input, relative_path
+from aka.light.workspace.files import MAX_FILE_BYTES, publish, relative_path
 
 DIRECTION_PROPOSAL_FIELDS = {
     "action",
@@ -93,6 +93,9 @@ class _HistoryIndex:
 
     def __init__(self) -> None:
         self.next_episode = 0
+        self.shared_revision: str | None = None
+        self.shared_direction_ids: set[str] = set()
+        self.shared_experiment_ids: set[str] = set()
         self.directions: dict[str, dict[str, Any]] = {}
         self.statuses: dict[str, str] = {}
         self.experiments: list[dict[str, Any]] = []
@@ -104,6 +107,9 @@ class _HistoryIndex:
         """Return an unpublished copy that can ingest the next Episode safely."""
         result = _HistoryIndex()
         result.next_episode = self.next_episode
+        result.shared_revision = self.shared_revision
+        result.shared_direction_ids = set(self.shared_direction_ids)
+        result.shared_experiment_ids = set(self.shared_experiment_ids)
         # Direction events and Experiment association update nested lists, so
         # these views require a deep copy. Existing Experiment rows are
         # immutable after finalization and can be shared between snapshots.
@@ -127,6 +133,8 @@ class _VisibleHistory:
     statuses: dict[str, str]
     experiments: list[dict[str, Any]]
     experiments_by_id: dict[str, dict[str, Any]]
+    shared_direction_ids: frozenset[str]
+    shared_experiment_ids: frozenset[str]
 
 
 
@@ -277,6 +285,84 @@ def _index_historical_journal(index: _HistoryIndex, path: Path, episode: int) ->
         _associate_experiments(index.directions, (experiment,))
 
 
+def shared_research_path(campaign_root: Path) -> Path:
+    """Private, controller-published research visible after an Epoch barrier."""
+    return campaign_root / "shared" / "research.json"
+
+
+def _shared_research(campaign_root: Path) -> dict[str, Any]:
+    path = shared_research_path(campaign_root)
+    try:
+        value = read_json(path, limit=MAX_FILE_BYTES)
+    except FileNotFoundError:
+        return {
+            "schema_version": 1,
+            "revision": "",
+            "through_epoch": 0,
+            "directions": {},
+            "statuses": {},
+            "experiments": [],
+            "experiments_by_id": {},
+        }
+    except (OSError, ValueError) as error:
+        raise RuntimeStateError("Shared Epoch research evidence is unreadable.") from error
+    if (
+        value.get("schema_version") != 1
+        or not isinstance(value.get("revision"), str)
+        or type(value.get("through_epoch")) is not int
+        or value["through_epoch"] < 0
+        or not isinstance(value.get("directions"), dict)
+        or not isinstance(value.get("experiments"), list)
+    ):
+        raise RuntimeStateError("Shared Epoch research evidence has an unsupported schema.")
+    directions: dict[str, dict[str, Any]] = {}
+    statuses: dict[str, str] = {}
+    for direction_id, raw in value["directions"].items():
+        if (
+            not isinstance(direction_id, str)
+            or DIRECTION_ID_RE.fullmatch(direction_id) is None
+            or not isinstance(raw, dict)
+            or raw.get("direction_id") != direction_id
+            or raw.get("status") not in set(_DIRECTION_STATUS.values())
+        ):
+            raise RuntimeStateError("Shared Epoch Direction evidence is invalid.")
+        directions[direction_id] = deepcopy(raw)
+        statuses[direction_id] = raw["status"]
+    experiments: list[dict[str, Any]] = []
+    experiments_by_id: dict[str, dict[str, Any]] = {}
+    for raw in value["experiments"]:
+        experiment_id = raw.get("experiment_id") if isinstance(raw, dict) else None
+        if (
+            not isinstance(experiment_id, str)
+            or EXPERIMENT_ID_RE.fullmatch(experiment_id) is None
+            or experiment_id in experiments_by_id
+        ):
+            raise RuntimeStateError("Shared Epoch Experiment evidence is invalid.")
+        item = deepcopy(raw)
+        experiments.append(item)
+        experiments_by_id[experiment_id] = item
+    return {
+        **value,
+        "directions": directions,
+        "statuses": statuses,
+        "experiments": experiments,
+        "experiments_by_id": experiments_by_id,
+    }
+
+
+def research_projection(current: Path, campaign_root: Path) -> dict[str, Any]:
+    """Export the complete visible research view for an Epoch barrier."""
+    history = _visible_history(current, campaign_root)
+    if not history.current.get("finalized_at"):
+        raise RuntimeStateError("Only a finalized Episode Journal may cross an Epoch barrier.")
+    directions = {
+        key: deepcopy(value)
+        for key, value in _direction_views(current, campaign_root, history=history).items()
+    }
+    experiments = _visible_experiments(current, campaign_root, history=history)
+    return {"directions": directions, "experiments": experiments}
+
+
 def _visible_history(current: Path, campaign_root: Path) -> _VisibleHistory:
     """Replay finalized history once, then ingest only newly completed Episodes.
 
@@ -290,13 +376,18 @@ def _visible_history(current: Path, campaign_root: Path) -> _VisibleHistory:
     if not isinstance(episode, int) or isinstance(episode, bool) or episode < 0:
         raise RuntimeStateError("Runtime Journal has an invalid Episode identity")
     root = campaign_root.resolve()
+    shared = _shared_research(root)
     with _HISTORY_LOCK:
         index = _HISTORY_INDEXES.get(root)
         # A straggling old-Episode binding may still issue a read while a newer
         # Episode owns the Campaign. Build that older view privately; never
         # replace the newest published Campaign snapshot with an older one.
         older_snapshot = index is not None and episode < index.next_episode
-        rebuild = index is None or older_snapshot
+        rebuild = (
+            index is None
+            or older_snapshot
+            or index.shared_revision != shared["revision"]
+        )
         if index is not None and not rebuild:
             for pending in index.pending:
                 path = root / "episodes" / f"e{pending:08d}" / "journal.json"
@@ -314,6 +405,14 @@ def _visible_history(current: Path, campaign_root: Path) -> _VisibleHistory:
                     break
         if rebuild:
             rebuilt = _HistoryIndex()
+            rebuilt.shared_revision = shared["revision"]
+            rebuilt.shared_direction_ids = set(shared["directions"])
+            rebuilt.shared_experiment_ids = set(shared["experiments_by_id"])
+            rebuilt.directions = deepcopy(shared["directions"])
+            rebuilt.statuses = dict(shared["statuses"])
+            rebuilt.experiments = list(shared["experiments"])
+            rebuilt.experiments_by_id = dict(shared["experiments_by_id"])
+            rebuilt.experiment_ids = set(shared["experiments_by_id"])
             for path in sorted((root / "episodes").glob("e*/journal.json")):
                 identity = re.fullmatch(r"e([0-9]{8,})", path.parent.name)
                 if identity is not None and int(identity[1]) < episode:
@@ -355,6 +454,8 @@ def _visible_history(current: Path, campaign_root: Path) -> _VisibleHistory:
             statuses=index.statuses,
             experiments=index.experiments,
             experiments_by_id=index.experiments_by_id,
+            shared_direction_ids=frozenset(index.shared_direction_ids),
+            shared_experiment_ids=frozenset(index.shared_experiment_ids),
         )
 
 
@@ -609,6 +710,16 @@ def update_direction(
             label=f"Direction {action}",
         )
         direction_id = _text(value["direction_id"], "Direction ID")
+        if direction_id in history.shared_direction_ids:
+            raise AgentRequestError(
+                "This Direction belongs to a completed shared Epoch and is read-only.",
+                code="shared_direction_read_only",
+                direction_id=direction_id,
+                next_action=(
+                    "Propose a new local Direction derived from this Direction ID, then start "
+                    "and evaluate the local Direction."
+                ),
+            )
         advance_direction(statuses, started, direction_id, action)
         supporting = (
             _closure_support(path, campaign_root, direction_id, value, history=history,
@@ -871,9 +982,20 @@ def record_experiment(
         direction_id = _text(value["direction_id"], "Experiment Direction ID")
         if DIRECTION_ID_RE.fullmatch(direction_id) is None:
             raise ValueError("Experiment Direction ID has an invalid format")
-        direction = _direction_views(path, campaign_root).get(direction_id)
+        history = _visible_history(path, campaign_root)
+        direction = _direction_views(path, campaign_root, history=history).get(direction_id)
         if direction is None:
             raise ValueError("Experiment Direction is outside visible history")
+        if direction_id in history.shared_direction_ids:
+            raise AgentRequestError(
+                "A shared Direction is read-only and cannot own a local Experiment.",
+                code="shared_direction_read_only",
+                direction_id=direction_id,
+                next_action=(
+                    "Propose and start a new local Direction derived from the shared Direction, "
+                    "then record this Experiment against the local Direction."
+                ),
+            )
         if direction["status"] not in {"in_progress", *_CLOSED_STATUSES}:
             raise ValueError(
                 "Experiment Direction must be in progress or closed; start a proposed Direction "

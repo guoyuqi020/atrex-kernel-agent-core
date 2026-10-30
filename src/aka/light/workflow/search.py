@@ -1,8 +1,9 @@
 """Optional pooled search: a Runtime Attempt is one ordinary Light Episode.
 
 Only the outer search topology changes. The driver retains Episode reporting,
-correctness, ABBA, sealed candidates and recovery. A barrier publishes a Kernel,
-never a live draft or another trajectory's adaptive state.
+correctness, ABBA, sealed candidates and recovery. A barrier publishes a Kernel
+and immutable terminal evidence, never a live draft, Conversation or another
+trajectory's adaptive state.
 """
 from __future__ import annotations
 
@@ -126,8 +127,16 @@ class PooledSearch:
                         candidates.append(candidate)
                 # The incumbent wins exact ties; ordering is independent of completion order.
                 active["winner"] = min(candidates, key=latency)
+                active["phase"] = "sealing"
+                self._save(state)
+            if active["phase"] == "sealing":
+                self.driver.seal_epoch(epoch, active["jobs"])
                 active["phase"] = "publishing"
                 self._save(state)
+            elif active["phase"] == "publishing" and not self.driver.epoch_sealed(epoch):
+                # Resume search checkpoints written by versions that published
+                # only the winning Kernel and did not yet seal shared evidence.
+                self.driver.seal_epoch(epoch, active["jobs"])
             self.driver.publish_epoch(epoch, active["winner"])
             summary = dict(active, phase="completed", tokens=self.driver.tokens())
             durable_write_json(self.root / "epochs" / f"e{epoch:08d}.json", summary)

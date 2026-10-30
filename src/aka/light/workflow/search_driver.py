@@ -1,8 +1,9 @@
 """Reuse the existing serial Episode engine in isolated trajectory repositories.
 
-Each trajectory keeps its own Journal, measurement/retry scope and adaptive
-state. Only accepted Kernel bytes and authoritative metrics cross the barrier.
-These are private controller repositories, not Agent-visible Git workspaces.
+Each trajectory keeps its own writable Journal, measurement task/retry scope and
+adaptive state.  Completed Epochs publish immutable research, measurements and
+their Kernel source closure alongside the accepted Kernel.  These are private
+controller repositories, not Agent-visible Git workspaces.
 """
 from __future__ import annotations
 
@@ -22,6 +23,13 @@ from aka.light.workspace.versions import version_record_path
 from .search import latency, read_state
 from .search_git import commit_files, git
 from aka.light.workspace.sources import from_git, unpack, snapshot as source_snapshot
+from aka.light.experiment.store import MeasurementStore, digest as evidence_digest, private_write
+from aka.light.runtime.paths import supervisor_campaign_root
+from aka.light.workflow.journal_service import (
+    load_journal,
+    research_projection,
+    shared_research_path,
+)
 
 
 class EpisodeSearchDriver:
@@ -83,6 +91,188 @@ class EpisodeSearchDriver:
         if hashlib.sha256(source).hexdigest() != kernel["sha256"]:
             raise RuntimeError("Search Kernel bytes differ from the sealed checkpoint")
         return source
+
+    def _research(self, child, episode):
+        root = supervisor_campaign_root(child.workspace)
+        journal = root / "journals" / "episodes" / f"e{episode:08d}" / "journal.json"
+        return research_projection(journal, root / "journals")
+
+    @staticmethod
+    def _local_research_origins(child, terminal_episode):
+        root = supervisor_campaign_root(child.workspace) / "journals" / "episodes"
+        result = {"directions": {}, "experiments": {}}
+        for path in sorted(root.glob("e*/journal.json")):
+            try:
+                episode = int(path.parent.name[1:])
+            except ValueError:
+                continue
+            if episode > terminal_episode:
+                continue
+            journal = load_journal(path)
+            for event in journal["direction_events"]:
+                if isinstance(event, dict) and event.get("action") == "propose":
+                    result["directions"].setdefault(event.get("direction_id"), episode)
+            for experiment in journal["experiments"]:
+                if isinstance(experiment, dict):
+                    result["experiments"].setdefault(experiment.get("experiment_id"), episode)
+        return result
+
+    @staticmethod
+    def _merge_named(values, prior_origins, local_episodes, jobs, label):
+        merged, origins = {}, copy.deepcopy(prior_origins)
+        all_ids = sorted({identifier for _, rows in values.items() for identifier in rows})
+        episodes = {job["trajectory"]: job["episode"] for job in jobs}
+        for identifier in all_ids:
+            candidates = {number: rows[identifier] for number, rows in values.items() if identifier in rows}
+            origin = origins.get(identifier, {})
+            owner = origin.get("trajectory")
+            if owner in candidates:
+                selected = candidates[owner]
+            else:
+                serialized = {json.dumps(item, sort_keys=True, allow_nan=False) for item in candidates.values()}
+                if len(serialized) != 1:
+                    raise RuntimeError(f"Conflicting shared {label} identity: {identifier}")
+                owner = min(candidates)
+                selected = candidates[owner]
+                origins[identifier] = {
+                    "epoch": jobs[0]["epoch"],
+                    "trajectory": owner,
+                    "episode": local_episodes.get(owner, {}).get(identifier, episodes[owner]),
+                }
+            merged[identifier] = copy.deepcopy(selected)
+        return merged, origins
+
+    def epoch_sealed(self, epoch):
+        return (self.root / "epochs" / f"e{epoch:08d}-shared.json").is_file()
+
+    def seal_epoch(self, epoch, jobs):
+        """Publish cumulative, read-only research and measurement evidence."""
+        if not jobs or any(job.get("status") != "completed" for job in jobs):
+            raise RuntimeError("Cannot seal shared evidence before every Epoch Episode is terminal")
+        terminal = {}
+        for job in jobs:
+            terminal[job["trajectory"]] = max(
+                terminal.get(job["trajectory"], 0), job["episode"]
+            )
+        job_rows = [
+            {"epoch": epoch, "trajectory": trajectory, "episode": episode}
+            for trajectory, episode in sorted(terminal.items())
+        ]
+        projections = {
+            number: self._research(self.children[number], terminal[number])
+            for number in sorted(terminal)
+        }
+        local_origins = {
+            number: self._local_research_origins(self.children[number], terminal[number])
+            for number in sorted(terminal)
+        }
+        manifest_path = self.root / "shared" / "manifest.json"
+        try:
+            previous = read_state(manifest_path)
+        except FileNotFoundError:
+            previous = {"directions": {}, "experiments": {}, "records": {}}
+        direction_rows = {
+            number: projection["directions"] for number, projection in projections.items()
+        }
+        experiment_rows = {
+            number: {
+                item["experiment_id"]: item for item in projection["experiments"]
+            }
+            for number, projection in projections.items()
+        }
+        directions, direction_origins = self._merge_named(
+            direction_rows,
+            previous.get("directions", {}),
+            {number: value["directions"] for number, value in local_origins.items()},
+            job_rows,
+            "Direction",
+        )
+        experiments, experiment_origins = self._merge_named(
+            experiment_rows,
+            previous.get("experiments", {}),
+            {number: value["experiments"] for number, value in local_origins.items()},
+            job_rows,
+            "Experiment",
+        )
+
+        central = MeasurementStore(self.root / "shared" / "measurements")
+        record_origins = copy.deepcopy(previous.get("records", {}))
+        new_record_ids = []
+        for number, child in sorted(self.children.items()):
+            source = MeasurementStore(supervisor_campaign_root(child.workspace) / "measurements")
+            for record_id in source.record_ids():
+                if record_id in record_origins:
+                    continue
+                central.import_record(source, record_id)
+                record_origins[record_id] = {"epoch": epoch, "trajectory": number}
+                new_record_ids.append(record_id)
+
+        for experiment_id, experiment in experiments.items():
+            record_ids = experiment.get("gateway_record_ids")
+            if not isinstance(record_ids, list):
+                raise RuntimeError(
+                    f"Shared Experiment {experiment_id} has invalid Gateway Record references"
+                )
+            for record_id in record_ids:
+                try:
+                    central.read(record_id)
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    raise RuntimeError(
+                        f"Shared Experiment {experiment_id} refers to unavailable evidence {record_id}"
+                    ) from error
+
+        research_value = {
+            "directions": directions,
+            "experiments": [experiments[key] for key in sorted(experiments)],
+        }
+        revision = evidence_digest(research_value)
+        for number, child in sorted(self.children.items()):
+            destination_root = supervisor_campaign_root(child.workspace)
+            destination = MeasurementStore(destination_root / "measurements")
+            for record_id in new_record_ids:
+                destination.import_record(central, record_id)
+            visible_directions = {
+                key: value for key, value in directions.items()
+                if direction_origins[key]["trajectory"] != number
+            }
+            visible_experiments = [
+                experiments[key] for key in sorted(experiments)
+                if experiment_origins[key]["trajectory"] != number
+            ]
+            shared = {
+                "schema_version": 1,
+                "revision": revision,
+                "through_epoch": epoch,
+                "directions": visible_directions,
+                "experiments": visible_experiments,
+            }
+            private_write(shared_research_path(destination_root / "journals"), shared)
+
+        manifest = {
+            "schema_version": 1,
+            "through_epoch": epoch,
+            "revision": revision,
+            "directions": direction_origins,
+            "experiments": experiment_origins,
+            "records": record_origins,
+        }
+        private_write(manifest_path, manifest)
+        receipt = {
+            "schema_version": 1,
+            "epoch": epoch,
+            "revision": revision,
+            "direction_ids": sorted(directions),
+            "experiment_ids": sorted(experiments),
+            "gateway_record_ids": central.record_ids(),
+        }
+        receipt_path = self.root / "epochs" / f"e{epoch:08d}-shared.json"
+        try:
+            existing = read_state(receipt_path)
+        except FileNotFoundError:
+            private_write(receipt_path, receipt)
+        else:
+            if existing != receipt:
+                raise RuntimeError("Epoch shared-evidence receipt changed during recovery")
 
     def initialize(self, bootstrap, trajectories):
         for number in range(1, trajectories + 1):
