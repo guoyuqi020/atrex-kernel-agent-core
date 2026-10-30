@@ -63,7 +63,9 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             framework_baseline="auto",
         )
 
-    def _framework_baseline_decision_patches(self, directory, *, blobs):
+    def _framework_baseline_decision_patches(
+        self, directory, *, reference_blob, implementation_blob
+    ):
         return (
             patch("aka.light.workflow.bootstrap.latest_version", return_value=0),
             patch("aka.light.workflow.bootstrap.git_head", return_value="head"),
@@ -96,9 +98,12 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             patch("aka.light.workspace.sources.from_git", return_value=b"source-tree"),
             patch(
                 "aka.light.workspace.sources.unpack",
-                return_value=(None, {"kernel.py": b"reference"}),
+                return_value=(None, {"kernel.py": implementation_blob}),
             ),
-            patch("aka.light.workflow.bootstrap.git_path_blob", side_effect=blobs),
+            patch(
+                "aka.light.workflow.bootstrap.git_path_blob",
+                return_value=reference_blob,
+            ),
             patch("aka.light.workflow.bootstrap.is_sol_op", return_value=False),
         )
 
@@ -111,7 +116,9 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 side_effect=AssertionError("known V0 wrapper must not be reviewed"),
             )
             patches = self._framework_baseline_decision_patches(
-                directory, blobs=["same-blob", "same-blob"]
+                directory,
+                reference_blob=b"same-blob",
+                implementation_blob=b"same-blob",
             )
             with ExitStack() as stack:
                 stack.enter_context(reviewer)
@@ -126,7 +133,9 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             campaign = self._framework_baseline_campaign(directory)
             patches = self._framework_baseline_decision_patches(
-                directory, blobs=["reference-blob", "implementation-blob"]
+                directory,
+                reference_blob=b"reference-blob",
+                implementation_blob=b"implementation-blob",
             )
             reviewer_patch = patch.object(
                     Campaign, "_production_kernel_violations", return_value=[]

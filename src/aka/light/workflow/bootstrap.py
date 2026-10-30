@@ -1686,13 +1686,16 @@ class Campaign:
             reference_blob = git_path_blob(
                 self.workspace, baseline_commit, "reference.py"
             )
-            baseline_policy, _baseline_files = unpack(
+            baseline_policy, baseline_files = unpack(
                 from_git(self.workspace, baseline_commit)
             )
-            implementation_blob = git_path_blob(
-                self.workspace,
-                baseline_commit,
-                implementation_entry(baseline_policy),
+            # The selected implementation may be stored inside a source-tree
+            # snapshot without a matching root-level Git path.  Compare the
+            # reference against the complete committed candidate snapshot;
+            # otherwise a reference-backed V0 falls through to the expensive
+            # production reviewer before V1 has even been authored.
+            implementation_blob = baseline_files.get(
+                implementation_entry(baseline_policy)
             )
             known_reference_wrapper = bool(
                 reference_blob
