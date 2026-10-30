@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -72,7 +73,13 @@ class NumericalCancellation:
     def timeout(self, seconds):
         self.check()
         if self.parent is not None and self.parent.deadline is not None:
-            return max(1, min(seconds, int(self.parent.deadline - time.monotonic())))
+            remaining = self.parent.deadline - time.monotonic()
+            # An unlimited Episode is represented by an infinite deadline.
+            # Keep the nested request's own timeout instead of converting the
+            # sentinel to int, which raises OverflowError while accepting an
+            # otherwise valid attempt report.
+            if math.isfinite(remaining):
+                return max(1, min(seconds, int(remaining)))
         return seconds
 
 

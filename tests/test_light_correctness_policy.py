@@ -12,6 +12,7 @@ from unittest.mock import patch
 from aka.contracts.evaluation import derived_evaluation_timeout
 from aka.legacy.task.problem.layout import agent_visible_operator_files
 from aka.legacy.task.problem.native_harness import _parser as native_harness_parser
+from aka.light.acceptance.numerical import NumericalCancellation
 from aka.light.acceptance.provider import candidate_acceptance_argv
 from aka.light.acceptance.recorded_verifier import RecordedABBAValidator
 from aka.light.acceptance.source_policy import optimization_mode_directive
@@ -46,6 +47,26 @@ from aka.light.workflow.session_io import _evaluation_performance_timeout
 
 
 class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
+    def test_unlimited_numerical_review_keeps_nested_request_timeout(self):
+        runtime = SimpleNamespace(closed=False, _live=lambda _parent: True)
+        cancel = NumericalCancellation(
+            runtime, SimpleNamespace(deadline=float("inf"))
+        )
+
+        with patch(
+            "aka.light.acceptance.numerical.time.monotonic", return_value=100.0
+        ):
+            self.assertEqual(cancel.timeout(600), 600)
+
+    def test_finite_numerical_review_caps_nested_request_timeout(self):
+        runtime = SimpleNamespace(closed=False, _live=lambda _parent: True)
+        cancel = NumericalCancellation(runtime, SimpleNamespace(deadline=150.9))
+
+        with patch(
+            "aka.light.acceptance.numerical.time.monotonic", return_value=100.0
+        ):
+            self.assertEqual(cancel.timeout(600), 50)
+
     def test_one_runtime_step_timeout_drives_gateway_request(self):
         self.assertEqual(derived_evaluation_timeout(), 1230)
         command = RuntimeConfig("L20D").command(Path("/tmp/workspace"))
