@@ -182,27 +182,24 @@ def cacheable_job(job: object, identity: dict | None = None) -> bool:
 
 def complete_evaluation(result: dict, request: dict) -> bool:
     """Missing stage/Shape data is not a completed Candidate rejection."""
-    if request.get("abba"):
-        from aka.light.evaluation.native_abba import parse_native_abba
-        try:
-            parse_native_abba({"status": "succeeded", "result": result},
-                              request["abba"]["repeats"] * 2, list(request["reference"]["shapes"]))
-            return True
-        except (ValueError, TypeError, KeyError, AttributeError):
-            return False
-    # A native Eval shard keeps the complete immutable reference bundle and
-    # selects its effective Shapes through runner_overrides.shape_ids.  Checking
-    # every reference Shape here makes every legitimate shard look incomplete,
-    # which in turn marks the aggregate Gateway Record non-cacheable.  The same
-    # mistake also breaks native ABBA because its retained batch evidence uses
-    # this predicate.  Validate exactly the request's effective selection while
-    # still rejecting malformed/unknown Shape IDs in request_shape_ids().
+    # Native Eval shards retain the complete immutable reference bundle and
+    # select their effective Shapes through runner_overrides.shape_ids.  This
+    # applies to both ordinary Eval and native ABBA; requiring every reference
+    # Shape in each ABBA shard makes every legitimate shard look incomplete.
     from aka.light.evaluation.shapes import request_shape_ids
 
     try:
         shapes = request_shape_ids(request)
     except (KeyError, TypeError, ValueError):
         return False
+    if request.get("abba"):
+        from aka.light.evaluation.native_abba import parse_native_abba
+        try:
+            parse_native_abba({"status": "succeeded", "result": result},
+                              request["abba"]["repeats"] * 2, shapes)
+            return True
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return False
     passed = result.get("passed")
     if not shapes or not isinstance(passed, dict):
         return False
