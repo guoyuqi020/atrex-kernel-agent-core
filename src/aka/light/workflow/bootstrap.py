@@ -1686,10 +1686,17 @@ class Campaign:
             reference_blob = git_path_blob(
                 self.workspace, baseline_commit, "reference.py"
             )
-            baseline_policy, baseline_files = unpack(from_git(self.workspace, baseline_commit))
+            baseline_policy, _baseline_files = unpack(
+                from_git(self.workspace, baseline_commit)
+            )
+            implementation_blob = git_path_blob(
+                self.workspace,
+                baseline_commit,
+                implementation_entry(baseline_policy),
+            )
             known_reference_wrapper = bool(
                 reference_blob
-                and reference_blob == baseline_files.get(implementation_entry(baseline_policy))
+                and reference_blob == implementation_blob
             ) or is_sol_op(Path(self.kernel_demo).resolve().parent)
             if known_reference_wrapper:
                 return (

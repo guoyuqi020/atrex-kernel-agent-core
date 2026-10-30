@@ -131,6 +131,27 @@ def gateway_error_result(value: dict[str, Any]) -> dict[str, Any]:
     if value.get("outcome") == "unknown":
         from aka.light.runtime.request_errors import UNKNOWN_OUTCOME
         result["next_action"] = UNKNOWN_OUTCOME
+    elif (
+        isinstance(error, dict)
+        and isinstance(error.get("message"), str)
+        and "job deadline exceeded" in error["message"].casefold()
+    ):
+        timeout_s = error.get("timeout_s")
+        duration = (
+            f" the configured {timeout_s:g}-second deadline"
+            if isinstance(timeout_s, (int, float))
+            and not isinstance(timeout_s, bool)
+            and math.isfinite(timeout_s)
+            and timeout_s > 0
+            else " its configured job deadline"
+        )
+        result["next_action"] = (
+            f"This {result.get('operation', 'Gateway')} request exceeded{duration}; the command "
+            "is too slow for one request. Reduce its work, remove long loops, or split it into "
+            "smaller bounded requests, then measure the changed request. Do not resubmit the "
+            "unchanged slow command. Use Evaluate or ABBA for complete Kernel measurements "
+            "instead of reproducing a full benchmark inside Dev."
+        )
     elif isinstance(error, dict) and error.get("error_class") == "infra":
         result["next_action"] = (
             "Infrastructure failure, not a Kernel correctness verdict. Supervisor recovery owns retries. "

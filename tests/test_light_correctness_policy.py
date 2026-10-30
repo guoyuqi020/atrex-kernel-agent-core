@@ -1,5 +1,6 @@
 """Regression tests for Runtime-owned AKA-Light correctness coverage."""
 
+from contextlib import ExitStack
 import json
 import os
 import subprocess
@@ -7,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from aka.contracts.evaluation import derived_evaluation_timeout
 from aka.legacy.task.problem.layout import agent_visible_operator_files
@@ -26,13 +27,17 @@ from aka.light.evaluation.evaluation_failures import (
     embedded_candidate_wall_clock_timeouts,
 )
 from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES
+from aka.light.evaluation.projection import gateway_error_from_process
 from aka.light.evaluation.shapes import (
     effective_shape_batch_size,
     shape_request_timeout,
 )
 from aka.light.execution.gateway_jobs import (
+    DEFAULT_MAX_DEADLINE_RETRIES,
     DEFAULT_MAX_INFRA_RETRIES,
     TERMINAL_VALIDATION_ENV,
+    annotate_deadline_timeout,
+    configured_max_deadline_retries,
     configured_max_infra_retries,
     execute_job,
     retry_kind,
@@ -47,6 +52,95 @@ from aka.light.workflow.session_io import _evaluation_performance_timeout
 
 
 class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
+    def _framework_baseline_campaign(self, directory):
+        return Campaign(
+            name="operator",
+            kernel_demo=str(Path(directory) / "reference.py"),
+            platform="cuda",
+            framework="cuda",
+            work_dir=directory,
+            optimization_mode="leaderboard",
+            framework_baseline="auto",
+        )
+
+    def _framework_baseline_decision_patches(self, directory, *, blobs):
+        return (
+            patch("aka.light.workflow.bootstrap.latest_version", return_value=0),
+            patch("aka.light.workflow.bootstrap.git_head", return_value="head"),
+            patch(
+                "aka.light.workflow.bootstrap.resolve_framework_baseline_commit",
+                return_value=(None, None),
+            ),
+            patch(
+                "aka.light.workflow.bootstrap.head_kernel_is_initial_baseline",
+                return_value=True,
+            ),
+            patch(
+                "aka.light.workflow.bootstrap.framework_baseline_progress_path",
+                return_value=Path(directory) / "missing-progress.json",
+            ),
+            patch.object(
+                Campaign,
+                "source_checks_enabled",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch(
+                "aka.light.workflow.bootstrap.production_structure_violations",
+                return_value=[],
+            ),
+            patch.object(Campaign, "_v0_baseline_commit", return_value="v0"),
+            patch(
+                "aka.light.workspace.sources.snapshot", return_value=b"source-tree"
+            ),
+            patch("aka.light.workspace.sources.from_git", return_value=b"source-tree"),
+            patch(
+                "aka.light.workspace.sources.unpack",
+                return_value=(None, {"kernel.py": b"reference"}),
+            ),
+            patch("aka.light.workflow.bootstrap.git_path_blob", side_effect=blobs),
+            patch("aka.light.workflow.bootstrap.is_sol_op", return_value=False),
+        )
+
+    def test_known_v0_reference_wrapper_skips_production_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = self._framework_baseline_campaign(directory)
+            reviewer = patch.object(
+                Campaign,
+                "_production_kernel_violations",
+                side_effect=AssertionError("known V0 wrapper must not be reviewed"),
+            )
+            patches = self._framework_baseline_decision_patches(
+                directory, blobs=["same-blob", "same-blob"]
+            )
+            with ExitStack() as stack:
+                stack.enter_context(reviewer)
+                for current in patches:
+                    stack.enter_context(current)
+                action, reason = campaign._framework_baseline_decision()
+
+        self.assertEqual(action, "run")
+        self.assertIn("PyTorch reference wrapper", reason)
+
+    def test_distinct_v0_implementation_still_uses_production_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = self._framework_baseline_campaign(directory)
+            patches = self._framework_baseline_decision_patches(
+                directory, blobs=["reference-blob", "implementation-blob"]
+            )
+            reviewer_patch = patch.object(
+                    Campaign, "_production_kernel_violations", return_value=[]
+                )
+            with ExitStack() as stack:
+                reviewer = stack.enter_context(reviewer_patch)
+                for current in patches:
+                    stack.enter_context(current)
+                action, reason = campaign._framework_baseline_decision()
+
+        self.assertEqual(action, "pin")
+        self.assertIn("already a compliant framework implementation", reason)
+        reviewer.assert_called_once_with()
+
     def test_unlimited_numerical_review_keeps_nested_request_timeout(self):
         runtime = SimpleNamespace(closed=False, _live=lambda _parent: True)
         cancel = NumericalCancellation(
@@ -295,13 +389,29 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             )
         return process, submitted
 
-    def test_ordinary_gateway_deadline_has_no_retry_count_cap(self):
+    def test_ordinary_gateway_deadline_stops_after_two_retries(self):
         process, submitted = self._deadline_job(
-            max_deadline_retries=None,
+            max_deadline_retries=DEFAULT_MAX_DEADLINE_RETRIES,
             failures=3,
         )
-        self.assertEqual(process.returncode, 0)
-        self.assertEqual(len(submitted), 4)
+        self.assertEqual(process.returncode, 1)
+        self.assertEqual(len(submitted), 3)
+        self.assertEqual(
+            json.loads(process.stdout)["error"],
+            {
+                "error_class": "timeout",
+                "reason": "timeout",
+                "message": "job deadline exceeded",
+            },
+        )
+        self.assertEqual(
+            gateway_error_from_process(process, "evaluate")["error"],
+            {
+                "error_class": "timeout",
+                "reason": "timeout",
+                "message": "job deadline exceeded",
+            },
+        )
 
     def test_terminal_gateway_deadline_has_no_retry_count_cap(self):
         process, submitted = self._deadline_job(
@@ -310,6 +420,42 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         )
         self.assertEqual(process.returncode, 0)
         self.assertEqual(len(submitted), 4)
+
+    def test_deadline_timeout_is_added_to_agent_visible_error(self):
+        process, submitted = self._deadline_job(
+            max_deadline_retries=DEFAULT_MAX_DEADLINE_RETRIES,
+            failures=3,
+        )
+        annotated = annotate_deadline_timeout(process, 600)
+
+        self.assertEqual(len(submitted), 3)
+        self.assertEqual(json.loads(annotated.stdout)["error"]["timeout_s"], 600)
+        projected = gateway_error_from_process(annotated, "dev")
+        self.assertEqual(projected["operation"], "dev")
+        self.assertEqual(projected["error"]["timeout_s"], 600)
+        self.assertIn("configured 600-second deadline", projected["next_action"])
+        self.assertIn("command is too slow", projected["next_action"])
+        self.assertIn("Do not resubmit the unchanged", projected["next_action"])
+        self.assertEqual(
+            projected["recovery"],
+            [{"instruction": projected["next_action"]}],
+        )
+
+    def test_only_terminal_eval_selects_unbounded_deadline_retries(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(TERMINAL_VALIDATION_ENV, None)
+            self.assertEqual(
+                configured_max_deadline_retries(terminal_evaluation=True),
+                DEFAULT_MAX_DEADLINE_RETRIES,
+            )
+        with patch.dict(os.environ, {TERMINAL_VALIDATION_ENV: "1"}):
+            self.assertIsNone(
+                configured_max_deadline_retries(terminal_evaluation=True)
+            )
+            self.assertEqual(
+                configured_max_deadline_retries(terminal_evaluation=False),
+                DEFAULT_MAX_DEADLINE_RETRIES,
+            )
 
     def test_exploration_infrastructure_retry_remains_bounded(self):
         process, submitted = self._infra_job(

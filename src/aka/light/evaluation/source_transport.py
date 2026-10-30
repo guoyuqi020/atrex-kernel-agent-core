@@ -395,6 +395,7 @@ def run_sdk_job(
         AcceptedJobMissing,
         SubmissionRejected,
         SubmissionUncertain,
+        annotate_deadline_timeout,
         configured_max_deadline_retries,
         configured_max_infra_retries,
         eval_retry_kind,
@@ -526,18 +527,24 @@ def run_sdk_job(
     }
     if identity_extra:
         identity["execution_context"] = identity_extra
-    return execute_job(
+    process = execute_job(
         identity,
         submit,
         poll,
         wait_budget=args.timeout + queue_wait_grace,
         retry_classifier=eval_retry_kind if eval_semantics else retry_kind,
         max_infra_retries=configured_max_infra_retries(),
-        max_deadline_retries=configured_max_deadline_retries(),
+        max_deadline_retries=configured_max_deadline_retries(
+            terminal_evaluation=eval_semantics,
+        ),
         idempotent_submission=True,
         max_device_retries=10 if eval_semantics else None,
         device_retry_delay=60 if eval_semantics else None,
     )
+    timeout_s = request.get("timeout_s")
+    if timeout_s is None and isinstance(request.get("options"), dict):
+        timeout_s = request["options"].get("timeout_s")
+    return annotate_deadline_timeout(process, timeout_s)
 
 
 def run_eval_sdk(

@@ -3068,14 +3068,21 @@ def run_direct_job(
     if identity_extra:
         identity["execution_context"] = identity_extra
     from aka.light.execution.gateway_jobs import configured_max_deadline_retries
-    return execute_job(identity, submit, poll,
-                       wait_budget=timeout + queue_wait_grace,
-                       retry_classifier=eval_retry_kind if eval_request else None,
-                       max_infra_retries=configured_max_infra_retries(max_infra_retries),
-                       max_deadline_retries=configured_max_deadline_retries(),
-                       idempotent_submission=True,
-                       max_device_retries=max_device_retries if eval_request else None,
-                       device_retry_delay=device_retry_delay)
+    process = execute_job(identity, submit, poll,
+                          wait_budget=timeout + queue_wait_grace,
+                          retry_classifier=eval_retry_kind if eval_request else None,
+                          max_infra_retries=configured_max_infra_retries(max_infra_retries),
+                          max_deadline_retries=configured_max_deadline_retries(
+                              terminal_evaluation=eval_request,
+                          ),
+                          idempotent_submission=True,
+                          max_device_retries=max_device_retries if eval_request else None,
+                          device_retry_delay=device_retry_delay)
+    from aka.light.execution.gateway_jobs import annotate_deadline_timeout
+    request_timeout = payload.get("timeout_s")
+    if request_timeout is None and isinstance(payload.get("options"), dict):
+        request_timeout = payload["options"].get("timeout_s")
+    return annotate_deadline_timeout(process, request_timeout)
 
 
 def _run_direct_gateway(
@@ -3392,7 +3399,9 @@ def run_agate_with_cancel_retry(
                        submit, poll, wait_budget=wait_budget,
                        retry_classifier=eval_retry_kind if eval_request else None,
                        max_infra_retries=configured_max_infra_retries(max_infra_retries),
-                       max_deadline_retries=configured_max_deadline_retries(),
+                       max_deadline_retries=configured_max_deadline_retries(
+                           terminal_evaluation=eval_request,
+                       ),
                        max_device_retries=max_device_retries if eval_request else None,
                        device_retry_delay=device_retry_delay)
 

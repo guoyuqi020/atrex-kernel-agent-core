@@ -20,12 +20,20 @@ from aka.light.experiment.store import JOB_ROOT_ENV, EvidenceUnavailable, digest
 from aka.light.evaluation.evaluation_failures import embedded_device_failure
 
 DEFAULT_MAX_INFRA_RETRIES = 2
-DEFAULT_MAX_DEADLINE_RETRIES: int | None = None
+DEFAULT_MAX_DEADLINE_RETRIES = 2
 TERMINAL_VALIDATION_ENV = "ATREX_AKA_TERMINAL_VALIDATION"
 
 
-def configured_max_deadline_retries() -> int | None:
-    """Explicit Agate job deadlines have no retry-count cap."""
+def configured_max_deadline_retries(*, terminal_evaluation: bool = False) -> int | None:
+    """Bound exploration deadlines; retain terminal Eval/ABBA until recovery.
+
+    ``ATREX_AKA_TERMINAL_VALIDATION`` is controller-private but also covers
+    terminal Dev probes.  Require the caller to identify Eval semantics so a
+    terminal numerical probe, Profile, Check or Disassemble cannot inherit an
+    unbounded resubmission loop.
+    """
+    if terminal_evaluation and os.environ.get(TERMINAL_VALIDATION_ENV) == "1":
+        return None
     return DEFAULT_MAX_DEADLINE_RETRIES
 
 
@@ -232,6 +240,38 @@ def job_from_process(process: subprocess.CompletedProcess) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def annotate_deadline_timeout(
+    process: subprocess.CompletedProcess,
+    timeout_s: object,
+) -> subprocess.CompletedProcess:
+    """Expose the submitted Job deadline on an explicit deadline failure.
+
+    Agate currently returns ``job deadline exceeded`` without the configured
+    duration. Keep its original error intact and add only the Runtime-owned
+    request value so the Agent can distinguish a short deadline from a slow or
+    stuck candidate.
+    """
+    if (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, (int, float))
+        or not math.isfinite(timeout_s)
+        or timeout_s <= 0
+    ):
+        return process
+    job = job_from_process(process)
+    if not isinstance(job, dict) or not _job_deadline_exceeded(job.get("error")):
+        return process
+    error = dict(job["error"])
+    error.setdefault("timeout_s", timeout_s)
+    job = dict(job, error=error)
+    return subprocess.CompletedProcess(
+        process.args,
+        process.returncode,
+        json.dumps(job),
+        process.stderr,
+    )
+
+
 def bundle_digest(data: bytes) -> str:
     """Ignore gzip/tar timestamps, but retain exact uploaded bytes and modes."""
     entries = {}
@@ -359,9 +399,10 @@ def execute_job(
     each replacement receives a fresh bounded wait window, so terminal
     validation can wait indefinitely without making any individual Job
     unbounded.
-    An explicit Agate ``job deadline exceeded`` terminal is retried without a
-    count limit by default. Every retry receives a fresh bounded wait window
-    and remains interruptible through Session revocation or process shutdown.
+    An explicit Agate ``job deadline exceeded`` terminal is retried according
+    to ``max_deadline_retries``. Terminal Eval/ABBA callers may set it to
+    ``None``; every such retry receives a fresh bounded wait window and remains
+    interruptible through Session revocation or process shutdown.
     """
     if max_wait_retries < 0:
         raise ValueError("max_wait_retries must be non-negative")
