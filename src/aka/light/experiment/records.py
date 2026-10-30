@@ -79,12 +79,39 @@ def query(store, args, workspace: Path) -> dict:
         if policy is None:
             publish(workspace, str(path), source)
         else:
-            if (workspace / path).exists():
+            destination = workspace / path
+            if destination.exists():
                 from aka.light.workspace.sources import snapshot
-                if snapshot(workspace / path) != source:
-                    raise ValueError("Tree output directory contains different source; choose a new scratch/ directory")
+                try:
+                    # The saved Kernel already carries its complete source-tree
+                    # contract.  Pass it explicitly: an existing scratch path
+                    # may be incomplete and therefore cannot reliably
+                    # rediscover tree mode from implementation/__init__.py.
+                    existing = snapshot(destination, policy=policy)
+                except (OSError, ValueError) as error:
+                    raise field_error(
+                        "output_path",
+                        "Kernel-read output path already exists but is not a complete source tree.",
+                        code="output_path_conflict",
+                        next_action=(
+                            "Remove or rename the stale destination inside scratch/, then rerun "
+                            "the same kernel-read command. For an ad-hoc read, an unused scratch/ "
+                            "directory also works. Do not edit the current Kernel to repair this."
+                        ),
+                    ) from error
+                if existing != source:
+                    raise field_error(
+                        "output_path",
+                        "Kernel-read output path already contains a different source tree.",
+                        code="output_path_conflict",
+                        next_action=(
+                            "Choose an unused directory inside scratch/, or remove the stale "
+                            "destination before rerunning the same kernel-read command. Do not "
+                            "overwrite or edit the current Kernel."
+                        ),
+                    )
             else:
-                install(workspace / path, source)
+                install(destination, source)
         result = {"ok": True, "kernel_id": args.kernel_id, "file": str(path), "bytes": len(source)}
         if policy is not None:
             result.update(source_kind="tree", directory=str(path), file_count=len(files))
