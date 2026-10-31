@@ -38,8 +38,11 @@ run ABBA, or add a separate benchmark.
 
 Read workspace `README.md`, the optional `memory/v0.json` if present, the complete current Kernel source tree, and the available public
 contract/reference files. For native problems these include `reference.py`, `input.py`, and
-immutable `metadata.json` when present, plus public `agent_problem.json` or legacy `shapes.json`; for SOL, use `definition.json`, `reference.py`,
+immutable `metadata.json` when present, plus public `agent_problem.json`, immutable
+`public_shapes.json` when present, or legacy `shapes.json`; for SOL, use `definition.json`, `reference.py`,
 and `workload.jsonl`. Cover the full public domain without searching for hidden evaluator inputs.
+`public_shapes.json` exposes exact parameters for only the canonical first five Shapes; the
+Supervisor's full validation still covers every private Shape.
 Reconcile any supplied correctness guidance with the immutable reference; advice does not
 override the operator contract.
 

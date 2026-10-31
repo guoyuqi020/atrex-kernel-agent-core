@@ -541,11 +541,25 @@ class LongHorizonCampaign:
         template = PROMPT_PATH.read_text(encoding="utf-8")
         coordinate = getattr(self.base_campaign, "search_coordinate", None)
         if coordinate is not None:
+            role = {
+                1: "T1 role: bounded exploitation around the global or lineage best.",
+                2: (
+                    "T2 role: continue the highest-priority major redesign until its milestone, "
+                    "stop condition, blocker, or completion; then select the next major redesign."
+                ),
+                3: "T3 role: capability probes, profiling, and independent exploration.",
+            }.get(
+                coordinate["trajectory"],
+                "Additional-island role: preserve an independent line of evidence-backed exploration.",
+            )
             template = (
                 f"Search location: Epoch {coordinate['epoch']}, Trajectory {coordinate['trajectory']}, "
                 f"Episode {coordinate['episode']}. One Episode is one serial optimization step. "
-                "Use the Kernel already present. The Supervisor selects and broadcasts the best "
-                "accepted Kernel at the Epoch boundary; do not copy other trajectories or manage Git.\n\n"
+                "This trajectory is a persistent island: keep its working tree, local Git history, "
+                "lineage best, active Direction and major-redesign WIP across Epochs. The Supervisor "
+                "updates global-best metadata and imports sealed peer refs at Epoch boundaries but "
+                "does not overwrite this trajectory. Adopt peer work explicitly with Git and Runtime "
+                f"evidence, then validate it normally. {role}\n\n"
                 + template
             )
         # Insert fragments before substituting values so nested task placeholders resolve too.
@@ -608,6 +622,14 @@ class LongHorizonCampaign:
                     "follow the inheritance policy in `WORKSPACE.md`; use the files already present."
                 ),
                 "CONVERSION_TOLERANCE": f"{main_adapter.CONVERT_PERF_TOL:.0%}",
+                "RESEARCH_BOARD": (
+                    json.dumps(
+                        self.base_campaign.research_board(),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        indent=2,
+                    )
+                ),
             },
         )
 

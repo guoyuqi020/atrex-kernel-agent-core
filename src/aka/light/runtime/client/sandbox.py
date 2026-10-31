@@ -11,9 +11,11 @@ Read saved results with --kind record-read --record-id gateway-...;
 copy source with --kind kernel-read --kernel-id kernel-... --output-path scratch/kernel-tree;
 list a Kernel's measurements with --kind kernel-records --kernel-id kernel-....
 Find each Shape's fastest measured Kernel with --kind kernel-pareto-frontier (no GPU job).
-Journal writes: update-direction, record-experiment, episode-report --request-file FILE.
+Journal writes: update-direction, progress-direction, prioritize-direction, adopt-kernel,
+record-experiment, episode-report --request-file FILE.
 Journal indexes: list-directions, list-experiments --output-path scratch/FILE.
 Journal reads: load-direction, load-experiment --record-id ID.
+Research overview: research-board.
 Journal tools require a registered Long Horizon Episode; see skills/runtime-records/.
 No direct Agate fallback is performed when the Runtime is unavailable.
 """
@@ -35,9 +37,17 @@ MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_REQUEST_FILE_BYTES = MAX_REQUEST_BYTES - 4 * 1024
 MAX_RESPONSE_BYTES = 1024 * 1024
 WIKI_KINDS = {"wiki-query": "query_nl", "wiki-search": "query_wiki", "wiki-hardware": "query_hardware"}
-REQUEST_KINDS = {"update-direction": "direction_update", "record-experiment": "experiment_record", "episode-report": "episode_report"}
+REQUEST_KINDS = {
+    "update-direction": "direction_update",
+    "progress-direction": "direction_progress",
+    "prioritize-direction": "direction_prioritize",
+    "adopt-kernel": "kernel_adopt",
+    "record-experiment": "experiment_record",
+    "episode-report": "episode_report",
+}
 LIST_KINDS = {"list-directions": "directions_list", "list-experiments": "experiments_list"}
 LOAD_KINDS = {"load-direction": ("direction_load", "direction_id"), "load-experiment": ("experiment_load", "experiment_id")}
+READ_KINDS = {"research-board": "research_board"}
 
 
 def client_error(code: str, message: str, instruction: str, *, repairable=False, path="$", **details) -> None:
@@ -61,7 +71,7 @@ class _ClientParser(argparse.ArgumentParser):
 
 def journal_request(kind: str, argv: list[str]) -> dict:
     parser = _ClientParser(allow_abbrev=False, description="Runtime Journal; request schemas: skills/runtime-records/references/journal.md")
-    parser.add_argument("--kind", choices=[*REQUEST_KINDS, *LIST_KINDS, *LOAD_KINDS], required=True)
+    parser.add_argument("--kind", choices=[*REQUEST_KINDS, *LIST_KINDS, *LOAD_KINDS, *READ_KINDS], required=True)
     if kind in REQUEST_KINDS:
         parser.add_argument(
             "--request-file",
@@ -73,7 +83,7 @@ def journal_request(kind: str, argv: list[str]) -> dict:
         )
     elif kind in LIST_KINDS:
         parser.add_argument("--output-path", required=True, help="Workspace-relative scratch/ destination")
-    else:
+    elif kind in LOAD_KINDS:
         parser.add_argument("--record-id", required=True)
     args = parser.parse_args(argv)
     if kind in REQUEST_KINDS:
@@ -94,6 +104,8 @@ def journal_request(kind: str, argv: list[str]) -> dict:
         return {"operation": REQUEST_KINDS[kind], "request": value}
     if kind in LIST_KINDS:
         return {"operation": LIST_KINDS[kind], "file": args.output_path}
+    if kind in READ_KINDS:
+        return {"operation": READ_KINDS[kind]}
     operation, field = LOAD_KINDS[kind]
     return {"operation": operation, field: args.record_id}
 
@@ -224,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if kind is not None:
             record_read = kind == "record-read"
-        if kind in {*REQUEST_KINDS, *LIST_KINDS, *LOAD_KINDS}:
+        if kind in {*REQUEST_KINDS, *LIST_KINDS, *LOAD_KINDS, *READ_KINDS}:
             return proxy_command("/v1/journal/execute", journal_request(kind, args))
         if kind in WIKI_KINDS:
             count = 2 if value == "--kind" else 1

@@ -1,9 +1,13 @@
 ## Prior iteration state
 
-Before proposing or starting any Direction in this Episode, call `list-directions` to obtain the
-compact catalog, then call `load-direction` for every visible Direction before choosing. Compare
-expected performance impact, supporting evidence,
+Begin with the injected Research Board. Before proposing or starting any Direction in this Episode,
+refresh the compact catalog with `list-directions` when needed so every visible Direction is
+considered. Load the queue leader and any plausible competing Direction in full before choosing;
+do not bulk-load unrelated closed entries. Compare expected performance impact, supporting evidence,
 implementation cost, unresolved uncertainty, and whether a valuable redesign was previously deferred.
+Finding a locally faster checkpoint is not by itself a reason to hand off. Continue the selected
+Direction while a high-value plan step remains, especially for `major_redesign`; commit or tag a
+known-correct checkpoint before risky changes.
 Choose the single most important Direction rather than the easiest local edit, reuse its ID when the
 hypothesis is unchanged, and explain the comparison in the `start` event's `analysis`. If no existing
 Direction deserves work, propose and start a new one. Use optional `memory/v*.json` summaries as
@@ -31,12 +35,11 @@ Use this as a working guide when useful, not as additional mandatory stages:
    `proposed`; do not interrupt the current `in_progress` Direction merely to start the new idea.
 4. **Implement and validate.** Work on one coherent candidate at a time. Use Gateway Evaluate for
    correctness and performance, reusing a matching saved result instead of repeating the measurement.
-5. **Record and decide.** Record each decisive result as an Experiment. Its `hypothesis` is the
-   concrete, falsifiable prediction for this change, not a repetition of the Direction's broader
-   hypothesis. Supply the actual `change`, Gateway Record IDs, and `analysis`. The cited
-   Gateway Records are the measurement facts; use `record-read` when you need their results instead
-   of copying measurement values into the Experiment. Use those facts to continue, repair, restore a
-   measured Kernel, or change Direction.
+5. **Record and decide.** Record each decisive result as an Experiment with a short `name`, the
+   concrete question in `intent`, the relevant `gateway_record_ids`, and a bounded
+   `interpretation`. Runtime derives source changes, Kernel identities, correctness, latency and
+   failure facts from those records; do not restate them. Use `record-read` when you need the full
+   result. Use those facts to continue, repair, restore a measured Kernel, or change Direction.
    Prepare the report as work proceeds, but do not submit it merely because one candidate is already
    promotable. Submit an evidence-backed candidate, pivot, or blocker using the terminal contract
    below only after no remaining concrete high-value step fits an explicitly configured active-time budget. When deferring

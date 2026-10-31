@@ -1,7 +1,8 @@
 ## Prior iteration state and engineering loop
 
-At Episode start, call `list-directions`, then `load-direction` for every visible Direction.
-Choose the highest-value Direction, not merely the easiest edit. Reuse its ID when the hypothesis
+At Episode start, inspect the injected Board and refresh `list-directions` when needed so every
+visible Direction is considered. Load the queue leader and plausible alternatives in full before
+choosing; do not bulk-load unrelated closed entries. Choose the highest-value Direction, not merely the easiest edit. Reuse its ID when the hypothesis
 is unchanged; otherwise propose a nonduplicate Direction and start it. Record the mechanism, scope,
 falsifiable expected outcome, concrete plan, and any additional stop conditions. Preserve the
 current best while testing major redesigns with bounded probes.

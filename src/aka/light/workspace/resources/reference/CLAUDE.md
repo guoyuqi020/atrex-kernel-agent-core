@@ -34,9 +34,12 @@ and finish procedure. Do not assume another DSL, library, or validation procedur
   single-file Kernel in `kernel.py` or split it into multiple files. Keep
   `implementation/__init__.py` present. The entire tree is one candidate;
   update `solution.json` only where the phase permits. Do not edit public contracts or canonical
-  memory, or use Git for rollback.
-- Cover the entire public input domain. Opaque Shape IDs identify results, not input parameters;
-  do not reconstruct hidden cases or search outside the workspace for private inputs.
+  memory. Managed optimization Episodes provide an isolated local Git repository: use Git for
+  checkpoints, diff, branches, restore, revert and imported peer history. Git identity is not
+  measurement evidence; Runtime Kernel and Gateway Record IDs remain authoritative.
+- Cover the entire public input domain. `public_shapes.json`, when present, exposes exact parameters
+  for the canonical first five Shapes. Other Shape IDs are opaque and must not be used to reconstruct
+  hidden cases. Subset evaluation is diagnostic and cannot support promotion.
 - In managed Episodes, read `WORKSPACE.md`. Use `skills/<name>/SKILL.md` for reusable
   methods and `tools/` for reusable scripts; update the corresponding `README.md`
   whenever custom contents change. Installed Skills and `tools/sandbox.py` and

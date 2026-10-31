@@ -6,8 +6,9 @@ measurement authority. Direction recording is disabled: do not call Direction to
 `direction_id` from Experiment requests.
 
 Choose and implement the highest-value coherent change. After each decisive measurement, record an
-Experiment with a concrete falsifiable prediction, the actual change, Gateway Record IDs, and a
-concise analysis. Use `record-read` instead of copying measurement facts into prose. Preserve the
-current best while testing major redesigns with bounded probes. Do not stop merely because one
-candidate is promotable; continue until no remaining high-value step fits an explicitly configured
-active-time budget.
+Experiment with `name`, a concrete question in `intent`, the relevant `gateway_record_ids`, and a
+bounded `interpretation`. Runtime derives source changes, Kernel identities, correctness, latency
+and failure facts from those records. Use `record-read` instead of copying measurement facts into
+prose. Preserve the current best while testing major redesigns with bounded probes. Do not stop
+merely because one candidate is promotable; continue until no remaining high-value step fits an
+explicitly configured active-time budget.

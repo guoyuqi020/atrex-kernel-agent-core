@@ -21,6 +21,7 @@ class MeasurementEffects:
     deadline: float | None = None
     request_id: str = ""
     terminal_validation: bool = False
+    agent_git: dict | None = None
 
 
 class RecordedExperiments:

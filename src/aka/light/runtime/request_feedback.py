@@ -16,7 +16,15 @@ JOURNAL_TOOLS = {
     "episode_report": "episode-report", "directions_list": "list-directions",
     "experiments_list": "list-experiments", "direction_load": "load-direction",
     "experiment_load": "load-experiment",
+    "research_board": "research-board", "direction_progress": "progress-direction",
+    "direction_prioritize": "prioritize-direction",
+    "kernel_adopt": "adopt-kernel",
 }
+DIRECTION_TOOLS = {
+    "direction_update", "direction_progress", "direction_prioritize",
+    "directions_list", "direction_load",
+}
+EXPERIMENT_TOOLS = {"experiment_record", "experiments_list", "experiment_load"}
 
 
 def _text():
@@ -42,6 +50,7 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
         DIRECTION_CHANGE_SCOPES,
         DIRECTION_UPDATE_FIELDS,
         DIRECTION_CLOSURE_FIELDS,
+        DIRECTION_CLOSURE_OPTIONAL_FIELDS,
         EXPERIMENT_FIELDS,
     )
     from aka.light.workflow.direction_lifecycle import DIRECTION_STATUS, CLOSURES
@@ -49,9 +58,9 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
 
     directions_enabled = research_records if directions_enabled is None else directions_enabled
     experiments_enabled = research_records if experiments_enabled is None else experiments_enabled
-    if operation in {"direction_update", "directions_list", "direction_load"} and not directions_enabled:
+    if operation in DIRECTION_TOOLS and not directions_enabled:
         return {"available": False, "reason": "directions_disabled"}
-    if operation in {"experiment_record", "experiments_list", "experiment_load"} and not experiments_enabled:
+    if operation in EXPERIMENT_TOOLS and not experiments_enabled:
         return {"available": False, "reason": "experiments_disabled"}
     if operation == "episode_report":
         properties = {"status": {"enum": ["candidate_ready", "pivot", "blocked"]}, "summary": _text(),
@@ -94,13 +103,32 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
         fields = set(EXPERIMENT_FIELDS)
         properties = {key: _text() for key in fields}
         if directions_enabled:
-            fields.add("direction_id")
             properties["direction_id"] = {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"}
         properties.update(gateway_record_ids=_ids("gateway-", minimum=1),
                           wiki_usage={"type": "array", "maxItems": 64, "items": usage},
                           wiki_query_ids={"type": "array", "maxItems": 64, "items": query_id},
                           wiki_usage_status={"type": "string", "enum": sorted(WIKI_USAGE_STATUSES)})
         return _object(properties, fields)
+    if operation == "direction_progress":
+        return _object({
+            "direction_id": {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"},
+            "plan_step": {"type": "integer", "minimum": 0},
+        }, {"direction_id", "plan_step"})
+    if operation == "direction_prioritize":
+        schema = _object({
+            "direction_id": {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"},
+            "before_direction_id": {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"},
+            "after_direction_id": {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"},
+            "reason": _text(),
+        }, {"direction_id", "reason"})
+        schema["not"] = {"required": ["before_direction_id", "after_direction_id"]}
+        return schema
+    if operation == "kernel_adopt":
+        return _object({
+            "kernel_id": {"type": "string", "pattern": "^kernel-[0-9a-f]{32}$"},
+            "source_ref": _text(),
+            "reason": _text(),
+        }, {"kernel_id", "source_ref", "reason"})
     if operation == "direction_update":
         action = body.get("action")
         if not isinstance(action, str) or action not in DIRECTION_STATUS:
@@ -125,6 +153,8 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
             properties["direction_id"] = {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"}
             if action in CLOSURES:
                 properties["hypothesis_status"] = {"enum": ["unresolved", "supported", "refuted"]}
+                for key in DIRECTION_CLOSURE_OPTIONAL_FIELDS:
+                    properties[key] = _text()
                 if experiments_enabled:
                     properties["supporting_experiment_ids"] = _ids("experiment_", minimum=1, maximum=32)
                 else:
@@ -262,8 +292,8 @@ def augment_error(response, *, route, request, research_records=False, direction
         else:
             result["supported_operations"] = [
                 op for op in JOURNAL_TOOLS
-                if (op not in {"direction_update", "directions_list", "direction_load"} or directions_enabled)
-                and (op not in {"experiment_record", "experiments_list", "experiment_load"} or experiments_enabled)
+                if (op not in DIRECTION_TOOLS or directions_enabled)
+                and (op not in EXPERIMENT_TOOLS or experiments_enabled)
             ]
         if operation in JOURNAL_TOOLS:
             result["operation"] = JOURNAL_TOOLS[operation]

@@ -30,6 +30,8 @@ from aka.light.workflow.journal_service import (
     research_projection,
     shared_research_path,
 )
+from aka.light.workspace.shared_history import export_epoch, import_exports
+from aka.light.research import ResearchStore
 
 
 class EpisodeSearchDriver:
@@ -195,6 +197,52 @@ class EpisodeSearchDriver:
             "Experiment",
         )
 
+        research_states = {
+            number: ResearchStore(
+                supervisor_campaign_root(self.children[number].workspace) / "research"
+            ).read()
+            for number in sorted(self.children)
+        }
+        research_events = {
+            number: ResearchStore(
+                supervisor_campaign_root(self.children[number].workspace) / "research"
+            ).events()
+            for number in sorted(self.children)
+        }
+        # A progress step is monotonic. Merge the union so a peer's completed
+        # milestone cannot disappear when the Direction crosses an Epoch.
+        for direction_id, direction in directions.items():
+            completed = set()
+            for state in research_states.values():
+                item = state.get("directions", {}).get(direction_id, {})
+                completed.update(item.get("completed_plan_steps", []))
+            if completed:
+                direction["completed_plan_steps"] = sorted(completed)
+
+        latest_reorder = None
+        for number, events in research_events.items():
+            for event in events:
+                if event.get("type") != "direction.reordered":
+                    continue
+                candidate = (str(event.get("recorded_at", "")), number)
+                if latest_reorder is None or candidate > latest_reorder:
+                    latest_reorder = candidate
+        order_sources = sorted(research_states)
+        if latest_reorder is not None:
+            preferred = latest_reorder[1]
+            order_sources = [preferred, *(item for item in order_sources if item != preferred)]
+        research_queue = []
+        for number in order_sources:
+            for direction_id in research_states[number].get("queue", []):
+                if direction_id in directions and direction_id not in research_queue:
+                    research_queue.append(direction_id)
+        for direction_id in sorted(directions):
+            if (
+                directions[direction_id].get("status") in {"proposed", "in_progress", "deferred", "blocked"}
+                and direction_id not in research_queue
+            ):
+                research_queue.append(direction_id)
+
         central = MeasurementStore(self.root / "shared" / "measurements")
         record_origins = copy.deepcopy(previous.get("records", {}))
         new_record_ids = []
@@ -224,6 +272,7 @@ class EpisodeSearchDriver:
         research_value = {
             "directions": directions,
             "experiments": [experiments[key] for key in sorted(experiments)],
+            "research_queue": research_queue,
         }
         revision = evidence_digest(research_value)
         for number, child in sorted(self.children.items()):
@@ -232,7 +281,14 @@ class EpisodeSearchDriver:
             for record_id in new_record_ids:
                 destination.import_record(central, record_id)
             visible_directions = {
-                key: value for key, value in directions.items()
+                key: dict(
+                    value,
+                    **(
+                        {"owner": f"T{direction_origins[key]['trajectory']}"}
+                        if value.get("status") == "in_progress" else {}
+                    ),
+                )
+                for key, value in directions.items()
                 if direction_origins[key]["trajectory"] != number
             }
             visible_experiments = [
@@ -245,6 +301,7 @@ class EpisodeSearchDriver:
                 "through_epoch": epoch,
                 "directions": visible_directions,
                 "experiments": visible_experiments,
+                "research_queue": research_queue,
             }
             private_write(shared_research_path(destination_root / "journals"), shared)
 
@@ -273,6 +330,34 @@ class EpisodeSearchDriver:
         else:
             if existing != receipt:
                 raise RuntimeError("Epoch shared-evidence receipt changed during recovery")
+
+        for number, episode in sorted(terminal.items()):
+            agent_workspace = (
+                supervisor_campaign_root(self.children[number].workspace)
+                / "journals" / "episodes" / f"e{episode:08d}" / "agent" / "workspace"
+            )
+            if not (agent_workspace / ".git").is_dir():
+                # Pre-v2/migrated Episodes have no Agent-private repository.
+                # Their immutable Kernel/Measurement closure remains shared;
+                # start filtered history with the next v2 Episode.
+                private_write(
+                    self.root / "shared" / "git" / f"T{number}" / f"e{epoch:08d}.json",
+                    {
+                        "schema_version": 1,
+                        "trajectory": number,
+                        "epoch": epoch,
+                        "status": "unavailable",
+                        "reason": "legacy_episode_without_agent_git",
+                    },
+                )
+                continue
+            export_epoch(
+                agent_workspace,
+                self.root / "shared" / "git" / f"T{number}" / f"e{epoch:08d}.fast-export",
+                trajectory=number,
+                epoch=epoch,
+                audit_path=self.root / "shared" / "git" / f"T{number}" / f"e{epoch:08d}.json",
+            )
 
     def initialize(self, bootstrap, trajectories):
         for number in range(1, trajectories + 1):
@@ -342,13 +427,104 @@ class EpisodeSearchDriver:
         return commit_files(workspace, receipt_path.with_suffix(".git.json"), files,
                             f"search epoch {epoch}: {label} Kernel {kernel['sha256'][:16]}")
 
-    def prepare_epoch(self, epoch, kernel):
+    def prepare_epoch(self, epoch, kernels):
+        search_state = read_state(self.root / "state.json")
+        official = search_state.get("global_best")
+        if not isinstance(official, dict):
+            raise RuntimeError("Search checkpoint has no global best Kernel")
         for number, child in self.children.items():
             store = self._state(child)
             expected = (epoch - 1) * self.campaign.module_options.search.episodes_per_trajectory
             if store["episodes"] != expected or (child.workspace / ".atrex_long_horizon/active_episode.json").exists():
                 raise RuntimeError("Cannot broadcast while a trajectory has an unfinished or unexpected Episode")
-            self._publish(child.workspace, epoch, kernel, f"trajectory-{number:04d}")
+            expected_kernel = kernels.get(str(number))
+            if not isinstance(expected_kernel, dict):
+                raise RuntimeError("Search checkpoint has no working Kernel for a trajectory")
+            # Persistent island semantics: each trajectory keeps its own HEAD,
+            # WIP and lineage best. Epoch preparation validates identity but
+            # never broadcasts another trajectory's winner into this checkout.
+            current_source = source_snapshot(child.workspace)
+            if hashlib.sha256(current_source).hexdigest() != expected_kernel["sha256"]:
+                self._publish(
+                    child.workspace,
+                    epoch,
+                    expected_kernel,
+                    f"trajectory-{number:04d}-lineage-restore",
+                )
+            child.start_runtime()
+            kernel_identity = child._supervisor_runtime.measurements.kernel(
+                self.source(expected_kernel)
+            )
+            official_identity = child._supervisor_runtime.measurements.kernel(
+                self.source(official)
+            )
+            child._supervisor_runtime.research.checkpoint_lineage(
+                {
+                    "working_kernel_id": kernel_identity["kernel_id"],
+                    "lineage_best_kernel_id": kernel_identity["kernel_id"],
+                    "last_correct_kernel_id": kernel_identity["kernel_id"],
+                },
+                origin={"epoch": epoch, "trajectory": number},
+            )
+            child._supervisor_runtime.research.append(
+                "promotion.accepted",
+                {
+                    "kernel_id": official_identity["kernel_id"],
+                    "latency_us_geomean": official["latency_us_geomean"],
+                },
+                origin={"epoch": epoch, "trajectory": number},
+                dedupe_key=f"epoch-incumbent:{epoch}:{official['sha256']}",
+            )
+            if epoch > 1:
+                exports = []
+                exported_peers = []
+                for peer in sorted(self.children):
+                    if peer == number:
+                        continue
+                    root = self.root / "shared" / "git" / f"T{peer}"
+                    export = root / f"e{epoch - 1:08d}.fast-export"
+                    if export.is_file():
+                        exports.append(export)
+                        exported_peers.append(peer)
+                        continue
+                    receipt_path = root / f"e{epoch - 1:08d}.json"
+                    try:
+                        receipt = read_state(receipt_path)
+                    except FileNotFoundError as error:
+                        raise RuntimeError(
+                            f"Epoch peer Git history has neither export nor audit receipt: {export}"
+                        ) from error
+                    if receipt.get("status") != "unavailable":
+                        raise RuntimeError(f"Epoch peer Git export is missing: {export}")
+                notes = {}
+                for peer, kernel in kernels.items():
+                    if int(peer) not in exported_peers:
+                        continue
+                    ref = f"refs/atrex/shared/T{peer}/e{epoch - 1:04d}/head"
+                    notes[ref] = {
+                        "measurement_status": "measured",
+                        "kernel_sha256": kernel["sha256"],
+                        "correctness": "pass",
+                        "latency_us_geomean": kernel["latency_us_geomean"],
+                    }
+                runtime_root = supervisor_campaign_root(child.workspace)
+                audit_path = (
+                    runtime_root / "adaptive-state" / "git-imports" / f"e{epoch:08d}.json"
+                )
+                if exports:
+                    import_exports(
+                        runtime_root / "adaptive-state" / "agent-git.bundle",
+                        exports,
+                        notes=notes,
+                        audit_path=audit_path,
+                    )
+                else:
+                    private_write(audit_path, {
+                        "schema_version": 1,
+                        "imports": [],
+                        "status": "unavailable",
+                        "reason": "all_peer_episodes_predate_agent_git",
+                    })
 
     def _state(self, child):
         path = child.workspace / ".atrex_long_horizon/state.json"
@@ -425,7 +601,7 @@ class EpisodeSearchDriver:
 
     def stop_reason(self, state):
         target = self.campaign.target_util
-        if target > 0 and main_adapter.peak_util(state["seed"]["record"]) >= target:
+        if target > 0 and main_adapter.peak_util(state["global_best"]["record"]) >= target:
             return "success: target utilization reached at Epoch boundary"
         limit = self.campaign.max_stall
         if (limit and not self.campaign.module_options.goal_episodes

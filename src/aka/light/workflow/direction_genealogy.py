@@ -6,7 +6,10 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-RELATIONSHIPS = ("refinement", "correction", "combination")
+RELATIONSHIPS = (
+    "refinement", "correction", "combination", "alternative",
+    "reimplementation", "contradiction",
+)
 RELATIONSHIP_FIELDS = frozenset(
     {
         "relationship",
@@ -81,7 +84,9 @@ def validate_relationship(
         effective_parents.add(parent)
     if not effective_parents:
         raise ValueError("relationship requires at least one parent Direction or Experiment")
-    if kind in {"refinement", "correction"} and len(effective_parents) != 1:
+    if kind in {
+        "refinement", "correction", "alternative", "reimplementation", "contradiction",
+    } and len(effective_parents) != 1:
         raise ValueError(
             f"{kind} requires exactly one parent Direction, directly or via Experiments"
         )

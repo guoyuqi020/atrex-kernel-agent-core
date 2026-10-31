@@ -68,12 +68,15 @@ from aka.light.workspace.versions import (
 )
 from aka.legacy.task.problem.layout import (
     AGENT_PROBLEM_FILENAME,
+    PUBLIC_SHAPES_FILENAME,
     agent_visible_operator_files,
     has_agent_problem,
     is_sol_op,
     validate_agent_problem,
     validate_generated_agent_problem,
     validate_private_shapes,
+    public_shapes_payload,
+    validate_public_shapes,
 )
 from aka.light.acceptance.source_policy import (
     install_workspace_policy,
@@ -449,6 +452,23 @@ class Campaign:
                 )
                 return
 
+    def _ensure_public_shapes(self) -> None:
+        """Materialize the deterministic first-five public Shape projection."""
+        private_dir = self.private_reference_dir
+        if private_dir is None:
+            return
+        destination = self.workspace / PUBLIC_SHAPES_FILENAME
+        expected = public_shapes_payload(private_dir / "shapes.json")
+        if destination.exists():
+            validate_public_shapes(
+                destination, private_shapes_path=private_dir / "shapes.json"
+            )
+            return
+        destination.write_text(
+            json.dumps(expected, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
 
     def _framework_baseline_correctness_reviewers(self) -> tuple[str, ...]:
         return tuple(
@@ -463,6 +483,11 @@ class Campaign:
     def agent_boundary_environment(self, role: str = "optimizer") -> dict[str, str]:
         return {
             "ATREX_AGENT_SANDBOX": self.agent_sandbox,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "/usr/bin/false",
+            "GIT_SSH_COMMAND": "/usr/bin/false",
             "ATREX_BWRAP_EXECUTABLE": self.bwrap_executable,
             "ATREX_AGENT_READ_ONLY_PATHS": json.dumps(self.agent_read_only_paths),
             "ATREX_AGENT_WORKSPACE_ROLE": role,
@@ -596,12 +621,25 @@ class Campaign:
             branch=branch,
             memory_version=memory_version,
             supervisor_git=supervisor_git,
+            origin=(getattr(self, "search_coordinate", None) or {
+                "epoch": episode,
+                "trajectory": 1,
+                "episode": episode,
+            }),
         )
 
     def read_runtime_episode_journal(self, episode: int) -> dict:
         """Read existing private state without registering or creating an Episode."""
         self.start_runtime()
         return self._supervisor_runtime.read_episode_journal(episode)
+
+    def research_board(self) -> dict:
+        self.start_runtime()
+        coordinate = getattr(self, "search_coordinate", None) or {}
+        trajectory = coordinate.get("trajectory", 1)
+        return self._supervisor_runtime.research_board(
+            trajectory=trajectory if type(trajectory) is int and trajectory > 0 else 1
+        )
 
     def close_runtime(self) -> None:
         runtime = getattr(self, "_supervisor_runtime", None)
@@ -689,6 +727,12 @@ class Campaign:
         if private_dir is None:
             return
         public_problem = self.workspace / AGENT_PROBLEM_FILENAME
+        public_shapes = self.workspace / PUBLIC_SHAPES_FILENAME
+        if not public_shapes.exists():
+            # Safe resume migration for generalized workspaces created before
+            # the deterministic five-Shape projection was introduced.  Never
+            # overwrite an existing file: validation below remains tamper-evident.
+            self._ensure_public_shapes()
         if not public_problem.is_file():
             raise RuntimeError(
                 "generalized Atrex-Bench workspace is missing agent_problem.json; "
@@ -718,6 +762,9 @@ class Campaign:
                     raise ValueError(
                         "workspace agent_problem.json was modified after automatic generation"
                     )
+            validate_public_shapes(
+                public_shapes, private_shapes_path=private_dir / "shapes.json"
+            )
         except ValueError as exc:
             raise RuntimeError(
                 f"generalized Atrex-Bench workspace has an invalid public problem: {exc}; "
@@ -1112,11 +1159,12 @@ class Campaign:
             if source.is_file():
                 shutil.copy2(source, self.workspace / name)
         self._ensure_agent_problem()
+        self._ensure_public_shapes()
         if generalized:
             # Seed the immutable public contract into the eventual V0 commit even when the
             # baseline agent stages only its own Kernel source files.
             subprocess.run(
-                ["git", "add", AGENT_PROBLEM_FILENAME],
+                ["git", "add", AGENT_PROBLEM_FILENAME, PUBLIC_SHAPES_FILENAME],
                 cwd=str(self.workspace),
                 check=True,
             )

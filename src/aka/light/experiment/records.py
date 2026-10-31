@@ -370,7 +370,12 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
                              "status": "succeeded" if response["exit_code"] == 0 else "failed"}))
             response = dict(response, stdout="\n".join(lines) + "\n")
             response = seal_response(response, request, record_id=task.record_id, kernels=kernels)
-            task.finish(response, cacheable=cacheable and not custom_launcher, pending=pending)
+            task.finish(
+                response,
+                cacheable=cacheable and not custom_launcher,
+                pending=pending,
+                agent_git=effects.agent_git,
+            )
             # A source rejection is definitive and repairable, not missing GPU
             # evidence. Require private checkpoints too; a Dev-printed marker
             # alone must not authorize an acceptance classification.

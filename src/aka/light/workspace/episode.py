@@ -1,4 +1,4 @@
-"""Persistent Git-free Episode drafts; the controller retains its real worktree."""
+"""Persistent Episode drafts with an isolated Agent-local Git repository."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from aka.light.workspace.sources import (
 
 EPISODE_WORKSPACE_ENV = "ATREX_EPISODE_WORKSPACE"
 PUBLIC_FILES = (
-    "README.md", "CLAUDE.md", "agent_problem.json", "reference.py", "input.py",
+    "README.md", "CLAUDE.md", "agent_problem.json", "public_shapes.json", "reference.py", "input.py",
     "definition.json", "workload.jsonl", "solution.json", "shapes.json", "metadata.json", "roofline.json",
     "valid.py",
 )
@@ -77,10 +77,14 @@ class EpisodeWorkspace:
         self.plugin_registry = plugin_registry
         self.inherit_state = inherit_state
         self.history = history
+        self.adaptive_root = adaptive_root
         from aka.light.workspace.adaptive import AdaptiveState, reserved_paths
         self.reserved_paths = reserved_paths(plugin_registry)
         self.adaptive = (AdaptiveState(adaptive_root, episode, self.reserved_paths)
                          if adaptive_root is not None else None)
+        from aka.light.workspace.agent_git import AgentGit
+        git_state_root = adaptive_root or directory
+        self.agent_git = AgentGit(self.root, git_state_root / "agent-git.bundle")
 
     def prepare(self) -> Path:
         from aka.light.workspace.files import publish
@@ -155,6 +159,7 @@ class EpisodeWorkspace:
         # Do not install the evaluator or copy .git / control checkpoints.
         plugin_snapshot = self.plugin_registry.snapshot()
         # Refresh only reserved assets; custom Skills/tools survive Session resumes.
+        self.agent_git.prepare()
         self.prepare_session()
         durable_write_json(self.state_path, dict(state, kernel_digest=digest,
                                                research_records=self.research_records,
@@ -188,6 +193,12 @@ class EpisodeWorkspace:
             "scratch/ is temporary: a new Episode starts empty; resuming this Episode keeps it. "
             "If present, memory/v*.json contains optional Supervisor-generated summaries, not editable Agent memory. "
             "Kernel promotion and reusable state are independent. Never store credentials here.\n"
+            "This workspace has a trajectory-private local Git repository. Use local branches, commits, "
+            "tags, diff, restore, revert and cherry-pick for engineering recovery. Network remotes, "
+            "credentials, hooks, submodules and LFS are disabled. Runtime evaluates the actual bytes in "
+            "kernel.py and implementation/; Git commits and refs are never promotion evidence. "
+            "Imported peers appear below refs/atrex/shared/ and measurement indexes in "
+            "refs/notes/atrex-measurements.\n"
             "\ninput/evidence/ is a read-only snapshot of completed earlier Episodes. "
             "Read index.json there to locate episodes/<eight-digit-episode>/"
             "conversation.jsonl (the latest finalized Session, not all physical retries). "
@@ -203,6 +214,8 @@ class EpisodeWorkspace:
         from aka.light.workspace.files import publish
 
         state = json.loads(_read(self.state_path))
+        state["agent_git"] = self.agent_git.capture()
+        state["agent_git_checkpoint"] = self.agent_git.persist()
         if self.adaptive is not None:
             # Checkpoint even when this Session fails or its candidate is rejected.
             # Do not import/execute these files in the Supervisor.

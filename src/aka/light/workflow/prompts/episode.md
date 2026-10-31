@@ -22,11 +22,24 @@ benchmark is not, by itself, a reason to stop.
 
 {{GOAL_DIRECTIVE}}
 
+## Research Board
+
+This read-only Board is a bounded projection of durable Runtime state. Inspect it before choosing
+work. Refresh it with `python3 tools/sandbox.py --kind research-board` when a decision depends on
+newly recorded research.
+
+```json
+{{RESEARCH_BOARD}}
+```
+
 Read `WORKSPACE.md` for this Episode's inheritance policy. Put reusable methods in
 `skills/<name>/SKILL.md` and reusable scripts in `tools/`; update each directory's
 `README.md` when adding, modifying or deleting custom contents. Do not change
 installed Skills or HTTP clients. Use `scratch/` for temporary requests, diagnostics,
-and saved source copies; it is cleared for a new Episode, not a resumed Session.
+and saved source copies; it is cleared for a new Episode, not a resumed Session. Inspect immutable
+`public_shapes.json` when present. It exposes exact parameters for only
+the canonical first five Shapes; other result keys are opaque IDs. `--shape-id` subsets are
+allowed for diagnosis but cannot support promotion. Full Evaluate and terminal ABBA cover all Shapes.
 Read immutable workspace `metadata.json` when present before reasoning about correctness;
 do not infer tolerance rules from dtype, operator name, or prior tasks.
 Read `input/evidence/index.json` to find completed earlier Episodes' latest finalized

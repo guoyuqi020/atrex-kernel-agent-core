@@ -17,6 +17,7 @@ import threading
 import time
 import traceback
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -45,7 +46,12 @@ from aka.light.workspace.files import (
 from aka.light.experiment.store import ABBA_BATCH_ROOT_ENV, BATCH_ROOT_ENV, JOB_ROOT_ENV, TaskRunning
 from aka.light.experiment.records import QUERY_KINDS, task_conflict_response
 from aka.light.workflow.journal_service import SupervisorJournalService, load_journal, journal_lock
-from aka.light.runtime.request_errors import AgentRequestError, RuntimeStateError, error_response
+from aka.light.runtime.request_errors import (
+    AgentRequestError,
+    RuntimeStateError,
+    error_response,
+    field_error,
+)
 from aka.light.runtime.request_feedback import augment_error
 from aka.light.runtime.plugin_output import (
     MAX_OUTPUT_BYTES,
@@ -616,6 +622,8 @@ class SupervisorRuntime:
                 pass
         self.experiments = services.experiments.open((self.audit_root or self.root) / "measurements")
         self.measurements = self.experiments.store
+        from aka.light.research import ResearchStore
+        self.research = ResearchStore((self.audit_root or self.root) / "research")
         # The lock is private and survives restarts; never read an Agent-supplied lock.
         plugin_lock = (self.audit_root or self.root) / "plugins"
         self.plugins.check_lock(plugin_lock)
@@ -691,9 +699,30 @@ class SupervisorRuntime:
         """
         return load_journal(self.episode_journal_path(episode))
 
+    def research_board(self, *, trajectory: int = 1) -> dict:
+        from aka.light.workflow.journal_service import research_projection, shared_research_queue
+        for path in sorted((self.journals_root / "episodes").glob("e*/journal.json")):
+            try:
+                projection = research_projection(path, self.journals_root)
+            except (OSError, ValueError, RuntimeStateError):
+                continue
+            origin = {
+                "trajectory": trajectory,
+                "episode": projection.get("episode", 0),
+            }
+            for direction in projection.get("directions", {}).values():
+                self.research.observe_direction(direction, origin=origin)
+            for experiment in projection.get("experiments", []):
+                self.research.observe_experiment(experiment, origin=origin)
+        queue = shared_research_queue(self.journals_root)
+        if queue:
+            self.research.synchronize_queue(queue, origin={"trajectory": trajectory})
+        return self.research.board(trajectory=trajectory)
+
     def register_episode(self, workspace: Path, *, episode: int, base_commit: str,
                          branch: str, memory_version: int,
-                         supervisor_git: bool = False):
+                         supervisor_git: bool = False,
+                         origin: Mapping[str, object] | None = None):
         """Trusted controller binding, never populated from an Agent request or file."""
         workspace = workspace.resolve(strict=True)
         if (type(episode) is not int or episode < 1 or type(memory_version) is not int
@@ -731,10 +760,42 @@ class SupervisorRuntime:
                                         adaptive_root=(self.audit_root or self.root) / "adaptive-state",
                                         episode=episode, history=history)
                 agent_workspace = view.prepare()
+                trajectory = (
+                    origin.get("trajectory", 1) if isinstance(origin, Mapping) else 1
+                )
+                trajectory = trajectory if type(trajectory) is int and trajectory > 0 else 1
+                board = self.research.board(trajectory=trajectory)
+                incumbent = board.get("incumbent")
+                incumbent_id = (
+                    incumbent.get("kernel_id") if isinstance(incumbent, Mapping) else None
+                )
+                lineage = board.get("lineages", {}).get(f"T{trajectory}", {})
+                lineage_id = (
+                    lineage.get("lineage_best_kernel_id")
+                    if isinstance(lineage, Mapping) else None
+                )
+                for ref, kernel_id, label in (
+                    ("refs/tags/atrex/incumbent", incumbent_id, "official incumbent"),
+                    ("refs/tags/atrex/global-best", incumbent_id, "global best"),
+                    ("refs/tags/atrex/lineage-best", lineage_id, "lineage best"),
+                ):
+                    if not isinstance(kernel_id, str):
+                        continue
+                    try:
+                        source = self.measurements.read_kernel(kernel_id)
+                    except (OSError, ValueError):
+                        continue
+                    view.agent_git.install_runtime_ref(
+                        ref,
+                        source,
+                        message=f"Runtime: {label} Kernel {kernel_id}",
+                    )
             binding = JournalBinding(self.journal_factory.open(
                 workspace=agent_workspace, git_workspace=workspace,
                 campaign_root=self.journals_root, evidence_root=evidence,
-                supervisor_git=supervisor_git), view=view)
+                supervisor_git=supervisor_git,
+                research_root=(self.audit_root or self.root) / "research",
+                origin=origin), view=view)
             self.journals[workspace] = binding
             self.journals[agent_workspace] = binding
             return agent_workspace
@@ -1029,6 +1090,10 @@ class SupervisorRuntime:
                     ),
                     request_id=capability.request_id,
                     terminal_validation=terminal_validation,
+                    agent_git=(
+                        capability.journal.view.agent_git.capture()
+                        if capability.journal and capability.journal.view else None
+                    ),
                 )
                 return self.experiments.execute(staged, effective, argv, environment, command, effects=effects,
                                                reuse_completed=reuse_completed, reuse_correctness=reuse_correctness)
@@ -1274,7 +1339,20 @@ class SupervisorRuntime:
             if option == "--file":
                 raw = item.split("=", 1)[1] if "=" in item else (
                     argv[index + 1] if index + 1 < len(argv) else "")
-                data = read_input(capability.workspace, raw, limit=128 * 1024)
+                try:
+                    data = read_input(capability.workspace, raw, limit=128 * 1024)
+                except FileNotFoundError as error:
+                    message = f"Wiki query input file does not exist: {raw}"
+                    raise field_error(
+                        "--file",
+                        message,
+                        code="file_not_found",
+                        requested_path=raw,
+                        next_action=(
+                            f"Create the workspace-relative regular file {raw!r}, or pass the "
+                            "query text directly to wiki-query without --file, then retry."
+                        ),
+                    ) from error
                 target = staged / "query.txt"
                 target.write_bytes(data)
                 if "=" in item:

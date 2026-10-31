@@ -68,6 +68,51 @@ class PooledSearch:
     def _save(self, state):
         durable_write_json(self.path, state)
 
+    def _migrate_v1(self, state):
+        """Preserve an old broadcast search while introducing per-lineage state."""
+        seed = state.get("seed")
+        if not isinstance(seed, dict):
+            raise ValueError("Legacy search checkpoint has no shared seed Kernel")
+        latency(seed)
+        state["schema_version"] = 2
+        state["official_incumbent"] = seed
+        state["global_best"] = seed
+        state["lineages"] = {
+            str(trajectory): {
+                "working_kernel": seed,
+                "lineage_best": seed,
+                "wip_checkpoint": None,
+                "last_correct_kernel": seed,
+                "active_direction_id": None,
+                "session_id": None,
+            }
+            for trajectory in range(1, self.options.trajectories + 1)
+        }
+        active = state.get("active")
+        if isinstance(active, dict):
+            active_seed = active.pop("seed", seed)
+            active["seeds"] = {
+                str(trajectory): active_seed
+                for trajectory in range(1, self.options.trajectories + 1)
+            }
+            if active.get("phase") in {"sealing", "publishing"}:
+                lineage_winners = {}
+                for trajectory in range(1, self.options.trajectories + 1):
+                    candidates = [active_seed]
+                    for job in active.get("jobs", []):
+                        if job.get("trajectory") != trajectory:
+                            continue
+                        result = job.get("result")
+                        candidate = result.get("retained_kernel") if isinstance(result, dict) else None
+                        if candidate is not None:
+                            latency(candidate)
+                            candidates.append(candidate)
+                    lineage_winners[str(trajectory)] = min(candidates, key=latency)
+                active["lineage_winners"] = lineage_winners
+        state.pop("seed", None)
+        self._save(state)
+        return state
+
     def run(self) -> str:
         with open_private_directory(self.root) as directory:
             fd = os.open("lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory)
@@ -87,11 +132,42 @@ class PooledSearch:
         except FileNotFoundError:
             seed = self.driver.bootstrap()
             latency(seed)
-            state = {"schema_version": 1, "options": asdict(self.options), "binding": binding,
-                     "token_budget": self.token_budget, "bootstrap": seed,
-                     "seed": seed, "epoch": 1, "active": None, "completed_epochs": 0}
+            lineages = {
+                str(trajectory): {
+                    "working_kernel": seed,
+                    "lineage_best": seed,
+                    "wip_checkpoint": None,
+                    "last_correct_kernel": seed,
+                    "active_direction_id": None,
+                    "session_id": None,
+                }
+                for trajectory in range(1, self.options.trajectories + 1)
+            }
+            state = {
+                "schema_version": 2,
+                "options": asdict(self.options),
+                "binding": binding,
+                "token_budget": self.token_budget,
+                "bootstrap": seed,
+                "official_incumbent": seed,
+                "global_best": seed,
+                "lineages": lineages,
+                "epoch": 1,
+                "active": None,
+                "completed_epochs": 0,
+            }
             self._save(state)
-        if (state.get("schema_version") != 1 or state.get("options") != asdict(self.options)
+        if state.get("schema_version") == 1 and (
+            state.get("options") != asdict(self.options)
+            or state.get("binding") != binding
+            or state.get("token_budget") != self.token_budget
+        ):
+            raise ValueError(
+                "Search configuration or Campaign contract changed; resume with the original configuration"
+            )
+        if state.get("schema_version") == 1:
+            state = self._migrate_v1(state)
+        if (state.get("schema_version") != 2 or state.get("options") != asdict(self.options)
                 or state.get("binding") != binding or state.get("token_budget") != self.token_budget):
             raise ValueError("Search configuration or Campaign contract changed; resume with the original configuration")
         self.driver.initialize(state["bootstrap"], self.options.trajectories)
@@ -108,25 +184,41 @@ class PooledSearch:
                         episode = (epoch - 1) * self.options.episodes_per_trajectory + step
                         jobs.append({"epoch": epoch, "trajectory": trajectory, "step": step,
                                      "episode": episode, "status": "pending"})
-                state["active"] = {"epoch": epoch, "seed": state["seed"], "phase": "preparing", "jobs": jobs}
+                seeds = {
+                    str(trajectory): state["lineages"][str(trajectory)]["working_kernel"]
+                    for trajectory in range(1, self.options.trajectories + 1)
+                }
+                state["active"] = {
+                    "epoch": epoch,
+                    "seeds": seeds,
+                    "phase": "preparing",
+                    "jobs": jobs,
+                }
                 self._save(state)
             active = state["active"]
             if active["phase"] == "preparing":
-                self.driver.prepare_epoch(epoch, active["seed"])
+                self.driver.prepare_epoch(epoch, active["seeds"])
                 active["phase"] = "running"
                 self._save(state)
             if active["phase"] == "running":
                 if not self._run_jobs(state):
                     # Partial Epochs are retained, but never broadcast as complete.
                     return "budget: token-budget (Epoch incomplete; no broadcast)"
-                candidates = [active["seed"]]
-                for job in active["jobs"]:
-                    candidate = job["result"].get("retained_kernel")
-                    if candidate is not None:
-                        latency(candidate)
-                        candidates.append(candidate)
-                # The incumbent wins exact ties; ordering is independent of completion order.
-                active["winner"] = min(candidates, key=latency)
+                lineage_winners = {}
+                for trajectory in range(1, self.options.trajectories + 1):
+                    candidates = [active["seeds"][str(trajectory)]]
+                    for job in active["jobs"]:
+                        if job["trajectory"] != trajectory:
+                            continue
+                        candidate = job["result"].get("retained_kernel")
+                        if candidate is not None:
+                            latency(candidate)
+                            candidates.append(candidate)
+                    lineage_winners[str(trajectory)] = min(candidates, key=latency)
+                active["lineage_winners"] = lineage_winners
+                active["winner"] = min(
+                    [state["global_best"], *lineage_winners.values()], key=latency
+                )
                 active["phase"] = "sealing"
                 self._save(state)
             if active["phase"] == "sealing":
@@ -142,8 +234,17 @@ class PooledSearch:
             durable_write_json(self.root / "epochs" / f"e{epoch:08d}.json", summary)
             stalls = state.get("consecutive_without_improvement", 0)
             state["consecutive_without_improvement"] = (
-                stalls + 1 if latency(active["winner"]) >= latency(active["seed"]) else 0)
-            state.update(seed=active["winner"], completed_epochs=epoch, epoch=epoch + 1, active=None)
+                stalls + 1 if latency(active["winner"]) >= latency(state["global_best"]) else 0)
+            for trajectory, winner in active["lineage_winners"].items():
+                lineage = state["lineages"][trajectory]
+                lineage["working_kernel"] = winner
+                lineage["last_correct_kernel"] = winner
+                if latency(winner) < latency(lineage["lineage_best"]):
+                    lineage["lineage_best"] = winner
+            if latency(active["winner"]) < latency(state["global_best"]):
+                state["global_best"] = active["winner"]
+                state["official_incumbent"] = active["winner"]
+            state.update(completed_epochs=epoch, epoch=epoch + 1, active=None)
             stop = getattr(self.driver, "stop_reason", lambda state: "")(state)
             if stop:
                 state["stop_reason"] = stop

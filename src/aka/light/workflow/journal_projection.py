@@ -671,6 +671,7 @@ def validate_terminal(
         return "episode journal state does not match handoff"
     verified_runtime_projection = False
     research_records = True
+    experiments_enabled = True
     if value.get("runtime_journal_projection") is True:
         # This flag is Agent-writable: it requests verification, never grants
         # an exception. Only the controller can supply the private-state reader.
@@ -703,6 +704,23 @@ def validate_terminal(
         research_records = private.get("research_records", True)
         if type(research_records) is not bool or value.get("research_records", True) is not research_records:
             return "episode journal research-recording policy does not match private runtime journal"
+        raw_modules = private.get("tool_modules")
+        if raw_modules is None:
+            # Runtime Journals created before module-specific recording treated
+            # research recording as the combined Direction + Experiment mode.
+            modules = ("directions", "experiments") if research_records else ()
+        elif (
+            not isinstance(raw_modules, list)
+            or any(not isinstance(module, str) for module in raw_modules)
+            or len(set(raw_modules)) != len(raw_modules)
+            or set(raw_modules) - {"directions", "experiments"}
+        ):
+            return "private runtime journal has invalid tool_modules"
+        else:
+            modules = tuple(raw_modules)
+        if bool(modules) is not research_records:
+            return "private runtime journal research policy disagrees with tool_modules"
+        experiments_enabled = "experiments" in modules
         if not research_records:
             if private.get("direction_events") or private.get("experiments"):
                 return "private runtime journal contains disabled research records"
@@ -736,7 +754,11 @@ def validate_terminal(
     experiments = value.get("experiments")
     if not isinstance(experiments, list) or (
         not experiments and not (
-            verified_runtime_projection and (state in {"pivot", "blocked"} or not research_records)
+            verified_runtime_projection
+            and (
+                state in {"pivot", "blocked"}
+                or not experiments_enabled
+            )
         )
     ):
         return "episode journal has no structured experiments"

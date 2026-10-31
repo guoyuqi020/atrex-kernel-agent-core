@@ -6,8 +6,9 @@ allowed-tools: "Bash Read"
 
 # Runtime Direction records
 
-Use `python3 tools/sandbox.py` inside the Episode. Available Journal commands are
-`list-directions`, `load-direction`, `update-direction`, and `episode-report`. Experiment commands
+Use `python3 tools/sandbox.py` inside the Episode. Available Journal commands include
+`research-board`, `list-directions`, `load-direction`, `update-direction`, `progress-direction`,
+`prioritize-direction`, `adopt-kernel`, and `episode-report`. Experiment commands
 are disabled. Measurement records remain available through `record-read`, `kernel-read`,
 `kernel-records`, and `kernel-pareto-frontier`.
 
@@ -19,7 +20,8 @@ Direction JSON using `--kind update-direction --request-file scratch/direction.j
 - `start`: `action,direction_id,analysis`.
 - `complete|abandon|block|defer`: `action,direction_id,analysis,hypothesis_status`.
 
-Do not include `supporting_experiment_ids`. Keep at most one Direction in progress and close it
-before reporting. Candidate reports use `status,summary,gateway_record_ids`; a cited record must be
+Do not include `supporting_experiment_ids`. Keep at most one local Direction in progress. A valuable
+major redesign may remain active across reports; unresolved deferred/blocked/abandoned work needs
+`reopen_condition`. Candidate reports use `status,summary,gateway_record_ids`; a cited record must be
 a passing standard full Evaluate for the exact source. Pivot uses `status,summary`; blocked also
 uses `blocker`. Never invent IDs or measured results.

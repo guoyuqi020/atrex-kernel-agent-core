@@ -45,6 +45,7 @@ from aka.light.experiment.identifiers import (
 from aka.light.experiment.store import MeasurementStore, private_write, read_json
 from aka.light.evaluation.provider import result_from_response
 from aka.light.workspace.files import MAX_FILE_BYTES, publish, relative_path
+from aka.light.research import ResearchStore
 
 DIRECTION_PROPOSAL_FIELDS = {
     "action",
@@ -57,14 +58,12 @@ DIRECTION_PROPOSAL_OPTIONAL_FIELDS = {"stop_conditions"}
 DIRECTION_CHANGE_SCOPES = {"local", "major_redesign"}
 DIRECTION_UPDATE_FIELDS = {"action", "direction_id", "analysis"}
 DIRECTION_CLOSURE_FIELDS = DIRECTION_UPDATE_FIELDS | {"hypothesis_status", "supporting_experiment_ids"}
+DIRECTION_CLOSURE_OPTIONAL_FIELDS = {"reopen_condition"}
 _HYPOTHESIS_STATUSES = {"unresolved", "supported", "refuted"}
 _EVIDENCE_KINDS = {"run", "same_allocation_abba", "profile", "dev", "check", "disassemble"}
-EXPERIMENT_FIELDS = {
-    "name",
-    "hypothesis",
-    "change",
-    "gateway_record_ids",
-    "analysis",
+EXPERIMENT_FIELDS = {"name", "intent", "gateway_record_ids", "interpretation"}
+LEGACY_EXPERIMENT_FIELDS = {
+    "name", "hypothesis", "change", "gateway_record_ids", "analysis",
 }
 JOURNAL_MODULES = frozenset({"directions", "experiments"})
 
@@ -303,6 +302,7 @@ def _shared_research(campaign_root: Path) -> dict[str, Any]:
             "statuses": {},
             "experiments": [],
             "experiments_by_id": {},
+            "research_queue": [],
         }
     except (OSError, ValueError) as error:
         raise RuntimeStateError("Shared Epoch research evidence is unreadable.") from error
@@ -313,6 +313,7 @@ def _shared_research(campaign_root: Path) -> dict[str, Any]:
         or value["through_epoch"] < 0
         or not isinstance(value.get("directions"), dict)
         or not isinstance(value.get("experiments"), list)
+        or not isinstance(value.get("research_queue", []), list)
     ):
         raise RuntimeStateError("Shared Epoch research evidence has an unsupported schema.")
     directions: dict[str, dict[str, Any]] = {}
@@ -348,6 +349,18 @@ def _shared_research(campaign_root: Path) -> dict[str, Any]:
         "experiments": experiments,
         "experiments_by_id": experiments_by_id,
     }
+
+
+def shared_research_queue(campaign_root: Path) -> list[str]:
+    value = _shared_research(campaign_root)
+    queue = value.get("research_queue", [])
+    if (
+        not isinstance(queue, list)
+        or len(set(queue)) != len(queue)
+        or any(not isinstance(item, str) or DIRECTION_ID_RE.fullmatch(item) is None for item in queue)
+    ):
+        raise RuntimeStateError("Shared Epoch Direction queue is invalid.")
+    return list(queue)
 
 
 def research_projection(current: Path, campaign_root: Path) -> dict[str, Any]:
@@ -470,15 +483,22 @@ def _editable_direction(
 def _apply_direction_events(
     views: MutableMapping[str, dict[str, Any]], statuses: MutableMapping[str, str],
     journal: dict[str, Any],
+    *,
+    ignored_active_ids: set[str] | frozenset[str] = frozenset(),
 ) -> None:
     started: set[str] = set()
+    lifecycle_statuses = dict(statuses)
+    for direction_id in ignored_active_ids:
+        if lifecycle_statuses.get(direction_id) == "in_progress":
+            lifecycle_statuses[direction_id] = "deferred"
     for event in journal["direction_events"]:
         if not isinstance(event, dict):
             raise RuntimeStateError("Runtime Journal contains an invalid Direction event")
         direction_id = event.get("direction_id")
         action = event.get("action")
         try:
-            advance_direction(statuses, started, direction_id, action)
+            advance_direction(lifecycle_statuses, started, direction_id, action)
+            statuses[direction_id] = lifecycle_statuses[direction_id]
             if action == "propose":
                 for field in ("name", "hypothesis", "recorded_at"):
                     _text(event.get(field), f"Direction {field}")
@@ -513,6 +533,7 @@ def _apply_direction_events(
                 "supporting_experiment_ids": [],
                 "associated_experiment_ids": [],
                 "hypothesis_status": "unresolved",
+                "reopen_condition": None,
                 **relationship_fields(event),
             }
             # Legacy fields remain visible on legacy Directions; they are not
@@ -528,6 +549,7 @@ def _apply_direction_events(
             direction["updated_at"] = event.get("recorded_at")
             assessment = event.get("hypothesis_status")
             direction["hypothesis_status"] = assessment or "unresolved"
+            direction["reopen_condition"] = event.get("reopen_condition")
             support = event.get("supporting_experiment_ids", [])
             direction["supporting_experiment_ids"] = (
                 list(support) if assessment is not None and action in _CLOSURES else []
@@ -564,7 +586,12 @@ def _direction_state(
         history = _visible_history(current, campaign_root)
     views: ChainMap[str, dict[str, Any]] = ChainMap({}, history.directions)
     statuses: ChainMap[str, str] = ChainMap({}, history.statuses)
-    _apply_direction_events(views, statuses, history.current)
+    _apply_direction_events(
+        views,
+        statuses,
+        history.current,
+        ignored_active_ids=frozenset(history.shared_direction_ids),
+    )
     _associate_experiments(views, history.current["experiments"])
     return views, statuses
 
@@ -707,6 +734,7 @@ def update_direction(
         require_fields(
             value,
             fields if action in _CLOSURES else DIRECTION_UPDATE_FIELDS,
+            optional=DIRECTION_CLOSURE_OPTIONAL_FIELDS if action in _CLOSURES else None,
             label=f"Direction {action}",
         )
         direction_id = _text(value["direction_id"], "Direction ID")
@@ -720,13 +748,31 @@ def update_direction(
                     "and evaluate the local Direction."
                 ),
             )
-        advance_direction(statuses, started, direction_id, action)
+        # Peer Directions imported at an Epoch boundary retain their owner and
+        # may legitimately remain in progress.  They are read-only context and
+        # must not consume this trajectory's single local ownership lease.
+        lifecycle_statuses = dict(statuses)
+        for shared_id in history.shared_direction_ids:
+            if lifecycle_statuses.get(shared_id) == "in_progress":
+                lifecycle_statuses[shared_id] = "deferred"
+        advance_direction(lifecycle_statuses, started, direction_id, action)
         supporting = (
             _closure_support(path, campaign_root, direction_id, value, history=history,
                              experiments_enabled=experiments_enabled)
             if action in _CLOSURES
             else []
         )
+        reopen_condition = value.get("reopen_condition")
+        if (
+            action in _CLOSURES
+            and value.get("hypothesis_status") == "unresolved"
+            and action != "complete"
+            and not isinstance(reopen_condition, str)
+        ):
+            raise field_error(
+                "reopen_condition",
+                "An unresolved deferred, abandoned or blocked Direction requires reopen_condition",
+            )
         event = {
             "direction_event_id": f"directionevent_{uuid.uuid4().hex}",
             "direction_id": direction_id,
@@ -735,6 +781,10 @@ def update_direction(
             "recorded_at": _now(),
             "supporting_experiment_ids": supporting,
             "hypothesis_status": value.get("hypothesis_status"),
+            "reopen_condition": (
+                _text(reopen_condition, "Direction reopen_condition")
+                if reopen_condition is not None else None
+            ),
         }
     _append_event(path, campaign_root, event)
     return {"status": "recorded", "direction_id": direction_id}
@@ -764,6 +814,7 @@ def _read_private_gateway_evidence(journals_root: Path, record_id: str) -> dict[
             "Gateway Record evidence is unreadable or inconsistent; ask the operator to restore it"
         ) from error
     identity = record["kernels"].get("candidate", {})
+    incumbent = record["kernels"].get("incumbent", {})
     response = record["response"]
     result = result_from_response(response, record["operation"])
     options = record["request"]["options"]
@@ -781,6 +832,7 @@ def _read_private_gateway_evidence(journals_root: Path, record_id: str) -> dict[
         "gateway_record_id": record_id,
         "gateway_kind": "run" if record["operation"] == "evaluate" else record["operation"],
         **identity,
+        "incumbent_kernel_id": incumbent.get("kernel_id"),
         "result": result or {},
         "execution_status": "completed" if record.get("cacheable") else "unknown",
         "exit_code": response["exit_code"],
@@ -904,6 +956,95 @@ def _completed_record(record: Mapping[str, Any]) -> bool:
     return record["execution_status"] == "completed"
 
 
+def _experiment_facts(
+    campaign_root: Path, record_ids: list[str]
+) -> dict[str, Any]:
+    """Derive bounded execution facts; never ask the Agent to restate them."""
+    records = [_read_private_gateway_evidence(campaign_root, record_id) for record_id in record_ids]
+    kernel_ids = [
+        record.get("kernel_id") for record in records if isinstance(record.get("kernel_id"), str)
+    ]
+    results = [record.get("result") for record in records if isinstance(record.get("result"), dict)]
+    correctness_values = [
+        result.get("all_pass") for result in results if type(result.get("all_pass")) is bool
+    ]
+    correctness = (
+        "fail" if False in correctness_values else
+        "pass" if True in correctness_values else
+        "not_applicable"
+    )
+    latest = results[-1] if results else {}
+    latency_summary = {
+        key: latest[key]
+        for key in (
+            "latency_us_geomean", "latency_us_arith_mean", "speedup_vs_ref_geomean",
+            "performance_score", "measured_shape_count", "input_scope",
+        )
+        if latest.get(key) is not None
+    }
+    failure_class = None
+    for result in reversed(results):
+        error = result.get("error")
+        if isinstance(error, dict):
+            failure_class = error.get("error_class") or error.get("reason") or error.get("code")
+            if failure_class:
+                break
+    measurement_digests = [
+        hashlib.sha256(
+            json.dumps(
+                {"gateway_record_id": record_id, "result": record.get("result", {})},
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode()
+        ).hexdigest()
+        for record_id, record in zip(record_ids, records)
+    ]
+    before = records[0].get("incumbent_kernel_id") if records else None
+    after = kernel_ids[-1] if kernel_ids else None
+    source_diff_summary = "no candidate Kernel was bound"
+    if after:
+        source_diff_summary = f"candidate Kernel changed from {before or 'unbound baseline'} to {after}"
+        if isinstance(before, str):
+            try:
+                from aka.light.workspace.sources import unpack
+
+                store = MeasurementStore(campaign_root.parent / "measurements")
+                _, before_files = unpack(store.read_kernel(before))
+                _, after_files = unpack(store.read_kernel(after))
+                added = sorted(after_files.keys() - before_files.keys())
+                removed = sorted(before_files.keys() - after_files.keys())
+                changed = sorted(
+                    name for name in before_files.keys() & after_files.keys()
+                    if before_files[name] != after_files[name]
+                )
+                names = [
+                    *(f"+{name}" for name in added),
+                    *(f"-{name}" for name in removed),
+                    *(f"~{name}" for name in changed),
+                ]
+                source_diff_summary = (
+                    "no source-byte change"
+                    if not names else
+                    f"{len(added)} added, {len(removed)} removed, {len(changed)} changed: "
+                    + ", ".join(names[:8])
+                    + (f" (+{len(names) - 8} more)" if len(names) > 8 else "")
+                )
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+    return {
+        "before_kernel_id": before,
+        "after_kernel_id": after,
+        "source_diff_summary": source_diff_summary,
+        "operations": list(dict.fromkeys(record["gateway_kind"] for record in records)),
+        "correctness": correctness,
+        "latency_summary": latency_summary,
+        "per_regime_summary": latest.get("per_regime_summary") or {},
+        "failure_class": failure_class,
+        "measurement_digests": measurement_digests,
+    }
+
+
 def _closure_support(
     path: Path, campaign_root: Path, direction_id: str, value: Mapping[str, object],
     *, history: _VisibleHistory | None = None, experiments_enabled: bool = True,
@@ -968,9 +1109,10 @@ def record_experiment(
     value = dict(request)
     current = _mutable_journal(path, "experiments")
     directions_enabled = _module_enabled(current, "directions")
-    required = set(EXPERIMENT_FIELDS)
-    if directions_enabled:
-        required.add("direction_id")
+    legacy = not ({"intent", "interpretation"} & set(value)) and bool(
+        {"hypothesis", "change", "analysis"} & set(value)
+    )
+    required = set(LEGACY_EXPERIMENT_FIELDS if legacy else EXPERIMENT_FIELDS)
     require_fields(
         value,
         required,
@@ -979,11 +1121,27 @@ def record_experiment(
     )
     direction_id = None
     if directions_enabled:
-        direction_id = _text(value["direction_id"], "Experiment Direction ID")
+        history = _visible_history(path, campaign_root)
+        views = _direction_views(path, campaign_root, history=history)
+        if value.get("direction_id") is None:
+            active = [
+                item["direction_id"] for item in views.values()
+                if item.get("status") == "in_progress"
+                and item.get("direction_id") not in history.shared_direction_ids
+            ]
+            if len(active) != 1:
+                raise field_error(
+                    "direction_id",
+                    "Omit direction_id only when exactly one local Direction is in progress",
+                    code="direction_ambiguous",
+                    active_direction_ids=active,
+                )
+            direction_id = active[0]
+        else:
+            direction_id = _text(value["direction_id"], "Experiment Direction ID")
         if DIRECTION_ID_RE.fullmatch(direction_id) is None:
             raise ValueError("Experiment Direction ID has an invalid format")
-        history = _visible_history(path, campaign_root)
-        direction = _direction_views(path, campaign_root, history=history).get(direction_id)
+        direction = views.get(direction_id)
         if direction is None:
             raise ValueError("Experiment Direction is outside visible history")
         if direction_id in history.shared_direction_ids:
@@ -1004,15 +1162,40 @@ def record_experiment(
     elif "direction_id" in value:
         raise ValueError("Direction recording is disabled; omit direction_id from Experiment")
     record_ids = _validate_record_ids(campaign_root, value["gateway_record_ids"])
+    try:
+        automatic_facts = _experiment_facts(campaign_root, record_ids)
+    except ValueError:
+        # Compatibility for injected/fake Journal stores. Real Runtime calls
+        # have just validated these IDs against the private Measurement Store;
+        # an unavailable record there is rejected before this point.
+        automatic_facts = {
+            "before_kernel_id": None,
+            "after_kernel_id": None,
+            "source_diff_summary": "measurement facts unavailable in this compatibility store",
+            "operations": [],
+            "correctness": "unknown",
+            "latency_summary": {},
+            "per_regime_summary": {},
+            "failure_class": "evidence_unavailable",
+            "measurement_digests": [],
+        }
+    intent = (
+        _text(value["intent"], "Experiment intent")
+        if not legacy else _text(value["hypothesis"], "Experiment hypothesis")
+    )
+    interpretation = (
+        _text(value["interpretation"], "Experiment interpretation")
+        if not legacy else _text(value["analysis"], "Experiment analysis")
+    )
     experiment = {
         "experiment_id": f"experiment_{uuid.uuid4().hex}",
         "sequence": len(current["experiments"]) + 1,
         "recorded_at": _now(),
         "name": _text(value["name"], "Experiment name"),
-        "hypothesis": _text(value["hypothesis"], "Experiment hypothesis"),
-        "change": _text(value["change"], "Experiment change"),
+        "intent": intent,
         "gateway_record_ids": record_ids,
-        "analysis": _text(value["analysis"], "Experiment analysis"),
+        "interpretation": interpretation,
+        **automatic_facts,
     }
     if direction_id is not None:
         experiment["direction_id"] = direction_id
@@ -1108,11 +1291,6 @@ def validate_report_evidence(
             if gateway_record_ids is not None:
                 raise ValueError(f"{status} cannot include gateway_record_ids")
             directions = (_direction_views(path, campaign_root) if directions_enabled else {})
-            if directions_enabled:
-                in_progress = [item["direction_id"] for item in directions.values()
-                               if item["status"] == "in_progress"]
-                if in_progress:
-                    raise ValueError("Episode Report cannot leave a Direction in progress: " + ", ".join(in_progress))
             return current, dict(directions), None
         records = _validate_record_ids(campaign_root, gateway_record_ids, label="Episode Report")
         from aka.light.workspace.sources import snapshot as source_snapshot
@@ -1129,11 +1307,6 @@ def validate_report_evidence(
                           for record_id in records[:8]],
             )
         directions = (_direction_views(path, campaign_root) if directions_enabled else {})
-        if directions_enabled:
-            in_progress = [item["direction_id"] for item in directions.values()
-                           if item["status"] == "in_progress"]
-            if in_progress:
-                raise ValueError("Episode Report cannot leave a Direction in progress: " + ", ".join(in_progress))
         return current, dict(directions), source
     if gateway_record_ids is not None:
         raise ValueError("Research recording is enabled; select an Experiment with selected_experiment_id")
@@ -1141,15 +1314,6 @@ def validate_report_evidence(
     current = history.current
     directions = (_direction_views(path, campaign_root, history=history)
                   if directions_enabled else {})
-    in_progress = [
-        item["direction_id"] for item in directions.values() if item["status"] == "in_progress"
-    ]
-    if in_progress:
-        raise ValueError(
-            "Episode Report cannot leave a Direction in progress; record its real Gateway "
-            "evidence as an Experiment, then close with hypothesis_status and "
-            "supporting_experiment_ids: " + ", ".join(in_progress)
-        )
     for event in current["direction_events"] if directions_enabled else ():
         if event.get("hypothesis_status") is not None:
             _closure_support(path, campaign_root, event["direction_id"], event, history=history,
@@ -1174,8 +1338,8 @@ def validate_report_evidence(
         direction_id = selected.get("direction_id")
         if not isinstance(direction_id, str) or direction_id not in directions:
             raise ValueError("selected Experiment Direction is outside visible history")
-        if directions[direction_id]["status"] not in _CLOSED_STATUSES:
-            raise ValueError("selected Experiment Direction must have been started and closed")
+        if directions[direction_id]["status"] == "proposed":
+            raise ValueError("selected Experiment Direction must have been started")
     records = _validate_record_ids(campaign_root, selected.get("gateway_record_ids"))
     from aka.light.workspace.sources import snapshot as source_snapshot
     kernel_source = source_snapshot(workspace, policy=source_policy)
@@ -1200,6 +1364,8 @@ class SupervisorJournalService:
         evidence_root: Path,
         git_workspace: Path | None = None,
         supervisor_git: bool = False,
+        research_root: Path | None = None,
+        origin: Mapping[str, object] | None = None,
     ) -> None:
         self.workspace = workspace
         self.git_workspace = git_workspace or workspace
@@ -1207,6 +1373,49 @@ class SupervisorJournalService:
         self.evidence_root = evidence_root
         self.path = evidence_root / "journal.json"
         self.supervisor_git = supervisor_git
+        self.origin = dict(origin or {"trajectory": 1})
+        self.research = ResearchStore(
+            research_root or campaign_root.parent / "research"
+        )
+
+    @property
+    def lineage(self) -> str:
+        trajectory = self.origin.get("trajectory", 1)
+        return f"T{trajectory}" if type(trajectory) is int and trajectory > 0 else "T1"
+
+    def _observe_direction(self, direction_id: str) -> None:
+        direction = _direction_views(self.path, self.campaign_root).get(direction_id)
+        if direction is None:
+            raise RuntimeStateError("Recorded Direction is missing from the visible projection")
+        visible = deepcopy(direction)
+        if visible.get("status") == "in_progress" and not visible.get("owner"):
+            visible["owner"] = self.lineage
+        self.research.observe_direction(visible, origin=self.origin)
+
+    def _observe_experiment(self, experiment_id: str) -> None:
+        experiment = next(
+            (
+                item
+                for item in _visible_experiments(self.path, self.campaign_root)
+                if item.get("experiment_id") == experiment_id
+            ),
+            None,
+        )
+        if experiment is None:
+            raise RuntimeStateError("Recorded Experiment is missing from the visible projection")
+        self.research.observe_experiment(experiment, origin=self.origin)
+
+    def _sync_research(self) -> None:
+        for direction in _direction_views(self.path, self.campaign_root).values():
+            visible = deepcopy(direction)
+            if visible.get("status") == "in_progress" and not visible.get("owner"):
+                visible["owner"] = self.lineage
+            self.research.observe_direction(visible, origin=self.origin)
+        for experiment in _visible_experiments(self.path, self.campaign_root):
+            self.research.observe_experiment(experiment, origin=self.origin)
+        queue = shared_research_queue(self.campaign_root)
+        if queue:
+            self.research.synchronize_queue(queue, origin=self.origin)
 
     def sealed_source(self) -> bytes | None:
         if not self.supervisor_git:
@@ -1228,11 +1437,16 @@ class SupervisorJournalService:
             "experiments_list": "file",
             "direction_load": "direction_id",
             "experiment_load": "experiment_id",
+            "research_board": "trajectory",
+            "direction_prioritize": "request",
+            "direction_progress": "request",
+            "kernel_adopt": "request",
         }
         if operation not in fields:
             raise ValueError(f"unsupported Journal operation: {operation}")
         journal = load_journal(self.path)
-        module = ("directions" if operation in {"direction_update", "directions_list", "direction_load"}
+        module = ("directions" if operation in {"direction_update", "directions_list", "direction_load",
+                                                  "direction_prioritize", "direction_progress"}
                   else "experiments" if operation in {"experiment_record", "experiments_list", "experiment_load"}
                   else None)
         if module is not None and not _module_enabled(journal, module):
@@ -1241,14 +1455,106 @@ class SupervisorJournalService:
                 code=f"{module}_disabled",
                 next_action="Use only the enabled Runtime tools and follow the current episode-report schema.",
             )
-        require_fields(dict(request), {"operation", fields[operation]}, label="Journal operation")
+        required = {"operation"}
+        if operation != "research_board":
+            required.add(fields[operation])
+        require_fields(dict(request), required, label="Journal operation")
         if operation in {"direction_update", "experiment_record", "episode_report"}:
             self._check_legacy_journal()
         if operation == "direction_update":
             body = request.get("request")
             if not isinstance(body, Mapping):
                 raise ValueError("direction_update requires a request object")
-            return update_direction(self.path, self.campaign_root, body)
+            result = update_direction(self.path, self.campaign_root, body)
+            self._observe_direction(str(result["direction_id"]))
+            return result
+        if operation == "direction_progress":
+            body = request.get("request")
+            if not isinstance(body, Mapping):
+                raise ValueError("direction_progress requires a request object")
+            require_fields(dict(body), {"direction_id", "plan_step"}, label="Direction progress")
+            direction_id = _text(body.get("direction_id"), "Direction ID")
+            plan_step = body.get("plan_step")
+            if type(plan_step) is not int or plan_step < 0:
+                raise ValueError("Direction plan_step must be a non-negative integer")
+            self._sync_research()
+            state = self.research.progress(direction_id, plan_step, origin=self.origin)
+            return {
+                "status": "recorded",
+                "direction_id": direction_id,
+                "next_step": state["directions"][direction_id].get("next_step"),
+            }
+        if operation == "direction_prioritize":
+            body = request.get("request")
+            if not isinstance(body, Mapping):
+                raise ValueError("direction_prioritize requires a request object")
+            require_fields(dict(body), {"direction_id", "reason"}, optional={"before_direction_id", "after_direction_id"},
+                           label="Direction priority")
+            self._sync_research()
+            state = self.research.prioritize(
+                _text(body.get("direction_id"), "Direction ID"),
+                before_direction_id=(
+                    _text(body["before_direction_id"], "before_direction_id")
+                    if body.get("before_direction_id") is not None else None
+                ),
+                after_direction_id=(
+                    _text(body["after_direction_id"], "after_direction_id")
+                    if body.get("after_direction_id") is not None else None
+                ),
+                reason=_text(body.get("reason"), "Direction priority reason"),
+                origin=self.origin,
+            )
+            return {"status": "recorded", "queue": state["queue"]}
+        if operation == "research_board":
+            self._sync_research()
+            trajectory = self.origin.get("trajectory", 1)
+            return self.research.board(
+                trajectory=trajectory if type(trajectory) is int and trajectory > 0 else 1
+            )
+        if operation == "kernel_adopt":
+            body = request.get("request")
+            if not isinstance(body, Mapping):
+                raise ValueError("kernel_adopt requires a request object")
+            require_fields(
+                dict(body), {"kernel_id", "source_ref", "reason"}, label="Kernel adoption"
+            )
+            kernel_id = _text(body.get("kernel_id"), "Kernel ID")
+            if KERNEL_RECORD_ID_RE.fullmatch(kernel_id) is None:
+                raise field_error(
+                    "kernel_id", "Use a kernel- ID returned by this Campaign"
+                )
+            store = MeasurementStore(self.campaign_root.parent / "measurements")
+            try:
+                expected = store.read_kernel(kernel_id)
+            except (OSError, ValueError) as error:
+                raise field_error(
+                    "kernel_id",
+                    "The adopted Kernel is not available in this Campaign",
+                    next_action=(
+                        "Use kernel-read or a peer measurement's exact Kernel ID, materialize that "
+                        "source in kernel.py and implementation/, then retry adopt-kernel."
+                    ),
+                ) from error
+            from aka.light.workspace.sources import snapshot as source_snapshot
+
+            actual = source_snapshot(self.workspace)
+            if actual != expected:
+                raise AgentRequestError(
+                    "The current source tree does not match the Kernel being adopted.",
+                    code="kernel_adoption_source_mismatch",
+                    kernel_id=kernel_id,
+                    next_action=(
+                        "Checkout, cherry-pick, or restore the peer source into kernel.py and "
+                        "implementation/, verify git diff, then resubmit the same adoption request."
+                    ),
+                )
+            self.research.adopt_kernel(
+                kernel_id,
+                source_ref=_text(body.get("source_ref"), "Kernel adoption source_ref"),
+                reason=_text(body.get("reason"), "Kernel adoption reason"),
+                origin=self.origin,
+            )
+            return {"status": "recorded", "kernel_id": kernel_id}
         if operation == "directions_list":
             directions = [
                 {
@@ -1275,7 +1581,9 @@ class SupervisorJournalService:
             body = request.get("request")
             if not isinstance(body, Mapping):
                 raise ValueError("experiment_record requires a request object")
-            return record_experiment(self.path, self.campaign_root, body)
+            result = record_experiment(self.path, self.campaign_root, body)
+            self._observe_experiment(str(result["experiment_id"]))
+            return result
         if operation == "experiments_list":
             experiments = []
             for item in _visible_experiments(self.path, self.campaign_root):
@@ -1592,7 +1900,19 @@ class SupervisorJournalService:
         }
 
 
-__all__ = ["SupervisorJournalService", "initialize_journal", "journal_lock", "load_journal", "selected_evaluation", "sealed_candidate_source",
-           "DIRECTION_PROPOSAL_FIELDS", "DIRECTION_PROPOSAL_OPTIONAL_FIELDS",
-           "DIRECTION_CHANGE_SCOPES", "DIRECTION_UPDATE_FIELDS",
-           "DIRECTION_CLOSURE_FIELDS", "EXPERIMENT_FIELDS"]
+__all__ = [
+    "DIRECTION_CHANGE_SCOPES",
+    "DIRECTION_CLOSURE_FIELDS",
+    "DIRECTION_CLOSURE_OPTIONAL_FIELDS",
+    "DIRECTION_PROPOSAL_FIELDS",
+    "DIRECTION_PROPOSAL_OPTIONAL_FIELDS",
+    "DIRECTION_UPDATE_FIELDS",
+    "EXPERIMENT_FIELDS",
+    "SupervisorJournalService",
+    "initialize_journal",
+    "journal_lock",
+    "load_journal",
+    "sealed_candidate_source",
+    "selected_evaluation",
+    "shared_research_queue",
+]

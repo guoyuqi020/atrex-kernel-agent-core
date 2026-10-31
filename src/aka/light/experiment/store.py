@@ -31,6 +31,7 @@ BATCH_ROOT_ENV = "ATREX_AKA_SHAPE_BATCH_ROOT"
 MAX_RECORD_BYTES = 32 * 1024 * 1024
 MAX_RECORD_HEADER_BYTES = 16 * 1024
 RECORD_HEADER_FIELDS = frozenset({"gateway_record_id", "operation", "created_at", "kernels"})
+OPTIONAL_RECORD_HEADER_FIELDS = frozenset({"agent_git"})
 
 
 def digest(value: object) -> str:
@@ -86,7 +87,7 @@ def read_record_header(path: Path) -> dict:
             raise ValueError("Gateway record header is malformed")
         # Refuse to decode large payload fields if required metadata is absent
         # or misplaced. The listing must not turn into a full-record read.
-        if key not in RECORD_HEADER_FIELDS and key != "cacheable":
+        if key not in RECORD_HEADER_FIELDS and key not in OPTIONAL_RECORD_HEADER_FIELDS and key != "cacheable":
             raise ValueError("Gateway record listing header is incomplete")
         value, index = decoder.raw_decode(text, whitespace(index + 1))
         if key in RECORD_HEADER_FIELDS:
@@ -472,12 +473,15 @@ class MeasurementTask:
         self.store, self.key, self.record_id = store, key, record_id
         self.directory, self.request, self.kernels, self.marker = directory, request, kernels, marker
 
-    def finish(self, response: dict, *, cacheable: bool, pending: bool = False) -> dict:
+    def finish(self, response: dict, *, cacheable: bool, pending: bool = False,
+               agent_git: dict | None = None) -> dict:
         record = {"schema_version": 1, "gateway_record_id": self.record_id,
                   "task_digest": self.key, "request": self.request, "kernels": self.kernels,
                   "operation": self.request["operation"], "response": response,
                   "result_digest": digest(response), "cacheable": cacheable,
                   "created_at": datetime.now(timezone.utc).isoformat()}
+        if agent_git is not None:
+            record["agent_git"] = agent_git
         private_write(self.directory / "record.json", record)
         # Keep a reference even if post-write validation encounters transient IO.
         private_write(self.marker, {"status": "validation_pending", "gateway_record_id": self.record_id})

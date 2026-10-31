@@ -10,6 +10,8 @@ from typing import Any, Optional, cast
 
 AGENT_PROBLEM_FILENAME = "agent_problem.json"
 AGENT_PROBLEM_SCHEMA_VERSION = "atrex.agent_problem.v1"
+PUBLIC_SHAPES_FILENAME = "public_shapes.json"
+PUBLIC_SHAPES_SCHEMA_VERSION = "atrex.public_shapes.v1"
 GENERATED_AGENT_PROBLEM_FIELDS = frozenset(
     {
         "schema_version",
@@ -29,6 +31,7 @@ GENERALIZED_AGENT_VISIBLE_FILES = (
     "input.py",
     "metadata.json",
     AGENT_PROBLEM_FILENAME,
+    PUBLIC_SHAPES_FILENAME,
 )
 LEGACY_ATREX_VISIBLE_FILES = (
     "reference.py",
@@ -85,6 +88,41 @@ def validate_private_shapes(path: Path) -> dict[str, dict[str, Any]]:
             + ", ".join(invalid[:8])
         )
     return cast(dict[str, dict[str, Any]], payload)
+
+
+def _shape_sort_key(shape_id: str) -> tuple[int, object]:
+    return (0, int(shape_id)) if shape_id.isdigit() else (1, shape_id)
+
+
+def public_shapes_payload(
+    private_shapes_path: Path, *, count: int = 5
+) -> dict[str, Any]:
+    """Project the canonical prefix without exposing any remaining case."""
+    if type(count) is not int or count < 1:
+        raise ValueError("public Shape count must be a positive integer")
+    shapes = validate_private_shapes(private_shapes_path)
+    selected = sorted((str(shape_id) for shape_id in shapes), key=_shape_sort_key)[:count]
+    return {
+        "schema_version": PUBLIC_SHAPES_SCHEMA_VERSION,
+        "selection": {
+            "policy": "canonical_prefix",
+            "count": len(selected),
+            "total_shape_count": len(shapes),
+        },
+        "shapes": {shape_id: shapes[shape_id] for shape_id in selected},
+    }
+
+
+def validate_public_shapes(
+    path: Path, *, private_shapes_path: Path
+) -> dict[str, Any]:
+    payload = _load_json_object(path, label=PUBLIC_SHAPES_FILENAME)
+    expected = public_shapes_payload(private_shapes_path)
+    if payload != expected:
+        raise ValueError(
+            f"{path} must be the exact deterministic canonical-prefix projection of shapes.json"
+        )
+    return payload
 
 
 def _case_signature(value: dict[str, Any]) -> str:

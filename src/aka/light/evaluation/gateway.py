@@ -3567,6 +3567,13 @@ def _mask_generalized_result(
     if not _is_generalized_workspace(workspace):
         return result
     masked = dict(result)
+    try:
+        public = read_json_object(workspace / "public_shapes.json") or {}
+        public_ids = list((public.get("shapes") or {}).keys())
+    except (OSError, ValueError, TypeError):
+        public_ids = []
+    masked["shape_visibility"] = "partial"
+    masked["public_shape_ids"] = public_ids
     if result.get("failures"):
         if result.get("diagnostics"):
             masked["failures"] = ["Evaluation failed. See diagnostics for Agate's original failure reasons."]
