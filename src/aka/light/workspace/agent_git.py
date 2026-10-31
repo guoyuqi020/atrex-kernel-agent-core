@@ -22,6 +22,9 @@ IGNORED = (
     "profile_driver.py", "*.jsonl",
 )
 
+_RESUME_REMOTE_PREFIX = "refs/remotes/atrex-resume/heads/"
+_RESUME_BRANCH_PREFIX = "refs/atrex/resume-branch/"
+
 
 def _run(
     workspace: Path, *args: str, check: bool = True, extra_env: dict[str, str] | None = None
@@ -62,6 +65,58 @@ class AgentGit:
         hooks = self.workspace / ".git" / "disabled-hooks"
         hooks.mkdir(parents=True, exist_ok=True)
 
+    def _restore_branches(self) -> None:
+        """Restore every Agent branch and the previously checked-out branch."""
+        rows = _run(
+            self.workspace,
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            _RESUME_REMOTE_PREFIX,
+        ).stdout.splitlines()
+        branches: list[str] = []
+        for row in rows:
+            remote_ref, object_name = row.split(" ", 1)
+            branch = remote_ref.removeprefix(_RESUME_REMOTE_PREFIX)
+            if not branch:
+                continue
+            local_ref = "refs/heads/" + branch
+            _run(self.workspace, "check-ref-format", local_ref)
+            _run(self.workspace, "update-ref", local_ref, object_name)
+            branches.append(branch)
+
+        active = ""
+        markers = _run(
+            self.workspace,
+            "for-each-ref",
+            "--format=%(refname)",
+            _RESUME_BRANCH_PREFIX,
+        ).stdout.splitlines()
+        if len(markers) == 1:
+            active = markers[0].removeprefix(_RESUME_BRANCH_PREFIX)
+        if active not in branches:
+            active = "work" if "work" in branches else (sorted(branches)[0] if branches else "")
+        if active:
+            _run(self.workspace, "checkout", "-f", active)
+
+    def _record_active_branch(self) -> None:
+        """Store the symbolic checkout in a bundled private ref."""
+        markers = _run(
+            self.workspace,
+            "for-each-ref",
+            "--format=%(refname)",
+            _RESUME_BRANCH_PREFIX,
+        ).stdout.splitlines()
+        for marker in markers:
+            _run(self.workspace, "update-ref", "-d", marker)
+        branch = _run(
+            self.workspace, "symbolic-ref", "--quiet", "--short", "HEAD", check=False
+        ).stdout.strip()
+        head = self.head()
+        if branch and head:
+            marker = _RESUME_BRANCH_PREFIX + branch
+            _run(self.workspace, "check-ref-format", marker)
+            _run(self.workspace, "update-ref", marker, head)
+
     def prepare(self) -> None:
         if not (self.workspace / ".git").is_dir():
             _run(self.workspace, "init", "-b", "work")
@@ -73,19 +128,12 @@ class AgentGit:
                     "protocol.file.allow=always",
                     "fetch",
                     str(self.bundle),
-                    "+refs/heads/work:refs/remotes/atrex-resume/work",
+                    "+refs/heads/*:refs/remotes/atrex-resume/heads/*",
                     "+refs/tags/*:refs/tags/*",
                     "+refs/atrex/*:refs/atrex/*",
                     "+refs/notes/*:refs/notes/*",
                 )
-                if _run(
-                    self.workspace,
-                    "show-ref",
-                    "--verify",
-                    "refs/remotes/atrex-resume/work",
-                    check=False,
-                ).returncode == 0:
-                    _run(self.workspace, "reset", "--hard", "refs/remotes/atrex-resume/work")
+                self._restore_branches()
             (self.workspace / ".gitignore").write_text(
                 "# Runtime-managed Agent repository exclusions\n" + "\n".join(IGNORED) + "\n",
                 encoding="utf-8",
@@ -165,6 +213,7 @@ class AgentGit:
         head = self.checkpoint("Runtime: preserve Episode WIP checkpoint")
         if head is None:
             return None
+        self._record_active_branch()
         self.bundle.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.bundle.with_suffix(".tmp")
         temporary.unlink(missing_ok=True)

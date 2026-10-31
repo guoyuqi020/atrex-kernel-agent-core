@@ -578,6 +578,42 @@ def test_agent_git_persists_work_and_installs_runtime_source_refs(tmp_path):
     assert (restored / "implementation" / "helper.py").read_text() == "VALUE = 2\n"
 
 
+def test_agent_git_restores_unmerged_branches_and_active_checkout(tmp_path):
+    workspace = tmp_path / "workspace"
+    source = _install(workspace, "def run():\n    return 1\n")
+    bundle = tmp_path / "state" / "agent.bundle"
+    repo = AgentGit(workspace, bundle)
+    repo.prepare()
+    subprocess.run(
+        ["git", "switch", "-c", "experiment/ksplit4"], cwd=workspace, check=True,
+        text=True, capture_output=True,
+    )
+    (workspace / "implementation" / "ksplit.py").write_text(
+        "KSPLIT = 4\n", encoding="utf-8"
+    )
+    repo.persist()
+
+    restored = tmp_path / "restored"
+    restored_source = _install(restored, "def run():\n    return 1\n")
+    assert restored_source == source
+    resumed = AgentGit(restored, bundle)
+    resumed.prepare()
+
+    assert subprocess.run(
+        ["git", "branch", "--show-current"], cwd=restored,
+        text=True, capture_output=True, check=True,
+    ).stdout.strip() == "experiment/ksplit4"
+    assert subprocess.run(
+        ["git", "show-ref", "--verify", "refs/heads/work"], cwd=restored,
+        text=True, capture_output=True, check=False,
+    ).returncode == 0
+    assert subprocess.run(
+        ["git", "show-ref", "--verify", "refs/heads/experiment/ksplit4"], cwd=restored,
+        text=True, capture_output=True, check=True,
+    ).returncode == 0
+    assert (restored / "implementation" / "ksplit.py").read_text() == "KSPLIT = 4\n"
+
+
 def test_epoch_git_exchange_filters_paths_and_preserves_peer_ref(tmp_path):
     source_workspace = tmp_path / "source"
     _install(source_workspace, "def run():\n    return 1\n")
