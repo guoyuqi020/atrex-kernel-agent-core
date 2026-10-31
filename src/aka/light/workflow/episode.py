@@ -33,6 +33,7 @@ from aka.light.workflow.store import RUNTIME_DIR, VERIFY_DIR, CampaignStore
 from aka.light.workflow.constants import SUPPLEMENTAL_PENDING_PREFIX
 from aka.light.workflow.telemetry import summarize_episode
 from aka.light.acceptance.verifier import GatewayABBAValidator
+from aka.light.agent.home import SESSION_HOME_ROOT_ENV
 
 MODULE_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
@@ -479,6 +480,49 @@ class LongHorizonCampaign:
             and state.episodes >= GOAL_AFTER_EPISODES
             and state.consecutive_without_promotion > GOAL_AFTER_STALLS
         ) else "episode"
+
+    @staticmethod
+    def _continuation_delta(state: SupervisorState) -> str:
+        """Render a bounded authoritative settlement for the next Episode."""
+        if not state.attempts:
+            return ""
+        previous = state.attempts[-1]
+        verification = previous.get("verification")
+        if isinstance(verification, dict):
+            verification = {
+                key: verification.get(key)
+                for key in (
+                    "gate",
+                    "candidate_latency_us",
+                    "incumbent_latency_us",
+                    "improvement_pct",
+                    "gateway_record_id",
+                )
+                if verification.get(key) is not None
+            }
+        else:
+            verification = None
+        delta = {
+            "episode": previous.get("episode"),
+            "status": previous.get("status"),
+            "accepted": previous.get("accepted"),
+            "violation": previous.get("violation"),
+            "candidate_commit": previous.get("candidate_commit"),
+            "promotion_commit": previous.get("promotion_commit"),
+            "verification": verification,
+            "next_directions": previous.get("next_directions"),
+        }
+        encoded = json.dumps(delta, sort_keys=True, ensure_ascii=False, default=str)
+        if len(encoded) > 4_000:
+            encoded = encoded[:3_900] + "...<bounded>"
+        return (
+            "Continue the SAME trajectory and native provider Session into a new Episode. "
+            "Do not restart optimization from first principles or replay all history. "
+            "Treat status, commits, and verification below as authoritative Supervisor facts; "
+            "next_directions are fallible prior-Agent suggestions. Inspect the current trajectory "
+            "Git/Runtime state and continue the highest-value unfinished work.\n"
+            f"Previous Episode settlement: {encoded}\n\n"
+        )
 
     def _expected_shape_ids(self) -> set[str] | None:
         private_reference_dir = self.base_campaign.private_reference_dir
@@ -1356,6 +1400,11 @@ class LongHorizonCampaign:
             )
         store.archive_attempt(episode, attempt)
         state.attempts.append(attempt)
+        if session_id:
+            state.session_id = session_id
+            state.session_backend = getattr(
+                self.base_campaign, "agent_cli", "claude"
+            )
         store.save_state(state)
         self.base_campaign.candidate_workspace.remove(worktree, self.workspace)
         store.clear_active()
@@ -1906,6 +1955,18 @@ class LongHorizonCampaign:
                 verifier=verifier,
                 episode_mode=episode_mode,
             )
+            # Claude is the optimization backend whose native transcript can
+            # be resumed across process invocations. Other backends retain the
+            # existing fresh-Session behavior until they expose equivalent
+            # durable resume semantics.
+            agent_cli = getattr(self.base_campaign, "agent_cli", "claude")
+            continuing_session_id = (
+                state.session_id
+                if agent_cli == "claude" and state.session_backend == agent_cli
+                else ""
+            )
+            if continuing_session_id:
+                prompt = self._continuation_delta(state) + prompt
             store.write_brief(episode, prompt)
             telemetry_environment = {
                 "ATREX_EPISODE_MODE": episode_mode,
@@ -1918,6 +1979,11 @@ class LongHorizonCampaign:
             }
             telemetry_environment.update(
                 self.base_campaign.agent_environment()
+            )
+            # Agent workspaces are projected per Episode, while provider
+            # transcripts persist for the whole trajectory.
+            telemetry_environment[SESSION_HOME_ROOT_ENV] = str(
+                store.root / "agent-session-homes"
             )
             usage_receipt = uuid.uuid4().hex
             result = runner.run(
@@ -1940,6 +2006,13 @@ class LongHorizonCampaign:
                 ),
                 remaining_token_budget=(
                     max(0, self.token_budget - state.tokens) if self.token_budget else None
+                ),
+                session_id=continuing_session_id,
+                resume_session=bool(continuing_session_id),
+                initial_purpose=(
+                    "trajectory_continuation"
+                    if continuing_session_id
+                    else "optimization"
                 ),
                 **main_adapter.session_execution_policy(self.base_campaign),
             )

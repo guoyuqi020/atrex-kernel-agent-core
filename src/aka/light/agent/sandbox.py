@@ -15,7 +15,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from aka.light.agent.home import HOST_HOME_ENV, PREPARED_ENV, open_private_directory, projected_backends
+from aka.light.agent.home import (
+    HOST_HOME_ENV,
+    PREPARED_ENV,
+    SESSION_HOME_ROOT_ENV,
+    open_private_directory,
+    projected_backends,
+)
 from aka.light.agent.installations import installation_mounts
 from aka.light.workspace.auxiliary import WORKSPACE_LAYOUTS, WORKSPACE_ROLE_ENV, AuxiliaryWorkspace
 from aka.light.agent.recovery_processes import HANDOFF_ID_ENV
@@ -387,7 +393,14 @@ def wrap_agent_command(
         values = {
             key: value
             for key, value in environment.items()
-            if key not in {HOST_HOME_ENV, PREPARED_ENV, "PWD", "OLDPWD", "ATREX_EPISODE_PRIVATE_PATHS"}
+            if key not in {
+                HOST_HOME_ENV,
+                PREPARED_ENV,
+                SESSION_HOME_ROOT_ENV,
+                "PWD",
+                "OLDPWD",
+                "ATREX_EPISODE_PRIVATE_PATHS",
+            }
             and (
                 not key.startswith("GIT_")
                 or key

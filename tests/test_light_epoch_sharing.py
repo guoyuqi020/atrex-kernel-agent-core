@@ -8,7 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from aka.contracts.agent import AgentRuntimeCapabilities, NativeInvocation, TokenUsage
 from aka.legacy.task.problem.layout import public_shapes_payload, validate_public_shapes
+from aka.light.agent.home import SESSION_HOME_ROOT_ENV, prepare_agent_environment
 from aka.light.experiment.store import MeasurementStore
 from aka.light.research import ResearchStore
 from aka.light.runtime.paths import supervisor_campaign_root
@@ -22,8 +24,10 @@ from aka.light.workflow.journal_service import (
     private_write,
     shared_research_path,
 )
+from aka.light.workflow.models import SupervisorState
 from aka.light.workflow.search import PooledSearch, SearchOptions, read_state
 from aka.light.workflow.search_driver import EpisodeSearchDriver
+from aka.light.workflow.session import LongSessionRunner
 from aka.light.workspace.agent_git import AgentGit
 from aka.light.workspace.shared_history import export_epoch, import_exports
 from aka.light.workspace.sources import default_tree, install, pack
@@ -41,6 +45,98 @@ def _measurement(store: MeasurementStore, source: bytes, marker: str) -> tuple[s
     with store.reserve(request, {"candidate": identity}) as task:
         record = task.finish(response, cacheable=True)
     return record["gateway_record_id"], identity["kernel_id"]
+
+
+def test_existing_trajectory_session_resumes_on_first_invocation(tmp_path):
+    resume_flags = []
+    opened_session_ids = []
+
+    class Native:
+        supports_resume = True
+
+        def __init__(self):
+            self.environment = {"ATREX_TELEMETRY_ATTEMPT_ID": "invocation"}
+
+        def invoke(self, _prompt, **kwargs):
+            resume_flags.append(kwargs.get("resume"))
+            return NativeInvocation(
+                exit_status=0,
+                timed_out=False,
+                session_id="trajectory-session",
+                stdout="done",
+                stderr="",
+                terminal_usage=TokenUsage(7, 0, 0, 0, 7, "exact"),
+                events=(),
+                capabilities=AgentRuntimeCapabilities(False, False, False),
+                observation_errors=(),
+                resume_usage_qualified=False,
+            )
+
+        def close(self):
+            pass
+
+    class Agent:
+        def open_session(self, _runtime_id, _workspace, **kwargs):
+            opened_session_ids.append(kwargs.get("session_id"))
+            return Native()
+
+    result = LongSessionRunner(
+        agent=Agent(),
+        agent_cli="claude",
+        usage_policy=lambda turn: turn.terminal_usage.total_tokens or 0,
+    ).run(
+        tmp_path,
+        "Continue the next Episode.",
+        episode_timeout_seconds=60,
+        session_id="trajectory-session",
+        resume_session=True,
+        initial_purpose="trajectory_continuation",
+    )
+
+    assert result.session_id == "trajectory-session"
+    assert opened_session_ids == ["trajectory-session"]
+    assert resume_flags == [True]
+    assert [row.purpose for row in result.invocations] == ["trajectory_continuation"]
+
+
+def test_stable_session_home_root_survives_episode_workspace_changes(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "aka.light.agent.sandbox.sandbox_executable", lambda _environment: "/usr/bin/bwrap"
+    )
+    first = tmp_path / "episodes" / "e0001" / "workspace"
+    second = tmp_path / "episodes" / "e0002" / "workspace"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    home_root = tmp_path / "trajectory-session-homes"
+    environment = {
+        "HOME": str(tmp_path / "operator-home"),
+        SESSION_HOME_ROOT_ENV: str(home_root),
+    }
+
+    first_environment = prepare_agent_environment(
+        first, dict(environment), "trajectory-session"
+    )
+    second_environment = prepare_agent_environment(
+        second, dict(environment), "trajectory-session"
+    )
+    other_environment = prepare_agent_environment(
+        second, dict(environment), "different-session"
+    )
+
+    assert first_environment["HOME"] == second_environment["HOME"]
+    assert second_environment["HOME"] != other_environment["HOME"]
+    assert Path(first_environment["HOME"]).is_relative_to(home_root.resolve())
+
+
+def test_supervisor_state_persists_trajectory_session():
+    state = SupervisorState(
+        session_id="trajectory-session", session_backend="claude"
+    )
+    restored = SupervisorState.from_dict(state.as_dict())
+    assert restored.session_id == "trajectory-session"
+    assert restored.session_backend == "claude"
 
 
 def _finalized_journal(path: Path, *, episode: int, suffix: str, record_id: str) -> tuple[str, str]:
@@ -778,7 +874,8 @@ def test_pooled_search_keeps_each_lineage_instead_of_broadcasting_winner(tmp_pat
             candidate = ({"latency_us_geomean": 5.0, "name": "t1"}
                          if trajectory == 1 else None)
             return {"epoch": epoch, "trajectory": trajectory, "episode": episode,
-                    "retained_kernel": candidate, "tokens": 1}
+                    "retained_kernel": candidate, "tokens": 1,
+                    "session_id": f"session-t{trajectory}"}
 
         def seal_epoch(self, epoch, jobs):
             pass
@@ -804,6 +901,8 @@ def test_pooled_search_keeps_each_lineage_instead_of_broadcasting_winner(tmp_pat
     assert state["global_best"]["name"] == "t1"
     assert state["lineages"]["1"]["working_kernel"]["name"] == "t1"
     assert state["lineages"]["2"]["working_kernel"]["name"] == "seed"
+    assert state["lineages"]["1"]["session_id"] == "session-t1"
+    assert state["lineages"]["2"]["session_id"] == "session-t2"
 
 
 def test_pooled_search_migrates_the_old_shared_seed_checkpoint(tmp_path):

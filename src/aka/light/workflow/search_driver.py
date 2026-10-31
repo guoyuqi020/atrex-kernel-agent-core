@@ -591,7 +591,8 @@ class EpisodeSearchDriver:
         return {"epoch": epoch, "trajectory": trajectory, "episode": episode,
                 "status": attempt["status"], "retained_kernel": retained,
                 "archive": str(child.workspace / f".atrex_long_horizon/episodes/e{episode:04d}"),
-                "tokens": attempt.get("tokens", 0)}
+                "tokens": attempt.get("tokens", 0),
+                "session_id": attempt.get("session_id")}
 
     def publish_epoch(self, epoch, kernel):
         self._publish(self.campaign.workspace, epoch, kernel, "campaign")

@@ -4,9 +4,11 @@
 
 当前实现覆盖 Research Board、有序 Direction、Runtime 派生 Experiment 事实、Agent 私有
 Git、过滤后的 Epoch Git 共享、持久 island lineage、前 5 个公开 Shape 与完整 workload
-评测。Provider Session 目前只在单个 Episode 内续接；跨 Episode 的连续性由 Research
-Board、Agent Git 和 Kernel Artifact 提供。跨 Episode 复用同一个 Provider Session，以及
-独立的 dispatcher 边界扰动审计，保留为后续增强，不影响本次闭环的权威测量与恢复。
+评测。每条 trajectory 现在持久化自己的 Claude Provider Session，并在下一个 Episode 的
+首次调用中执行真实 resume；trajectory 级稳定 Session Home 保证 per-Episode 投影工作区
+变化时仍能找到原会话。Research Board、Agent Git 和 Kernel Artifact 仍是可审计、可恢复
+的权威工程状态，conversation 只用于减少重复探索。独立的 dispatcher 边界扰动审计保留
+为后续增强，不影响本次闭环的权威测量与恢复。
 
 ## 概要
 
@@ -473,10 +475,11 @@ Runtime 继续负责长时间等待、重试、去重和基础设施故障分类
 
 Provider Session 是有用的工作上下文，但不是权威记忆：
 
-- local Direction 可以使用新 Session；
-- `major_redesign` 在同一 Episode 内、Session 健康且未接近上下文上限时，优先恢复同一 Session；
+- 同一 trajectory 的新 Episode 首次调用恢复上一 Episode 的 Claude Session；
+- Supervisor 注入上一 Episode 的接受/拒绝、候选、ABBA 和下一方向等有界增量结算，避免重新推导已有结论；
+- per-Episode Agent 工作区可以变化，但 trajectory 级 Session Home 保持稳定；
 - output-limit recovery 在同一 Session 中注入缩小步骤的提示；
-- 新 Episode 或必须更换 Session 时，新 Session 自动获得 Research Board、active Direction、受控 Git 历史和可按需读取的 Measurement；
+- 必须更换 Session 时，新 Session 仍可从 Research Board、active Direction、受控 Git 历史和可按需读取的 Measurement 恢复；
 - trajectory 之间不共享 conversation。
 
 ## Major redesign 生命周期
@@ -532,7 +535,10 @@ Direction 与 Promotion 是两个不同结论：
 - Agent 可以选择其他可见 Kernel 作为起点，但必须记录原因；
 - 协调器不能覆盖刚完成 Direction 的 Git branch 和归档历史。
 
-对于无关的新 Direction，默认开启新 Provider Session，避免把旧设计的错误前提带入后续研究。当前实现以 Episode 为 Provider Session 边界；显式派生的 `refinement`、`alternative` 或 `reimplementation` 通过 Research Board 和 Git 历史续接工程状态。未来可在上下文健康时复用同一个 Provider Session，但 Research Board 和 Git 历史始终是跨 Session 的权威工程上下文。
+当前实现以 trajectory、而不是 Episode 作为 Claude Provider Session 边界。无关的新 Direction
+也会先在同一 trajectory Session 中收到明确的状态转换和增量结算；历史推理仍是可质疑信息，
+Research Board、测量记录和 Git 历史始终是跨 Session 的权威工程上下文。依赖策略恢复等必须
+替换原生会话的情况会更新该 trajectory 的 Session ID，下一 Episode 从替换后的会话继续。
 
 ## 并行搜索拓扑
 
@@ -719,7 +725,7 @@ Research Board 和 Markdown 导出均从事件流与不可变存储重新生成�
 | Agent 私有 Git | `workspace/agent_git.py`、`workspace/episode.py` | Episode draft 初始化受控本地 Git；Git 身份只用于工程审计 |
 | Epoch 共享源码历史 | `workspace/shared_history.py`、`workflow/search_driver.py` | 过滤导出 `kernel.py` 与 `implementation/**`，导入 peer refs 和测量 notes |
 | 前 5 个公开 Shape | `task/problem/layout.py`、`workflow/bootstrap.py`、`workflow/session_io.py` | Runtime 确定性生成只读 `public_shapes.json`；完整 evaluator 输入继续私有 |
-| Prompt 与上下文恢复 | `workflow/prompts/`、`workflow/episode.py` | Episode 开始自动注入 Board；单 Episode 内续接 Session，跨 Episode 用 Board 与 Git 恢复 |
+| Prompt 与上下文恢复 | `workflow/prompts/`、`workflow/episode.py`、`agent/home.py` | Episode 开始自动注入 Board 与上一轮结算；同一 trajectory 跨 Episode 恢复 Claude Session，并以 Board 与 Git 保持权威恢复边界 |
 | 审计与恢复 | Research event store、search checkpoint、Measurement Store | 先写事件再更新投影；所有生成视图均可重建 |
 
 新搜索 checkpoint 使用 schema v2：

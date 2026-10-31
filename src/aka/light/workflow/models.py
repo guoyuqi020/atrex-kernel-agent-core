@@ -76,6 +76,11 @@ class SupervisorState:
     tokens: int = 0
     # Cumulative usage per runner invocation, independent of episode outcomes.
     usage_receipts: dict[str, int] = field(default_factory=dict)
+    # Latest native provider Session for this serial trajectory. Pooled search
+    # gives every trajectory its own SupervisorState, so Sessions never cross
+    # island boundaries.
+    session_id: str = ""
+    session_backend: str = ""
     consecutive_without_promotion: int = 0
     attempts: list[dict[str, Any]] = field(default_factory=list)
 

@@ -296,6 +296,9 @@ class PooledSearch:
                                 job["epoch"], job["trajectory"], job["episode"]):
                             raise RuntimeError("Episode result does not match its scheduled identity")
                         job.update(status="completed", result=result)
+                        session_id = result.get("session_id")
+                        if isinstance(session_id, str) and session_id:
+                            state["lineages"][str(job["trajectory"])]["session_id"] = session_id
                         self._save(state)
                     except Exception as error:
                         # Keep 'running': underlying Episode recovery owns unknown outcomes.

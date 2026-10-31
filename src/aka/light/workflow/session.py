@@ -123,6 +123,7 @@ class LongSessionRunner:
         completion_check: CompletionCheck | None = None,
         reasoning_effort: str = "max",
         session_id: str = "",
+        resume_session: bool = False,
         output_directory: Path | None = None,
         telemetry_environment: Mapping[str, str] | None = None,
         record_usage: Callable[[int], None] | None = None,
@@ -141,9 +142,11 @@ class LongSessionRunner:
             raise ValueError(
                 "dependency_policy_recovery_retries must be an integer from 0 to 10"
             )
+        if resume_session and not session_id:
+            raise ValueError("resume_session requires an existing session_id")
         session_id = session_id or str(uuid.uuid4())
         is_codex = self.agent_cli == "codex"
-        active_session_id = "" if is_codex else session_id
+        active_session_id = session_id if resume_session else ("" if is_codex else session_id)
         if handoff_path is not None:
             if completion_check is None:
                 raise ValueError("completion_check is required when handoff_path is configured")
@@ -159,6 +162,10 @@ class LongSessionRunner:
             output_directory=output_directory,
         )
         try:
+            if resume_session and not native.supports_resume:
+                raise ValueError(
+                    f"{self.agent_cli} does not support cross-Episode Session resume"
+                )
             telemetry_attempt_prefix = native.environment.get(
                 "ATREX_TELEMETRY_ATTEMPT_ID"
             )
@@ -178,7 +185,10 @@ class LongSessionRunner:
             purpose = initial_purpose
             attempt = 0
             rate_limit_retries = 0
-            retry_resume = False
+            # A trajectory continuation must use the provider's real resume
+            # command on its first invocation. Supplying the old id to a fresh
+            # command would silently create a disconnected conversation.
+            retry_resume = resume_session
 
             while True:
                 from aka.light.agent.execution_clock import current_budget
