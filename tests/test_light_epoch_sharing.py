@@ -22,9 +22,10 @@ from aka.light.workflow.journal_service import (
     initialize_journal,
     load_journal,
     private_write,
+    research_projection,
     shared_research_path,
 )
-from aka.light.workflow.models import SupervisorState
+from aka.light.workflow.models import EpisodeHandoff, SupervisorState
 from aka.light.workflow.search import PooledSearch, SearchOptions, read_state
 from aka.light.workflow.search_driver import EpisodeSearchDriver
 from aka.light.workflow.session import LongSessionRunner
@@ -155,6 +156,147 @@ def test_existing_trajectory_session_resumes_on_first_invocation(tmp_path):
     assert opened_session_ids == ["trajectory-session"]
     assert resume_flags == [True]
     assert [row.purpose for row in result.invocations] == ["trajectory_continuation"]
+
+
+def _compaction_connection_loss(session_id):
+    return json.dumps({
+        "type": "assistant",
+        "session_id": session_id,
+        "parent_tool_use_id": None,
+        "isApiErrorMessage": True,
+        "message": {
+            "content": [{
+                "type": "text",
+                "text": (
+                    "Prompt is too long · automatic compaction failed: "
+                    "API Error: Connection lost mid-response. "
+                    "The response above may be incomplete."
+                ),
+            }],
+        },
+    })
+
+
+class _SequenceNative:
+    supports_resume = True
+
+    def __init__(self, agent):
+        self.agent = agent
+        self.environment = {"ATREX_TELEMETRY_ATTEMPT_ID": "invocation"}
+
+    def invoke(self, prompt, **kwargs):
+        self.agent.prompts.append(prompt)
+        self.agent.resume_flags.append(bool(kwargs.get("resume")))
+        return self.agent.invocations.pop(0)
+
+    def close(self):
+        pass
+
+
+class _SequenceAgent:
+    def __init__(self, invocations):
+        self.invocations = list(invocations)
+        self.prompts = []
+        self.resume_flags = []
+        self.opened_sessions = []
+
+    def open_session(self, _runtime_id, _workspace, **kwargs):
+        self.opened_sessions.append(kwargs.get("session_id"))
+        return _SequenceNative(self)
+
+
+def _invocation(exit_status, session_id, tokens, stdout="done"):
+    return NativeInvocation(
+        exit_status=exit_status,
+        timed_out=False,
+        session_id=session_id,
+        stdout=stdout,
+        stderr="",
+        terminal_usage=TokenUsage(tokens, 0, 0, 0, tokens, "exact"),
+        events=(),
+        capabilities=AgentRuntimeCapabilities(False, False, False),
+        observation_errors=(),
+        resume_usage_qualified=False,
+    )
+
+
+def test_compaction_connection_loss_resumes_same_claude_session(
+    tmp_path, monkeypatch
+):
+    agent = _SequenceAgent([
+        _invocation(
+            1,
+            "session-1",
+            11,
+            _compaction_connection_loss("session-1"),
+        ),
+        _invocation(0, "session-1", 7),
+    ])
+    handoffs = iter([None, EpisodeHandoff(status="pivot")])
+    monkeypatch.setattr(
+        "aka.light.workflow.session.read_handoff", lambda _path: next(handoffs)
+    )
+
+    result = LongSessionRunner(
+        agent=agent,
+        agent_cli="claude",
+        usage_policy=lambda turn: turn.terminal_usage.total_tokens or 0,
+    ).run(
+        tmp_path,
+        "Optimize.",
+        episode_timeout_seconds=60,
+        handoff_path=tmp_path / "handoff.json",
+        handoff_resumes=2,
+        completion_check=lambda _handoff: "",
+    )
+
+    assert result.exit_status == 0
+    assert result.handoff == EpisodeHandoff(status="pivot")
+    assert result.resume_count == 1
+    assert agent.resume_flags == [False, True]
+    assert "transient Prompt is too long" in agent.prompts[1]
+    assert [row.purpose for row in result.invocations] == [
+        "optimization", "handoff_resume",
+    ]
+
+
+def test_repeated_compaction_loss_uses_one_fresh_recovery_session(
+    tmp_path, monkeypatch
+):
+    failure = _compaction_connection_loss("session-1")
+    agent = _SequenceAgent([
+        _invocation(1, "session-1", 11, failure),
+        _invocation(1, "session-1", 13, failure),
+        _invocation(0, "session-2", 7),
+    ])
+    handoffs = iter([None, None, EpisodeHandoff(status="pivot")])
+    monkeypatch.setattr(
+        "aka.light.workflow.session.read_handoff", lambda _path: next(handoffs)
+    )
+
+    result = LongSessionRunner(
+        agent=agent,
+        agent_cli="claude",
+        usage_policy=lambda turn: turn.terminal_usage.total_tokens or 0,
+    ).run(
+        tmp_path,
+        "Optimize.",
+        episode_timeout_seconds=60,
+        handoff_path=tmp_path / "handoff.json",
+        handoff_resumes=1,
+        completion_check=lambda _handoff: "",
+    )
+
+    assert result.exit_status == 0
+    assert result.handoff == EpisodeHandoff(status="pivot")
+    assert result.resume_count == 1
+    assert agent.resume_flags == [False, True, False]
+    assert len(agent.opened_sessions) == 2
+    assert "Recover the SAME Episode" in agent.prompts[2]
+    assert "do not reset or repeat completed measurements" in agent.prompts[2]
+    assert [row.purpose for row in result.invocations] == [
+        "optimization", "handoff_resume", "compaction_recovery",
+    ]
 
 
 def test_stable_session_home_root_survives_episode_workspace_changes(
@@ -881,6 +1023,90 @@ def test_peer_in_progress_direction_does_not_block_local_lease(tmp_path):
         "operation": "direction_update",
         "request": {"action": "start", "direction_id": local, "analysis": "independent lease"},
     })["status"] == "recorded"
+
+
+def test_epoch_projection_replays_local_active_direction_beside_peer_active_direction(
+    tmp_path,
+):
+    journals = tmp_path / "journals"
+    peer = "direction_" + "1" * 32
+    local = "direction_" + "2" * 32
+    private_write(
+        shared_research_path(journals),
+        {
+            "schema_version": 1,
+            "revision": "epoch-1",
+            "through_epoch": 1,
+            "directions": {
+                peer: {
+                    "direction_id": peer,
+                    "name": "peer redesign",
+                    "change_scope": "major_redesign",
+                    "hypothesis": "peer hypothesis",
+                    "plan": ["continue peer work"],
+                    "stop_conditions": [],
+                    "status": "in_progress",
+                    "owner": "T2",
+                    "supporting_experiment_ids": [],
+                    "associated_experiment_ids": [],
+                    "hypothesis_status": "unresolved",
+                }
+            },
+            "experiments": [],
+            "research_queue": [peer],
+        },
+    )
+
+    previous_path = journals / "episodes" / "e00000001" / "journal.json"
+    previous = initialize_journal(
+        previous_path,
+        episode=1,
+        base_commit="a" * 40,
+        branch="episode-1",
+        tool_modules=("directions",),
+    )
+    previous.update(state="pivot", finalized_at="2026-11-01T00:00:00+00:00")
+    previous["direction_events"] = [
+        {
+            "direction_event_id": "directionevent_" + "3" * 32,
+            "direction_id": local,
+            "action": "propose",
+            "name": "local redesign",
+            "change_scope": "major_redesign",
+            "hypothesis": "local hypothesis",
+            "plan": ["continue local work"],
+            "stop_conditions": [],
+            "recorded_at": "2026-11-01T00:00:00+00:00",
+            "supporting_experiment_ids": [],
+        },
+        {
+            "direction_event_id": "directionevent_" + "4" * 32,
+            "direction_id": local,
+            "action": "start",
+            "analysis": "Keep the redesign active across Episodes.",
+            "recorded_at": "2026-11-01T00:01:00+00:00",
+            "supporting_experiment_ids": [],
+            "hypothesis_status": None,
+        },
+    ]
+    private_write(previous_path, previous)
+
+    current_path = journals / "episodes" / "e00000002" / "journal.json"
+    current = initialize_journal(
+        current_path,
+        episode=2,
+        base_commit="b" * 40,
+        branch="episode-2",
+        tool_modules=("directions",),
+    )
+    current.update(state="pivot", finalized_at="2026-11-01T01:00:00+00:00")
+    private_write(current_path, current)
+
+    projection = research_projection(current_path, journals)
+
+    assert projection["directions"][peer]["status"] == "in_progress"
+    assert projection["directions"][peer]["owner"] == "T2"
+    assert projection["directions"][local]["status"] == "in_progress"
 
 
 def test_kernel_adoption_requires_exact_materialized_source(tmp_path):

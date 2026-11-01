@@ -1734,16 +1734,18 @@ class Campaign:
             reference_blob = git_path_blob(
                 self.workspace, baseline_commit, "reference.py"
             )
-            baseline_policy, baseline_files = unpack(
+            baseline_policy, _baseline_files = unpack(
                 from_git(self.workspace, baseline_commit)
             )
-            # The selected implementation may be stored inside a source-tree
-            # snapshot without a matching root-level Git path.  Compare the
-            # reference against the complete committed candidate snapshot;
-            # otherwise a reference-backed V0 falls through to the expensive
-            # production reviewer before V1 has even been authored.
-            implementation_blob = baseline_files.get(
-                implementation_entry(baseline_policy)
+            # Compare Git object identities on both sides.  ``git_path_blob``
+            # returns a hexadecimal blob id, whereas ``baseline_files`` holds
+            # raw bytes; comparing those values would silently miss every
+            # native source-tree reference wrapper and send PyTorch V0 through
+            # the production reviewer before V1 has even been authored.
+            implementation_blob = git_path_blob(
+                self.workspace,
+                baseline_commit,
+                implementation_entry(baseline_policy),
             )
             known_reference_wrapper = bool(
                 reference_blob

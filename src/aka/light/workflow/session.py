@@ -32,6 +32,8 @@ from aka.light.workflow.constants import DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES
 
 CompletionCheck = Callable[[EpisodeHandoff], str]
 _CLAUDE_TRANSIENT_API_ERRORS = {"api error: terminated"}
+_CLAUDE_COMPACTION_FAILURE = "automatic compaction failed"
+_CLAUDE_COMPACTION_CONNECTION_LOSS = "connection lost mid-response"
 _DEPENDENCY_POLICY_MARKER = (
     "[orchestrator] dependency policy violation; terminated coding session:"
 )
@@ -50,10 +52,21 @@ def _claude_retryable_api_error(message: str) -> bool:
     normalized = message.strip().casefold()
     if normalized in _CLAUDE_TRANSIENT_API_ERRORS:
         return True
+    if _claude_retryable_compaction_error(normalized):
+        return True
     return (
         "request rejected (429)" in normalized
         and "throttling" in normalized
         and "exceeded your current quota" in normalized
+    )
+
+
+def _claude_retryable_compaction_error(message: str) -> bool:
+    """Recognize a failed provider compaction without treating hard limits as transient."""
+    normalized = message.strip().casefold()
+    return (
+        _CLAUDE_COMPACTION_FAILURE in normalized
+        and _CLAUDE_COMPACTION_CONNECTION_LOSS in normalized
     )
 
 
@@ -185,6 +198,7 @@ class LongSessionRunner:
             purpose = initial_purpose
             attempt = 0
             rate_limit_retries = 0
+            compaction_fresh_recovery_used = False
             # A trajectory continuation must use the provider's real resume
             # command on its first invocation. Supplying the old id to a fresh
             # command would silently create a disconnected conversation.
@@ -533,6 +547,49 @@ class LongSessionRunner:
                             "publishing a valid handoff"
                             if transient_api_error
                             else "coding session received SIGTERM before publishing a valid handoff"
+                        )
+                        continue
+                    if (
+                        transient_api_error
+                        and _claude_retryable_compaction_error(transient_api_error)
+                        and not compaction_fresh_recovery_used
+                    ):
+                        # A second failed compaction can leave the provider Session
+                        # unable to accept even a short continuation. Preserve the
+                        # draft and Runtime Journal, but rebuild conversational
+                        # context once from the ordinary Episode prompt instead of
+                        # discarding the whole Episode as an invalid handoff.
+                        native.close()
+                        active_session_id = str(uuid.uuid4())
+                        native = self.agent.open_session(
+                            self.agent_cli,
+                            workspace,
+                            session_id=active_session_id,
+                            environment=telemetry_environment,
+                            output_directory=output_directory,
+                        )
+                        next_prompt = (
+                            prompt.rstrip()
+                            + "\n\n"
+                            + f"Recover the SAME {stage_name} from the existing workspace and "
+                            "Runtime Journal. Claude's automatic context compaction failed after "
+                            "the provider connection was lost. Preserve the current source tree, "
+                            "Git checkpoints, measurements, and recorded research. Inspect the "
+                            "durable state before doing new work; do not reset or repeat completed "
+                            "measurements. Finish the smallest remaining concrete steps and publish "
+                            f"the required terminal handoff. {completion_instruction.strip()}"
+                        )
+                        retry_resume = False
+                        purpose = "compaction_recovery"
+                        compaction_fresh_recovery_used = True
+                        completion_diagnosis = (
+                            "Claude automatic compaction repeatedly lost the provider connection; "
+                            "started one fresh recovery Session over the preserved draft"
+                        )
+                        print(
+                            "[long-horizon] automatic compaction connection loss; preserving "
+                            f"{stage_name} draft; fresh-session recovery 1/1",
+                            flush=True,
                         )
                         continue
                     break

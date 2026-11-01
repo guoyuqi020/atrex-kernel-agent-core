@@ -66,6 +66,13 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
     def _framework_baseline_decision_patches(
         self, directory, *, reference_blob, implementation_blob
     ):
+        def committed_blob(_workspace, _revision, path):
+            if path == "reference.py":
+                return reference_blob
+            if path == "kernel.py":
+                return implementation_blob
+            return ""
+
         return (
             patch("aka.light.workflow.bootstrap.latest_version", return_value=0),
             patch("aka.light.workflow.bootstrap.git_head", return_value="head"),
@@ -98,11 +105,11 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             patch("aka.light.workspace.sources.from_git", return_value=b"source-tree"),
             patch(
                 "aka.light.workspace.sources.unpack",
-                return_value=(None, {"kernel.py": implementation_blob}),
+                return_value=(None, {"kernel.py": b"implementation"}),
             ),
             patch(
                 "aka.light.workflow.bootstrap.git_path_blob",
-                return_value=reference_blob,
+                side_effect=committed_blob,
             ),
             patch("aka.light.workflow.bootstrap.is_sol_op", return_value=False),
         )
@@ -117,8 +124,8 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             )
             patches = self._framework_baseline_decision_patches(
                 directory,
-                reference_blob=b"same-blob",
-                implementation_blob=b"same-blob",
+                reference_blob="same-blob",
+                implementation_blob="same-blob",
             )
             with ExitStack() as stack:
                 stack.enter_context(reviewer)
@@ -134,8 +141,8 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             campaign = self._framework_baseline_campaign(directory)
             patches = self._framework_baseline_decision_patches(
                 directory,
-                reference_blob=b"reference-blob",
-                implementation_blob=b"implementation-blob",
+                reference_blob="reference-blob",
+                implementation_blob="implementation-blob",
             )
             reviewer_patch = patch.object(
                     Campaign, "_production_kernel_violations", return_value=[]
@@ -149,6 +156,70 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertEqual(action, "pin")
         self.assertIn("already a compliant framework implementation", reason)
         reviewer.assert_called_once_with()
+
+    def test_real_git_v0_reference_wrapper_skips_production_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = self._framework_baseline_campaign(directory)
+            workspace = campaign.workspace
+            (workspace / "implementation").mkdir(parents=True)
+            source = "import torch\n\ndef run(*args, **kwargs):\n    return torch.zeros(1)\n"
+            (workspace / "kernel.py").write_text(source, encoding="utf-8")
+            (workspace / "reference.py").write_text(source, encoding="utf-8")
+            (workspace / "implementation" / "__init__.py").write_text(
+                "", encoding="utf-8"
+            )
+            subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+            subprocess.run(
+                ["git", "config", "user.name", "AKA Test"], cwd=workspace, check=True
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "aka-test@atrex.local"],
+                cwd=workspace,
+                check=True,
+            )
+            subprocess.run(["git", "add", "."], cwd=workspace, check=True)
+            subprocess.run(
+                ["git", "-c", "commit.gpgSign=false", "commit", "-qm", "V0"],
+                cwd=workspace,
+                check=True,
+            )
+            from aka.light.workspace.sources import from_git
+
+            committed_source = from_git(workspace, "HEAD")
+
+            with (
+                patch("aka.light.workflow.bootstrap.latest_version", return_value=0),
+                patch(
+                    "aka.light.workflow.bootstrap.resolve_framework_baseline_commit",
+                    return_value=(None, None),
+                ),
+                patch.object(
+                    Campaign,
+                    "source_checks_enabled",
+                    new_callable=PropertyMock,
+                    return_value=True,
+                ),
+                patch(
+                    "aka.light.workflow.bootstrap.production_structure_violations",
+                    return_value=[],
+                ),
+                patch(
+                    "aka.light.workspace.sources.snapshot",
+                    return_value=committed_source,
+                ),
+                patch("aka.light.workflow.bootstrap.is_sol_op", return_value=False),
+                patch.object(
+                    Campaign,
+                    "_production_kernel_violations",
+                    side_effect=AssertionError(
+                        "known V0 wrapper must not be reviewed"
+                    ),
+                ),
+            ):
+                action, reason = campaign._framework_baseline_decision()
+
+        self.assertEqual(action, "run")
+        self.assertIn("PyTorch reference wrapper", reason)
 
     def test_unlimited_numerical_review_keeps_nested_request_timeout(self):
         runtime = SimpleNamespace(closed=False, _live=lambda _parent: True)

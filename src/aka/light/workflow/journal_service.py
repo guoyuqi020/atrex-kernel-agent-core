@@ -270,7 +270,17 @@ def _index_historical_journal(index: _HistoryIndex, path: Path, episode: int) ->
     if not journal.get("finalized_at"):
         index.pending.add(episode)
         return
-    _apply_direction_events(index.directions, index.statuses, journal)
+    # Shared Epoch Directions belong to peer trajectories.  A peer may keep
+    # its Direction active across Episodes, but that read-only lease must not
+    # consume the local trajectory's single in-progress slot while its private
+    # historical Journals are replayed.  Preserve the published peer status in
+    # ``index.statuses``; ignore it only in the lifecycle validation copy.
+    _apply_direction_events(
+        index.directions,
+        index.statuses,
+        journal,
+        ignored_active_ids=frozenset(index.shared_direction_ids),
+    )
     for experiment in journal["experiments"]:
         if not isinstance(experiment, dict):
             continue
