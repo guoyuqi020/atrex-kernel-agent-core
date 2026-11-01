@@ -47,6 +47,64 @@ def _measurement(store: MeasurementStore, source: bytes, marker: str) -> tuple[s
     return record["gateway_record_id"], identity["kernel_id"]
 
 
+@pytest.mark.parametrize("direction_id", [None, "direction_" + "2" * 32])
+def test_compact_experiment_publishes_legacy_handoff(tmp_path, direction_id):
+    workspace = tmp_path / "workspace"
+    (workspace / ".atrex_long_horizon").mkdir(parents=True)
+    journals = tmp_path / "journals"
+    evidence = journals / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    current = initialize_journal(
+        evidence / "journal.json",
+        episode=1,
+        base_commit="a" * 40,
+        branch="episode",
+        tool_modules=(
+            ("experiments",)
+            if direction_id is None
+            else ("directions", "experiments")
+        ),
+    )
+    experiment_id = "experiment_" + "1" * 32
+    experiment = {
+        "experiment_id": experiment_id,
+        "sequence": 1,
+        "recorded_at": "2026-11-01T00:00:00+00:00",
+        "name": "compact experiment",
+        "intent": "Measure the proposed Kernel change.",
+        "gateway_record_ids": [],
+        "interpretation": "The measured result supports the change.",
+    }
+    if direction_id is not None:
+        experiment["direction_id"] = direction_id
+    current.update(
+        state="candidate_ready",
+        experiments=[experiment],
+        outcome={
+            "summary": "candidate ready",
+            "selected_experiment_id": experiment_id,
+        },
+        candidate_commit="b" * 40,
+    )
+    service = SupervisorJournalService(
+        workspace=workspace,
+        campaign_root=journals,
+        evidence_root=evidence,
+    )
+
+    service._publish_legacy_report(current)
+
+    projection = json.loads(
+        (workspace / ".atrex_long_horizon/journal.json").read_text()
+    )
+    assert projection["experiments"][0]["result"] == (
+        "The measured result supports the change."
+    )
+    assert json.loads(
+        (workspace / ".atrex_long_horizon/handoff.json").read_text()
+    ) == {"status": "candidate_ready", "candidate_commit": "b" * 40}
+
+
 def test_existing_trajectory_session_resumes_on_first_invocation(tmp_path):
     resume_flags = []
     opened_session_ids = []

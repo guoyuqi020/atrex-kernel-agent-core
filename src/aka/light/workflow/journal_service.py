@@ -1689,12 +1689,20 @@ class SupervisorJournalService:
     def _publish_report(self, current: dict[str, Any]) -> None:
         try:
             self._publish_legacy_report(current)
-        except Exception as error:
+        except OSError as error:
             raise RuntimeStateError(
                 "Report is durably recorded but legacy handoff publication failed. "
                 "Restore storage access, then resubmit the identical episode-report; "
                 "do not rerun measurements",
                 code="report_publication_failed",
+            ) from error
+        except Exception as error:
+            raise RuntimeStateError(
+                "Report is durably recorded but its legacy handoff projection failed. "
+                "This is a Supervisor compatibility error; preserve the candidate and "
+                "evidence and ask the operator to repair the Runtime before resubmitting "
+                "the identical episode-report",
+                code="report_projection_failed",
             ) from error
 
     def _publish_legacy_report(self, current: dict[str, Any]) -> None:
@@ -1712,7 +1720,14 @@ class SupervisorJournalService:
                     for key, value in item.items()
                     if key not in {"evidence", "action"}
                 },
-                result=item["analysis"],
+                # Compact Experiments renamed the Agent-authored conclusion to
+                # ``interpretation``.  Keep old finalized Journals readable while
+                # projecting every current Experiment to the legacy ``result`` key.
+                result=(
+                    item["interpretation"]
+                    if "interpretation" in item
+                    else item["analysis"]
+                ),
                 timestamp=item["recorded_at"],
                 decision=(
                     "keep_as_best" if item["experiment_id"] == selected else "discard"
