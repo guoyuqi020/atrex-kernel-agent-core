@@ -5,24 +5,38 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
 
 from aka.contracts.evaluation import derived_evaluation_timeout
+from aka.contracts.workflow import WorkflowSettings
+from aka.contracts.workspace import CandidateHandle
+from aka.contracts.workflow_launch import decode_launch
 from aka.legacy.task.problem.layout import agent_visible_operator_files
 from aka.legacy.task.problem.native_harness import _parser as native_harness_parser
 from aka.light.acceptance.numerical import NumericalCancellation
-from aka.light.acceptance.provider import candidate_acceptance_argv
+from aka.light.acceptance.provider import (
+    CandidateValidation,
+    RecordedAcceptance,
+    candidate_acceptance_argv,
+)
 from aka.light.acceptance.recorded_verifier import RecordedABBAValidator
-from aka.light.acceptance.source_policy import optimization_mode_directive
+from aka.light.acceptance.source_policy import (
+    install_workspace_policy,
+    optimization_mode_directive,
+    production_structure_violations,
+    workspace_policy_block,
+)
 from aka.light.evaluation.gateway import (
     _run_typed_gateway,
     build_parser,
     build_typed_request,
     evaluation_policy,
 )
+from aka.light.evaluation.hardware import hardware_directive
 from aka.light.evaluation.evaluation_failures import (
     embedded_candidate_wall_clock_timeouts,
 )
@@ -43,15 +57,272 @@ from aka.light.execution.gateway_jobs import (
     retry_kind,
 )
 from aka.light.runtime.server import RuntimeConfig, SupervisorRuntime
+from aka.light.runtime.request_errors import AgentRequestError
 from aka.light.runtime.request_feedback import gateway_schema
 from aka.light.workflow.bootstrap import Campaign, framework_baseline_validation_command
-from aka.light.workflow.context import session_execution_policy
+from aka.light.workflow.context import conversion_required, session_execution_policy
 from aka.light.workflow.plugin import Defaults as WORKFLOW_PLUGIN_DEFAULTS
 from aka.light.workflow.provider import WorkflowOptions
+from aka.light.workflow.episode import LongHorizonCampaign
+from aka.light.workflow.search import SearchOptions
 from aka.light.workflow.session_io import _evaluation_performance_timeout
+from aka.light.workspace.sources import default_tree, install, pack
+from aka.light.workspace.episode import _claude_instructions
+from aka.legacy.workflow.cli_conversion import adapt_argv
 
 
 class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
+    def test_episode_claude_instructions_include_current_mode_policy(self):
+        production = workspace_policy_block(
+            "production",
+            "Cuda",
+            source_checks_enabled=True,
+            specify_dsl=True,
+        )
+        projected = _claude_instructions(production).decode()
+        self.assertIn("# Kernel engineering constraints", projected)
+        self.assertIn("Optimization mode: production (hard gate)", projected)
+        self.assertIn("submitted candidate's implementation framework is exactly **Cuda**", projected)
+        self.assertIn("During development, you may use any language or DSL", projected)
+        self.assertIn("final-candidate constraint, not a development-method restriction", projected)
+        self.assertEqual(projected.count("ATREX_OPTIMIZATION_MODE_POLICY_BEGIN"), 1)
+
+        leaderboard = _claude_instructions(
+            workspace_policy_block(
+                "leaderboard",
+                "Cuda",
+                source_checks_enabled=True,
+                specify_dsl=True,
+            )
+        ).decode()
+        self.assertIn("Optimization mode: leaderboard", leaderboard)
+        self.assertNotIn("production (hard gate)", leaderboard)
+
+        open_dsl = _claude_instructions(
+            workspace_policy_block(
+                "production",
+                "Cuda",
+                source_checks_enabled=True,
+                specify_dsl=False,
+            )
+        ).decode()
+        self.assertIn("Optimization mode: production (open DSL)", open_dsl)
+        self.assertNotIn("submitted candidate's implementation framework is exactly **Cuda**", open_dsl)
+
+        with self.assertRaisesRegex(TypeError, "workspace_policy must be text"):
+            RuntimeConfig("L20D", workspace_policy=1)
+
+    def test_search_role_specialization_defaults_off_and_can_be_enabled(self):
+        self.assertFalse(SearchOptions().role_specialization)
+        self.assertTrue(SearchOptions(role_specialization=True).role_specialization)
+        with self.assertRaisesRegex(TypeError, "role_specialization must be a boolean"):
+            SearchOptions(role_specialization=1)
+
+        for enabled in (True, False):
+            with tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory)
+                base = SimpleNamespace(
+                    workspace=workspace,
+                    platform="L20D",
+                    arch="sm_103",
+                    notes="none",
+                    research_records=False,
+                    research_modules=(),
+                    search_coordinate={
+                        "epoch": 1,
+                        "trajectory": 1,
+                        "episode": 1,
+                        "role_specialization": enabled,
+                    },
+                    module_options=SimpleNamespace(goal_episodes=False),
+                    specify_dsl=True,
+                    framework="Cuda",
+                    dsl_context="- DSL: `Cuda`",
+                    plugin_directive=lambda stage: "",
+                    research_board=lambda: {},
+                    tool_runtime=SimpleNamespace(
+                        pause_agent_during_requests=True
+                    ),
+                )
+                prompt = LongHorizonCampaign(base)._prompt(
+                    episode=1,
+                    version=1,
+                    worktree=CandidateHandle(
+                        1, "a" * 40, "work", workspace
+                    ),
+                    conversion_pending=False,
+                )
+            self.assertIn(
+                "Search location: Epoch 1, Trajectory 1, Episode 1", prompt
+            )
+            self.assertEqual(
+                "T1 role: bounded exploitation" in prompt,
+                enabled,
+            )
+
+    def test_episode_prompt_has_one_workflow_and_modular_contracts(self):
+        prompt_dir = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "aka"
+            / "light"
+            / "workflow"
+            / "prompts"
+        )
+        episode = (prompt_dir / "episode.md").read_text(encoding="utf-8")
+        self.assertEqual(episode.count("## Workflow"), 1)
+        self.assertIn("{{RESEARCH_MODULE_RULES}}", episode)
+        self.assertIn("{{HANDOFF_CONTRACT}}", episode)
+        self.assertIn("{{RUNTIME_WAIT_POLICY}}", episode)
+        for removed in (
+            "{{MODE_POLICY}}",
+            "{{EVALUATOR}}",
+            "{{SANDBOX}}",
+            "{{AGENT_RUNTIME}}",
+            "{{WIKI_DIRECTIVE}}",
+            "{{REPORT_SELECTION}}",
+        ):
+            self.assertNotIn(removed, episode)
+        for name in (
+            "episode_unrecorded.md",
+            "episode_experiments.md",
+            "episode_directions.md",
+            "episode_research.md",
+        ):
+            fragment = (prompt_dir / name).read_text(encoding="utf-8")
+            self.assertNotIn("## Workflow", fragment)
+            self.assertNotIn("## Handoff", fragment)
+
+    def test_optional_dsl_settings_and_cli_normalization(self):
+        settings = WorkflowSettings(platform="L20D", framework="Cuda")
+        self.assertTrue(settings.specify_dsl)
+        with self.assertRaises(TypeError):
+            WorkflowSettings(platform="L20D", framework="Cuda", specify_dsl=1)
+
+        launch = decode_launch(
+            adapt_argv(
+                [
+                    "--op-dir",
+                    str(Path.cwd()),
+                    "--platform",
+                    "L20D",
+                    "--framework",
+                    "Cuda",
+                    "--no-specify-dsl",
+                ]
+            )
+        )
+        self.assertFalse(launch.request.settings.specify_dsl)
+        self.assertEqual(launch.request.settings.framework, "")
+        self.assertIn("specify_dsl", launch.provided_settings)
+
+    def test_open_dsl_policy_is_neutral_and_disables_conversion(self):
+        directive = optimization_mode_directive(
+            "production", "Cuda", specify_dsl=False
+        )
+        self.assertIn("No DSL is prescribed", directive)
+        self.assertNotIn("`Cuda`", directive)
+        campaign = SimpleNamespace(
+            source_checks_enabled=True,
+            specify_dsl=False,
+            framework="Triton",
+            convert_after=0,
+        )
+        self.assertFalse(conversion_required(campaign, 99, Path(".")))
+
+    def test_open_dsl_structure_and_workspace_policy_do_not_pin_framework(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            policy, files = default_tree(
+                {"kernel.py": b"def run(*args):\n    return args\n"}
+            )
+            install(workspace, pack(files, policy))
+            self.assertEqual(
+                production_structure_violations(
+                    workspace, "", specify_dsl=False
+                ),
+                [],
+            )
+            self.assertIn(
+                "unsupported production framework",
+                production_structure_violations(
+                    workspace, "", specify_dsl=True
+                )[0],
+            )
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            (workspace / "kernel.py").write_text(
+                "def run(*args):\n    return args\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                production_structure_violations(
+                    workspace, "", specify_dsl=False
+                ),
+                [],
+            )
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            install_workspace_policy(
+                workspace,
+                "production",
+                "Cuda",
+                specify_dsl=False,
+                update_tracked_files=False,
+            )
+            state = json.loads(
+                (workspace / ".orchestrator_mode.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["framework"], "")
+            self.assertFalse(state["specify_dsl"])
+
+    def test_open_dsl_framework_baseline_prompt_is_neutral(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            campaign = Campaign(
+                name="op",
+                kernel_demo=str(Path(directory) / "reference.py"),
+                platform="L20D",
+                framework="Cuda",
+                specify_dsl=False,
+                work_dir=directory,
+            )
+            campaign.tool_runtime = SimpleNamespace(
+                wiki=False,
+                pause_agent_during_requests=True,
+            )
+            campaign.plugin_directive = lambda _phase: ""
+            campaign._framework_baseline_correctness_guidance_text = lambda: ""
+            campaign._mode_directive = lambda: optimization_mode_directive(
+                "production", "", specify_dsl=False
+            )
+            prompt = campaign._framework_baseline_prompt(1)
+            self.assertIn("Choose a supported DSL", prompt)
+            self.assertNotIn("- DSL: `Cuda`", prompt)
+            self.assertNotIn("yourself in `Cuda`", prompt)
+            self.assertNotIn("{{", prompt)
+
+    def test_disabled_framework_correctness_review_has_no_prompt_section(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            campaign = Campaign(
+                name="op",
+                kernel_demo="reference.py",
+                platform="L20D",
+                framework="Cuda",
+                work_dir=directory,
+            )
+            self.assertEqual(
+                campaign._framework_baseline_correctness_guidance_text(), ""
+            )
+
+    def test_hardware_prompt_contains_only_dynamic_runtime_arch(self):
+        directive = hardware_directive("masked-product", "vendor_arch_987")
+
+        self.assertEqual(directive, "Hardware: **vendor_arch_987**\n")
+        self.assertNotIn("masked-product", directive)
+        self.assertNotIn("sm_103", directive)
+        self.assertNotIn("tcgen05", directive)
+
     def _framework_baseline_campaign(self, directory):
         return Campaign(
             name="operator",
@@ -596,6 +867,10 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             optimization_mode="production",
         )
         runtime.numerical_validator = None
+        policy_calls = []
+        runtime.production_policy_validator = lambda workspace, source, **options: (
+            policy_calls.append((workspace, source, options)) or []
+        )
         runtime.measurements = SimpleNamespace(read=lambda _: {})
         runtime.journal_factory = SimpleNamespace(
             research_records=False,
@@ -606,18 +881,148 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
 
         def validate_candidate(context, source):
             context.measure(["--kind", "run"], source, True)
+            self.assertEqual(context.production_policy(source), [])
             return {"status": "ok"}
 
         runtime.acceptance = SimpleNamespace(validate_candidate=validate_candidate)
         runtime.execute = lambda *args, **kwargs: captured.update(kwargs) or {
             "exit_code": 0, "stdout": "", "stderr": "",
         }
-        capability = SimpleNamespace()
+        capability = SimpleNamespace(
+            journal=SimpleNamespace(
+                service=SimpleNamespace(git_workspace=Path("/candidate")),
+                require_gluon=True,
+            )
+        )
         self.assertEqual(
             runtime._validate_candidate_correctness(capability, b"candidate"),
             {"status": "ok"},
         )
         self.assertIs(captured["terminal_validation"], True)
+        self.assertEqual(policy_calls[0][0], Path("/candidate"))
+        self.assertEqual(policy_calls[0][1], b"candidate")
+        self.assertIs(policy_calls[0][2]["parent"], capability)
+        self.assertIs(policy_calls[0][2]["require_gluon"], True)
+
+    def test_production_review_rejection_is_returned_by_episode_report(self):
+        source = b"candidate"
+        numerical_calls = []
+        context = CandidateValidation(
+            atrex_bench=True,
+            production=True,
+            measure=lambda *_args, **_kwargs: {
+                "exit_code": 0,
+                "stdout": "",
+                "stderr": "",
+            },
+            read_record=lambda _record_id: {},
+            ensure_live=lambda: None,
+            production_policy=lambda _source: [
+                "production candidate rejected by independent reviewer: "
+                "compute_provenance: PyTorch performs the core computation"
+            ],
+            supplemental=lambda _source, _correctness_passed: (
+                numerical_calls.append(True) or ""
+            ),
+        )
+        result = {
+            "all_pass": True,
+            "gateway_record_id": "gateway-" + "a" * 32,
+        }
+        with (
+            patch(
+                "aka.light.evaluation.provider.result_from_response",
+                return_value=result,
+            ),
+            patch(
+                "aka.light.acceptance.provider.authoritative_candidate_record",
+                return_value=True,
+            ),
+            self.assertRaises(AgentRequestError) as raised,
+        ):
+            RecordedAcceptance().validate_candidate(context, source)
+
+        response = raised.exception.response
+        self.assertEqual(
+            response["error"]["code"],
+            "candidate_production_policy_failed",
+        )
+        self.assertIn("PyTorch performs", response["error"]["violations"][0])
+        self.assertIn("resubmit episode-report", response["error"]["next_action"])
+        self.assertEqual(numerical_calls, [True])
+        self.assertEqual(response["checks"]["correctness"]["status"], "passed")
+        self.assertEqual(response["checks"]["production_review"]["status"], "failed")
+        self.assertEqual(response["checks"]["numerical"]["status"], "passed")
+
+    def test_production_acceptance_gates_start_concurrently(self):
+        acceptance = RecordedAcceptance()
+        barrier = threading.Barrier(3)
+
+        def gate(*_args):
+            barrier.wait(timeout=2)
+            return {"status": "passed"}
+
+        context = CandidateValidation(
+            atrex_bench=True,
+            production=True,
+            measure=lambda *_args, **_kwargs: {},
+            read_record=lambda _record_id: {},
+            ensure_live=lambda: None,
+        )
+        with (
+            patch.object(acceptance, "_validate_correctness", side_effect=gate),
+            patch.object(acceptance, "_validate_policy", side_effect=gate),
+            patch.object(acceptance, "_validate_numerical", side_effect=gate),
+        ):
+            result = acceptance.validate_candidate(context, b"candidate")
+        self.assertEqual(result["checks"]["correctness"]["status"], "passed")
+        self.assertEqual(result["checks"]["production_review"]["status"], "passed")
+        self.assertEqual(result["checks"]["numerical"]["status"], "passed")
+
+    def test_multiple_acceptance_failures_are_returned_together(self):
+        acceptance = RecordedAcceptance()
+        context = CandidateValidation(
+            atrex_bench=True,
+            production=True,
+            measure=lambda *_args, **_kwargs: {},
+            read_record=lambda _record_id: {},
+            ensure_live=lambda: None,
+        )
+        with (
+            patch.object(
+                acceptance,
+                "_validate_correctness",
+                side_effect=AgentRequestError(
+                    "correctness failed",
+                    code="candidate_correctness_failed",
+                    next_action="Repair correctness.",
+                ),
+            ),
+            patch.object(
+                acceptance,
+                "_validate_policy",
+                side_effect=AgentRequestError(
+                    "policy failed",
+                    code="candidate_production_policy_failed",
+                    next_action="Repair final source.",
+                ),
+            ),
+            patch.object(
+                acceptance,
+                "_validate_numerical",
+                return_value={"status": "passed"},
+            ),
+            self.assertRaises(AgentRequestError) as raised,
+        ):
+            acceptance.validate_candidate(context, b"candidate")
+
+        response = raised.exception.response
+        self.assertEqual(response["error"]["code"], "candidate_acceptance_failed")
+        self.assertEqual(
+            response["error"]["failed_checks"],
+            ["correctness", "production_review"],
+        )
+        self.assertEqual(response["error"]["checks"]["numerical"]["status"], "passed")
 
     def test_output_limit_recovery_defaults_to_five_continuations(self):
         self.assertEqual(WorkflowOptions().output_limit_recovery_retries, 5)
@@ -691,18 +1096,14 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             },
         )
 
-    def test_framework_baseline_uses_full_episode_sandbox_contract(self):
-        campaign = Campaign(
-            name="operator",
-            kernel_demo="reference.py",
-            platform="cuda",
-            framework="cuda",
-            sandbox_hardware="L20D",
-        )
-        self.assertEqual(
-            campaign._framework_baseline_sandbox_directive(),
-            campaign._sandbox_directive(),
-        )
+    def test_framework_baseline_prompt_delegates_runtime_contract_to_claude_and_skills(self):
+        template = (
+            Path(__file__).resolve().parents[1]
+            / "src/aka/light/workflow/prompts/framework_baseline.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("{{RUNTIME_WAIT_POLICY}}", template)
+        for removed in ("{{AGENT_RUNTIME}}", "{{SANDBOX}}", "{{EVALUATOR}}"):
+            self.assertNotIn(removed, template)
 
     def test_light_policy_defers_correctness_rules_to_task_configuration(self):
         directive = optimization_mode_directive("production", "CUDA")
@@ -713,6 +1114,41 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("benchmark correctness contract is authoritative", directive)
         self.assertIn("Do not assume, invent, or override", directive)
         self.assertIn("one passing check never overrides another reported failure", directive)
+
+    def test_pinned_production_dsl_only_constrains_submitted_candidate(self):
+        cuda = optimization_mode_directive("production", "Cuda")
+        self.assertIn(
+            "submitted candidate's implementation framework is exactly **Cuda**",
+            cuda,
+        )
+        self.assertIn("During development, you may use any language or DSL", cuda)
+        self.assertIn("PyTorch/ATen compute", cuda)
+        self.assertIn("third-party compute libraries", cuda)
+        self.assertIn("dynamically loaded external implementations", cuda)
+        self.assertIn("temporary prototype", cuda)
+        self.assertIn("remove them from the submitted Kernel source tree", cuda)
+        self.assertIn("wrapping another DSL as the selected framework", cuda)
+
+        triton = optimization_mode_directive("production", "Triton")
+        self.assertIn("submitted candidate's implementation framework is exactly **Triton**", triton)
+        self.assertIn("Do not submit a candidate that switches early", triton)
+
+    def test_dsl_context_distinguishes_final_gate_from_development_tools(self):
+        production = object.__new__(Campaign)
+        production.specify_dsl = True
+        production.optimization_mode = "production"
+        production.framework = "Cuda"
+        self.assertIn("Required final candidate DSL: `Cuda`", production.dsl_context)
+        self.assertIn("prototypes may use any language or DSL", production.dsl_context)
+
+        leaderboard = object.__new__(Campaign)
+        leaderboard.specify_dsl = True
+        leaderboard.optimization_mode = "leaderboard"
+        leaderboard.framework = "Cuda"
+        self.assertEqual(
+            leaderboard.dsl_context,
+            "- Recommended candidate DSL: `Cuda`",
+        )
 
     def test_generalized_agent_workspace_exposes_metadata_but_not_exact_shapes(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -894,6 +1330,51 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("elementwise tolerance failed", problem)
         self.assertIn('\"max_elementwise_rel_diff\": 0.125', problem)
         self.assertNotEqual(problem, "combined validation command failed (exit=1)")
+
+    def test_framework_baseline_gates_run_concurrently_and_return_together(self):
+        barrier = threading.Barrier(3)
+
+        def policy_gate():
+            barrier.wait(timeout=2)
+            return ["review rejected final dependency"]
+
+        def validation_gate(_version):
+            barrier.wait(timeout=2)
+            return {"all_pass": False}, "shape 7 failed correctness"
+
+        def numerical_gate(_workspace, **options):
+            barrier.wait(timeout=2)
+            self.assertFalse(options["standard_correctness_passed"]())
+            return "supplemental probe found an unstable case"
+
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = Campaign(
+                name="operator",
+                kernel_demo="reference.py",
+                platform="cuda",
+                framework="cuda",
+                work_dir=directory,
+            )
+            with (
+                patch.object(
+                    Campaign,
+                    "source_checks_enabled",
+                    new_callable=PropertyMock,
+                    return_value=True,
+                ),
+                patch.object(campaign, "_production_kernel_violations", side_effect=policy_gate),
+                patch.object(campaign, "_validate_framework_baseline", side_effect=validation_gate),
+                patch.object(campaign, "supplemental_numerical_feedback", side_effect=numerical_gate),
+            ):
+                result, problem = campaign._framework_baseline_external_gates(1)
+
+        self.assertEqual(result, {"all_pass": False})
+        self.assertIn("review rejected final dependency", problem)
+        self.assertIn("shape 7 failed correctness", problem)
+        self.assertIn("supplemental probe found an unstable case", problem)
+        self.assertIn("- production_review: failed", problem)
+        self.assertIn("- correctness_performance: failed", problem)
+        self.assertIn("- numerical: failed", problem)
 
     def test_framework_baseline_keeps_bounded_transport_error_without_result(self):
         completed = subprocess.CompletedProcess(

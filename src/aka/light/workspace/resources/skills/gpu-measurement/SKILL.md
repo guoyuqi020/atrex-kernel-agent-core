@@ -14,9 +14,10 @@ commands. Every remote job starts fresh; no remote filesystem is retained. In pa
 Dev is not an interactive or persistent remote workspace: repeat every required `--input`
 on every call and explicitly synchronize outputs that a later call needs.
 
-Follow the current session's measurement scope and finish procedure. Framework
-Baseline permits only its prescribed smoke; optimization Episodes may use the
-operations below. Measurements and comparisons do not grant promotion authority.
+Follow the current session's measurement scope and finish procedure. Do not run
+GPU measurements in Framework Baseline unless its stage Prompt explicitly supplies
+a command; optimization Episodes may use the operations below. Measurements and
+comparisons do not grant promotion authority.
 
 Follow the injected evaluator contract. SOL-ExecBench uses `--kind run --no-sync`
 for the official full workload; do not add typed `--mode` or top-level seed controls.

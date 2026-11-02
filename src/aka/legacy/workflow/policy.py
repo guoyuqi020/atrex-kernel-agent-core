@@ -50,18 +50,18 @@ def optimization_mode_directive(
         )
     if framework_key(framework) == "triton":
         framework_rule = (
-            "- The initial implementation framework is exactly **Triton**. After the orchestrator "
+            "- The submitted candidate's implementation framework is exactly **Triton**. After the orchestrator "
             "enters its mandatory Triton-to-Gluon conversion phase, a direct implementation in "
             "`triton.experimental.gluon` is allowed and becomes the required framework for later "
-            "iterations. Do not switch early, switch back, mix Triton and Gluon compute kernels, "
-            "or use any other DSL.\n"
+            "submitted candidates. Do not submit a candidate that switches early, switches back, "
+            "mixes Triton and Gluon compute kernels, or uses another DSL.\n"
         )
         candidate_framework = "the active Triton/Gluon phase"
     else:
         framework_rule = (
-            f"- The implementation framework is exactly **{framework}**. It is a hard constraint, "
-            "not a recommendation. Do not switch to another DSL, mix another kernel framework "
-            "into the candidate, or replace the implementation with a prebuilt operator.\n"
+            f"- The submitted candidate's implementation framework is exactly **{framework}**. "
+            "This is a hard final-candidate constraint, not a development-method restriction. Do not "
+            "submit another DSL, a mixed-framework compute path, or a prebuilt operator.\n"
         )
         candidate_framework = framework
     if numerical_feedback_instruction is None:
@@ -81,14 +81,22 @@ def optimization_mode_directive(
         "This generated section overrides any conflicting permissive framework or third-party-library "
         "guidance elsewhere in `CLAUDE.md`.\n\n"
         f"{framework_rule}"
+        "- During development, you may use any language or DSL, PyTorch/ATen compute, prebuilt "
+        "kernels/operators/math implementations, third-party compute libraries, hidden or external "
+        "dispatch, dynamically loaded external implementations, compiler probes, microbenchmarks, "
+        "reference implementations, and temporary prototypes to make evidence-backed decisions. "
+        "These are development aids, not production candidates: remove them from the submitted "
+        "Kernel source tree and runtime compute path unless they themselves satisfy the active "
+        "final-candidate policy.\n"
         "- The V0 PyTorch reference wrapper is the only baseline exception. Every optimized candidate "
         f"committed after V0 must implement the GPU computation directly in **{candidate_framework}**.\n"
         "- The supervisor sends every production candidate to a separate, read-only policy reviewer. "
         "The reviewer judges the complete candidate by actual use, not package names: compiler bindings, "
         "header discovery, ABI/launch plumbing, and ordinary non-compute support utilities may be accepted "
-        "when they only build or launch the candidate's self-authored kernel. Prebuilt kernels/operators/math "
-        "implementations, alternate DSLs, hidden dispatch, PyTorch compute fallbacks, and external "
-        "implementation loading remain forbidden. Ambiguous evidence is rejected.\n"
+        "when they only build or launch the candidate's self-authored kernel. In the submitted candidate, "
+        "prebuilt kernels/operators/math implementations, third-party core computation, alternate DSLs, "
+        "hidden dispatch, PyTorch/ATen compute fallbacks, external implementation loading, and wrapping "
+        "another DSL as the selected framework remain forbidden. Ambiguous evidence is rejected.\n"
         f"- {correctness_instruction}"
         "- Numerical review produces targeted supplemental tests, not subjective rejection verdicts. "
         "The supervisor executes those probes; measured failures return to the coding Agent for repair "

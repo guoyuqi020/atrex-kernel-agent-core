@@ -9,11 +9,11 @@ import hashlib
 import json
 import math
 import os
-import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -59,7 +59,7 @@ from aka.light.workflow.baseline_progress import (mark_accepted as mark_framewor
 from aka.light.workflow.baseline_progress import (progress_path as framework_baseline_progress_path)
 from aka.light.workflow.baseline_progress import (restore_latest_candidate as restore_latest_framework_baseline_candidate)
 from aka.light.workflow.baseline_progress import (save_supervisor_recovery as save_framework_baseline_recovery)
-from aka.light.evaluation.hardware import hardware_directive, hardware_vendor, kernel_is_gluon
+from aka.light.evaluation.hardware import hardware_vendor, kernel_is_gluon
 from aka.light.workspace.versions import (
     STATE_DIRECTORY,
     save_version_record,
@@ -83,6 +83,7 @@ from aka.light.acceptance.source_policy import (
     optimization_mode_directive,
     production_kernel_violations,
     production_structure_violations,
+    workspace_policy_block,
 )
 from aka.light.workflow.session_io import (
     SessionResult,
@@ -96,7 +97,7 @@ from aka.light.workflow.session_io import (
     run_session,
     sandbox_directive,
 )
-from aka.light.workspace.assets import (_agent_runtime_directive, link_runtime)
+from aka.light.workspace.assets import link_runtime
 from aka.light.workspace.state import (
     git_head,
     git_path_blob,
@@ -264,6 +265,7 @@ class Campaign:
     kernel_demo: str
     platform: str
     framework: str
+    specify_dsl: bool = True
     notes: str = "none"
     arch: str = ""  # real runtime GPU arch e.g. "sm_103" / "gfx942"; auto-detected
     work_dir: str = ""  # explicit working directory; "" = Path.cwd() (backward compat)
@@ -306,6 +308,12 @@ class Campaign:
     sandbox_ssh_gpu: int | None = None  # assigned physical NVIDIA GPU index
     sandbox_health_command: str = ""  # remote GPU readiness probe
     tokens_spent: int = field(default=0, init=False)
+    _account_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
     _production_review_cache: dict[str, tuple[tuple[str, ...], dict[str, object]]] = (
         field(default_factory=dict, init=False, repr=False, compare=False)
     )
@@ -314,6 +322,8 @@ class Campaign:
     )
 
     def __post_init__(self) -> None:
+        if type(self.specify_dsl) is not bool:
+            raise TypeError("specify_dsl must be a boolean")
         if self.sandbox_timeout is None:
             from aka.contracts.evaluation import derived_evaluation_timeout
             self.sandbox_timeout = derived_evaluation_timeout(
@@ -336,6 +346,22 @@ class Campaign:
     def campaign_name(self) -> str:
         suffix = f"_{self.workspace_suffix}" if self.workspace_suffix else ""
         return f"{self.name}{suffix}"
+
+    @property
+    def dsl_context(self) -> str:
+        if not self.specify_dsl:
+            return ""
+        if self.optimization_mode == "production":
+            return (
+                f"- Required final candidate DSL: `{self.framework}`. Development probes and "
+                "temporary prototypes may use any language or DSL; they must not remain in the "
+                "submitted Kernel source tree or runtime compute path unless compliant."
+            )
+        return f"- Recommended candidate DSL: `{self.framework}`"
+
+    @property
+    def dsl_query_context(self) -> str:
+        return f", DSL `{self.framework}`" if self.specify_dsl else ""
 
     @property
     def private_reference_dir(self) -> Path | None:
@@ -512,21 +538,72 @@ class Campaign:
             atrex_bench_root=Path(self.atrex_bench_root).resolve() if self.atrex_bench_root else None,
             wiki_profile_root=self.workspace / ".gpu_wiki_profile", task_id=self.campaign_name,
             optimization_mode=self.optimization_mode,
+            workspace_policy=workspace_policy_block(
+                self.optimization_mode,
+                self.framework,
+                source_checks_enabled=self.source_checks_enabled,
+                specify_dsl=self.specify_dsl,
+            ),
             workspace=self.workspace,
             request_timeout=request_timeout,
             queue_timeout=queue_timeout,
         ), workspace_provider=self.candidate_workspace)
+        self._supervisor_runtime.production_policy_validator = (
+            self.production_policy_feedback
+        )
         self._supervisor_runtime.numerical_validator = self.supplemental_numerical_feedback
 
-    def supplemental_numerical_feedback(self, workspace: Path, source: bytes | None = None, *, parent=None,
-                                        flow: str = "episode") -> str:
+    def production_policy_feedback(
+        self,
+        workspace: Path,
+        source: bytes,
+        *,
+        parent=None,
+        require_gluon: bool = False,
+    ) -> list[str]:
+        """Review the exact sealed report candidate before accepting its handoff."""
+        if self.optimization_mode != "production" or not self.source_checks_enabled:
+            return []
+        from aka.light.workspace.sources import install, policy_at
+
+        with tempfile.TemporaryDirectory(prefix="atrex-production-candidate-") as directory:
+            frozen = Path(directory)
+            install(frozen, source)
+            # Legacy raw candidates may carry an immutable manifest outside the
+            # Kernel snapshot. Tree candidates already describe their complete
+            # reviewed source set through the fixed source contract.
+            manifest = Path(workspace) / "solution.json"
+            if policy_at(frozen) is None and manifest.is_file():
+                shutil.copy2(manifest, frozen / "solution.json")
+            return self._production_kernel_violations(
+                frozen,
+                require_gluon=require_gluon,
+                review_record_workspace=Path(workspace),
+            )
+
+    def supplemental_numerical_feedback(
+        self,
+        workspace: Path,
+        source: bytes | None = None,
+        *,
+        parent=None,
+        flow: str = "episode",
+        standard_correctness_passed=True,
+    ) -> str:
         """Validate frozen candidate bytes using private plans and recorded GPU probes."""
         from aka.light.acceptance.numerical import validate_candidate
 
         if not self.module_options.numerical_validation:
             return ""
         self.start_runtime()
-        return validate_candidate(self, workspace, source=source, parent=parent, flow=flow)
+        return validate_candidate(
+            self,
+            workspace,
+            source=source,
+            parent=parent,
+            flow=flow,
+            standard_correctness_passed=standard_correctness_passed,
+        )
 
     @property
     def plugin_registry(self):
@@ -536,7 +613,7 @@ class Campaign:
     def plugin_directive(self, phase: str) -> str:
         return self.plugin_registry.instructions(
             phase, PLATFORM=self.platform, ARCH=self.arch or "<exact runtime architecture>",
-            FRAMEWORK=self.framework,
+            FRAMEWORK=(self.framework if self.specify_dsl else "Agent-selected supported GPU DSL"),
             OPERATOR=self.name,
         )
 
@@ -611,6 +688,7 @@ class Campaign:
         branch: str,
         memory_version: int,
         supervisor_git: bool = True,
+        require_gluon: bool = False,
     ) -> Path:
         """Start Runtime if needed and bind an Episode from trusted controller state."""
         self.start_runtime()
@@ -621,6 +699,7 @@ class Campaign:
             branch=branch,
             memory_version=memory_version,
             supervisor_git=supervisor_git,
+            require_gluon=require_gluon,
             origin=(getattr(self, "search_coordinate", None) or {
                 "epoch": episode,
                 "trajectory": 1,
@@ -650,11 +729,10 @@ class Campaign:
     def agent_environment(self) -> dict[str, str]:
         private_dir = self.private_reference_dir
         environment = {
-            # Leaderboard is intentionally permissive. Production retains both
-            # the Claude preflight hook and live descendant-process enforcement.
-            DEPENDENCY_GUARD_ENV: (
-                "1" if self.optimization_mode == "production" else "0"
-            ),
+            # Dependency/framework provenance is a final-candidate gate owned by
+            # Production Review, not a restriction on development commands. The
+            # transport, shared-Gateway and outage protections remain active.
+            DEPENDENCY_GUARD_ENV: "0",
         }
         environment.update(self.agent_boundary_environment())
         self.start_runtime()
@@ -788,10 +866,12 @@ class Campaign:
         return base / f"kernel_opt_{self.campaign_name}"
 
     def _account(self, res: SessionResult, label: str) -> None:
-        self.tokens_spent += res.tokens
+        with self._account_lock:
+            self.tokens_spent += res.tokens
+            cumulative = self.tokens_spent
         print(
             f"[orchestrator] {label}: exit={res.exit_status} timed_out={res.timed_out} "
-            f"tokens={res.tokens} cum_tokens={self.tokens_spent}",
+            f"tokens={res.tokens} cum_tokens={cumulative}",
             flush=True,
         )
         if res.exit_status != 0 or res.timed_out:
@@ -835,6 +915,7 @@ class Campaign:
         require_gluon: bool,
         *,
         candidate_digest: str,
+        record_workspace: Path | None = None,
     ) -> list[str]:
         """Delegate complete candidate policy review to a fresh, isolated agent."""
         from aka.light.execution.retry import check_review_service
@@ -844,7 +925,7 @@ class Campaign:
         if cached is not None:
             cached_errors, review_record = cached
             persistence_errors = self._persist_production_review_record(
-                workspace,
+                record_workspace or workspace,
                 candidate_digest,
                 review_record,
             )
@@ -870,8 +951,15 @@ class Campaign:
 
             request = {
                 "schema_version": DEPENDENCY_REVIEW_SCHEMA_VERSION,
-                "framework": framework,
-                "required_phase": "gluon" if require_gluon else "selected_framework",
+                "framework": framework if self.specify_dsl else None,
+                "dsl_policy": "pinned" if self.specify_dsl else "open",
+                "required_phase": (
+                    "gluon"
+                    if require_gluon and self.specify_dsl
+                    else "selected_framework"
+                    if self.specify_dsl
+                    else "open_dsl"
+                ),
                 "optimization_mode": "production",
                 "candidate_digest": candidate_digest,
                 "candidate_files": sorted(source_hashes),
@@ -944,7 +1032,7 @@ class Campaign:
 
         try:
             reviewed_digest = _production_review_digest(
-                workspace, framework, require_gluon
+                workspace, framework, require_gluon, self.specify_dsl
             )
         except OSError as exc:
             errors = [
@@ -957,8 +1045,15 @@ class Campaign:
         review_record = {
             "schema_version": DEPENDENCY_REVIEW_SCHEMA_VERSION,
             "candidate_digest": candidate_digest,
-            "framework": framework,
-            "required_phase": "gluon" if require_gluon else "selected_framework",
+            "framework": framework if self.specify_dsl else None,
+            "dsl_policy": "pinned" if self.specify_dsl else "open",
+            "required_phase": (
+                "gluon"
+                if require_gluon and self.specify_dsl
+                else "selected_framework"
+                if self.specify_dsl
+                else "open_dsl"
+            ),
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
             "agent_runtime": self.agent_cli,
             "accepted": not errors,
@@ -967,7 +1062,7 @@ class Campaign:
             "review": review_payload,
         }
         persistence_errors = self._persist_production_review_record(
-            workspace,
+            record_workspace or workspace,
             candidate_digest,
             review_record,
         )
@@ -979,17 +1074,25 @@ class Campaign:
         workspace: Path,
         framework: str,
         require_gluon: bool,
+        *,
+        record_workspace: Path | None = None,
     ) -> list[str]:
         """Bound timeout retries across sessions and supervisor restarts."""
         from aka.light.execution.retry import retry_review
 
-        digest = _production_review_digest(workspace, framework, require_gluon)
+        digest = _production_review_digest(
+            workspace, framework, require_gluon, self.specify_dsl
+        )
         stage = f"dependency-review:{digest}:{self.agent_cli}:{self.production_review_timeout}"
         try:
             return retry_review(
                 self.workspace, stage,
                 lambda: self._review_production_candidate_once(
-                    workspace, framework, require_gluon, candidate_digest=digest,
+                    workspace,
+                    framework,
+                    require_gluon,
+                    candidate_digest=digest,
+                    record_workspace=record_workspace,
                 ),
                 cancel=getattr(self, "search_cancel", None),
             )
@@ -1001,14 +1104,24 @@ class Campaign:
         workspace: Path | None = None,
         *,
         require_gluon: bool = False,
+        review_record_workspace: Path | None = None,
     ) -> list[str]:
         if not self.source_checks_enabled:
             return []
+        reviewer = self._review_production_candidate
+        if review_record_workspace is not None:
+            reviewer = lambda candidate, framework, gluon: self._review_production_candidate(
+                candidate,
+                framework,
+                gluon,
+                record_workspace=review_record_workspace,
+            )
         return production_kernel_violations(
             workspace or self.workspace,
-            self.framework,
-            require_gluon=require_gluon,
-            production_reviewer=self._review_production_candidate,
+            self.framework if self.specify_dsl else "",
+            require_gluon=require_gluon if self.specify_dsl else False,
+            specify_dsl=self.specify_dsl,
+            production_reviewer=reviewer,
         )
 
     @cached_property
@@ -1047,6 +1160,7 @@ class Campaign:
             self.framework,
             agent_runtime=self.agent_cli,
             source_checks_enabled=self.source_checks_enabled,
+            specify_dsl=self.specify_dsl,
         )
 
     def _evaluator_directive(self) -> str:
@@ -1121,7 +1235,8 @@ class Campaign:
 
     def _mode_directive(self) -> str:
         return optimization_mode_directive(self.optimization_mode, self.framework,
-                                           source_checks_enabled=self.source_checks_enabled)
+                                           source_checks_enabled=self.source_checks_enabled,
+                                           specify_dsl=self.specify_dsl)
 
     def setup_baseline(self) -> None:
         # SOL-ExecBench op: seed a correct, directly-submittable V0 mechanically
@@ -1194,19 +1309,29 @@ class Campaign:
             "Wiki queries are disabled. Use supplied, attributable hardware evidence; "
             "do not guess missing peak specifications. "
         )
+        implementation_goal = (
+            f"migrate the computation to `{self.framework}`"
+            if self.specify_dsl
+            else "choose an evidence-backed supported GPU DSL and implement the computation directly"
+        )
+        dsl_campaign_line = (
+            f"- Target framework: `{self.framework}`\n"
+            if self.specify_dsl
+            else "- DSL policy: Agent-selected supported GPU DSL\n"
+        )
         return (
             f"# kernel_opt_{self.campaign_name}\n\n"
             "Evidence-backed optimization of one native Atrex-Bench operator.\n\n"
             "## Goal\n\n"
             "Maximize the arithmetic mean of per-shape speedups against Atrex-Bench metadata "
             "production performance while every evaluator case remains "
-            "correct. V0 is supplied by the selected SourceProvider; optimized versions must "
-            f"migrate the computation to `{self.framework}`.\n\n"
+            "correct. V0 is supplied by the selected SourceProvider; submitted optimized versions must "
+            f"{implementation_goal}.\n\n"
             "## Campaign\n\n"
             f"- Target platform: `{self.platform}`\n"
             f"- Runtime architecture: `{runtime_arch}`\n"
             f"- Optimization mode: `{self.optimization_mode}`\n"
-            f"- Target framework: `{self.framework}`\n"
+            f"{dsl_campaign_line}"
             f"- Target utilization stop condition: `{self.target_util:g}%`\n"
             f"- Additional notes: {notes}\n\n"
             "## Contract and evaluator\n\n"
@@ -1470,7 +1595,11 @@ class Campaign:
             "--workspace",
             str(self.workspace),
             "--framework",
-            self.framework,
+            (
+                self.framework
+                if self.specify_dsl
+                else "Agent-selected supported GPU DSL"
+            ),
             "--platform",
             self.platform,
             # The local step only materializes sources and git state.  GPU
@@ -1619,15 +1748,20 @@ class Campaign:
             canonical_memory=(f"memory/v{n}.json" if self.generate_memory else ""),
             candidate_commit=commit,
             outcome={
-                "summary": f"accepted self-contained {self.framework} framework baseline",
+                "summary": (
+                    f"accepted self-contained {self.framework} framework baseline"
+                    if self.specify_dsl
+                    else "accepted self-contained Agent-selected GPU DSL baseline"
+                ),
                 "next_directions": [],
             },
         )
         latency = ((read_memory(self.workspace, n) or {}).get("performance") or {}).get(
             "latency_us"
         )
+        selected_dsl = self.framework if self.specify_dsl else "Agent-selected GPU DSL"
         print(
-            f"[orchestrator] framework baseline v{n} accepted: {self.framework} "
+            f"[orchestrator] framework baseline v{n} accepted: {selected_dsl} "
             f"@ {commit[:8]} ({latency} us geomean)",
             flush=True,
         )
@@ -1723,7 +1857,9 @@ class Campaign:
             if not self.source_checks_enabled:
                 return "pin", "multi-GPU Agate source checks are disabled; retain the validated V0"
             structural = production_structure_violations(
-                self.workspace, self.framework
+                self.workspace,
+                self.framework if self.specify_dsl else "",
+                specify_dsl=self.specify_dsl,
             )
             if any(
                 value.startswith("unsupported production framework")
@@ -1752,10 +1888,14 @@ class Campaign:
                 and reference_blob == implementation_blob
             ) or is_sol_op(Path(self.kernel_demo).resolve().parent)
             if known_reference_wrapper:
+                target = (
+                    f"a self-contained {self.framework} kernel"
+                    if self.specify_dsl
+                    else "a self-contained GPU kernel in a supported DSL"
+                )
                 return (
                     "run",
-                    f"the supervisor-seeded V0 is the PyTorch reference wrapper, not "
-                    f"a self-contained {self.framework} kernel",
+                    f"the supervisor-seeded V0 is the PyTorch reference wrapper, not {target}",
                 )
             violations = self._production_kernel_violations()
             if not violations:
@@ -1763,7 +1903,12 @@ class Campaign:
                     "pin",
                     "the V0 kernel is already a compliant framework implementation",
                 )
-            return "run", f"V0 is not a self-contained {self.framework} kernel"
+            target = (
+                f"{self.framework} kernel"
+                if self.specify_dsl
+                else "GPU kernel in a supported DSL"
+            )
+            return "run", f"V0 is not a self-contained {target}"
         if latest_version(self.workspace) == FRAMEWORK_BASELINE_VERSION:
             return "adopt", "an interrupted framework baseline is already committed"
         return "skip", (
@@ -1916,7 +2061,12 @@ class Campaign:
         digest.update(
             ",".join(self._framework_baseline_correctness_reviewers()).encode()
         )
-        for value in (self.framework, self.platform, self.arch):
+        for value in (
+            self.framework if self.specify_dsl else "<open-dsl>",
+            str(self.specify_dsl),
+            self.platform,
+            self.arch,
+        ):
             digest.update(b"\0")
             digest.update(value.encode("utf-8", errors="replace"))
         for path in self._framework_baseline_correctness_context():
@@ -1987,6 +2137,11 @@ class Campaign:
                     PROMPTS_DIR / "framework_baseline_correctness_review.md",
                     REVIEWER=label,
                     FRAMEWORK=self.framework,
+                    IMPLEMENTATION_TARGET=(
+                        f"the first production `{self.framework}` Kernel"
+                        if self.specify_dsl
+                        else "the first production GPU Kernel in an Agent-selected supported DSL"
+                    ),
                     PLATFORM=self.platform,
                     ARCH=self.arch or "the runtime GPU architecture",
                 )
@@ -2158,12 +2313,7 @@ class Campaign:
     def _framework_baseline_correctness_guidance_text(self) -> str:
         reviewers = self._framework_baseline_correctness_reviewers()
         if not reviewers:
-            return (
-                "## External pre-implementation correctness guidance\n\n"
-                "External V1 correctness review is disabled by configuration. Derive every "
-                "correctness requirement directly from the public contract and immutable "
-                "reference before editing.\n"
-            )
+            return ""
         value = self._load_framework_baseline_correctness_guidance()
         if value is None:
             return (
@@ -2348,35 +2498,10 @@ class Campaign:
                 flush=True,
             )
 
-    def _framework_baseline_smoke_shape_ids(self, *, limit: int = 3) -> list[str]:
-        """Pick fast/median/slow V0 latency ids for bounded native V1 smoke coverage."""
-        memory = read_memory(self.workspace, 0) or {}
-        performance = memory.get("performance")
-        performance = performance if isinstance(performance, dict) else {}
-        by_shape = performance.get("latency_us_by_shape", {})
-        if not isinstance(by_shape, dict):
-            return []
-        measured: list[tuple[str, float]] = []
-        for shape_id, raw_latency in by_shape.items():
-            if isinstance(raw_latency, bool) or not isinstance(raw_latency, (int, float)):
-                continue
-            latency = float(raw_latency)
-            if latency > 0.0 and math.isfinite(latency):
-                measured.append((str(shape_id), latency))
-        if not measured or limit <= 0:
-            return []
-        measured.sort(key=lambda item: item[1])
-        if len(measured) <= limit:
-            return [shape_id for shape_id, _latency in measured]
-        if limit == 1:
-            return [measured[len(measured) // 2][0]]
-        indexes = [round(index * (len(measured) - 1) / (limit - 1)) for index in range(limit)]
-        return [measured[index][0] for index in dict.fromkeys(indexes)]
-
     def _ensure_framework_baseline_solution_manifest(self) -> None:
         """Preseed a native V1 manifest so the implementation Agent need not infer its schema."""
         path = self.workspace / "solution.json"
-        if path.is_file() or not self.atrex_bench_root:
+        if path.is_file() or not self.atrex_bench_root or not self.specify_dsl:
             return
         framework = self.framework.strip().lower()
         language = {
@@ -2438,51 +2563,16 @@ class Campaign:
             encoding="utf-8",
         )
 
-    def _framework_baseline_smoke_command(self, n: int) -> tuple[str, str]:
-        """Return the only ordinary evaluator command the V1 implementation Agent should run."""
-        command = ["python3", "tools/sandbox.py", "--kind", "run", "--no-sync"]
-        if self.atrex_bench_root:
-            command += ["--mode", "full", "--version", f"v{n}"]
-        else:
-            # SOL needs the Dev compatibility route. Top-level --version, like
-            # --mode, requires Typed evaluation; pass the label to its harness.
-            command += ["--", "python3", "test_kernel.py", "--version", f"v{n}", "--no-memory"]
-        shape_ids = (
-            self._framework_baseline_smoke_shape_ids()
-            if self.atrex_bench_root
-            else []
-        )
-        for shape_id in shape_ids:
-            command += ["--shape-id", shape_id]
-        if self.atrex_bench_root:
-            command += ["--timed-runs", "1"]
-        if shape_ids:
-            scope = (
-                f"The supervisor selected {len(shape_ids)} opaque V0 ids spanning the baseline "
-                "latency distribution. This is smoke coverage only; do not infer their private inputs."
-            )
-        else:
-            scope = (
-                "This evaluator route has no safe targeted-case selector, so run this base-seed "
-                "smoke at most once after the final implementation edit."
-            )
-        return shlex.join(command), scope
-
-    def _framework_baseline_sandbox_directive(self) -> str:
-        # The execution boundary and Runtime usage contract are identical to an
-        # optimization Episode. The baseline prompt alone narrows the objective.
-        return self._sandbox_directive()
-
     def _framework_baseline_prompt(self, n: int) -> str:
-        smoke_command, smoke_scope = self._framework_baseline_smoke_command(n)
-        from aka.light.workspace.sources import policy_at
-        source_policy = policy_at(self.workspace)
-        source_instructions = (
-            "Keep the required evaluator entry point at editable root `kernel.py`. "
-            "You may implement the whole Kernel there or add, modify, and remove files "
-            "inside `implementation/` and import them from `kernel.py`."
-            if source_policy is not None
-            else "This SOL Framework Baseline edits the candidate `kernel.py`."
+        baseline_objective = (
+            f"Create the first correct, compliant `{self.framework}` Kernel from the V0 "
+            "PyTorch reference."
+            if self.specify_dsl
+            else "Create the first correct, compliant GPU Kernel from the V0 PyTorch reference. "
+            "Choose a supported DSL from implementation and measurement evidence."
+        )
+        baseline_objective += (
+            " A speedup is not required; performance optimization begins in later Episodes."
         )
         return _render(
             PROMPTS_DIR / "framework_baseline.md",
@@ -2490,34 +2580,20 @@ class Campaign:
             WORKSPACE=str(self.workspace),
             N=n,
             PREV=n - 1,
-            PLATFORM=self.platform,
-            FRAMEWORK=self.framework,
+            BASELINE_OBJECTIVE=baseline_objective,
+            DSL_CONTEXT=self.dsl_context,
             ARCH=self.arch or "the runtime GPU arch",
             NOTES=self.notes,
-            SOURCE_INSTRUCTIONS=source_instructions,
-            AGENT_RUNTIME=_agent_runtime_directive(
-                self.agent_cli,
-                is_ppu=hardware_vendor(self.platform, self.arch) == "ppu",
-                wiki=self.tool_runtime.wiki,
-                pause_agent_during_requests=self.tool_runtime.pause_agent_during_requests,
-                knowledge_skills=self.plugin_registry.knowledge_skills() if self.tool_runtime.wiki else (),
+            RUNTIME_WAIT_POLICY=(
+                "- Runtime requests: Agent and subagent execution is suspended while an "
+                "authenticated request is pending; this wait is excluded from the configured "
+                "active-time budget."
+                if self.tool_runtime.pause_agent_during_requests
+                else "- Runtime requests: suspension is disabled, so request wait counts toward "
+                "the configured active-time budget; keep the invocation in the foreground and "
+                "wait for it to finish."
             ),
-            KNOWLEDGE_RESEARCH=(
-                (self.wiki_prompt("framework_baseline")
-                 or (PROMPTS_DIR / "baseline_research.md").read_text(encoding="utf-8"))
-                .replace("{{PLATFORM}}", self.platform).replace("{{ARCH}}", self.arch)
-                .replace("{{FRAMEWORK}}", self.framework)
-                if self.tool_runtime.wiki else
-                "Wiki is disabled. Use the supplied public contract and compiler/measurement evidence. "
-                "If an essential fact is unavailable, report the blocker instead of inventing it."
-            ),
-            HARDWARE=hardware_directive(self.platform, self.arch),
-            SANDBOX=self._framework_baseline_sandbox_directive(),
-            EVALUATOR=self._evaluator_directive(),
             CORRECTNESS_GUIDANCE=self._framework_baseline_correctness_guidance_text(),
-            SMOKE_COMMAND=smoke_command,
-            SMOKE_SCOPE=smoke_scope,
-            MODE_POLICY=self._mode_directive(),
         )
 
     def _restore_immutable_baseline_paths(self, immutable_commit: str) -> list[str]:
@@ -2565,14 +2641,24 @@ class Campaign:
         violations = [] if not self.source_checks_enabled else (
             self._production_kernel_violations()
             if include_policy_review
-            else production_structure_violations(self.workspace, self.framework)
+            else production_structure_violations(
+                self.workspace,
+                self.framework if self.specify_dsl else "",
+                specify_dsl=self.specify_dsl,
+            )
         )
         if violations:
+            target = (
+                self.framework
+                if self.specify_dsl
+                else "an Agent-selected supported GPU DSL"
+            )
             return (
-                f"the candidate is not a self-contained {self.framework} implementation: "
+                f"the candidate is not a self-contained {target} implementation: "
                 + "; ".join(violations)
             )
-        if (self.source_checks_enabled
+        if (self.specify_dsl
+                and self.source_checks_enabled
                 and self.framework.lower() in {"triton", "gluon"}
                 and kernel_is_gluon(self.workspace)):
             # A Gluon v1 would permanently disarm the orchestrator's mandatory Triton->Gluon latch.
@@ -2591,14 +2677,34 @@ class Campaign:
     def _framework_baseline_external_gates(
         self, n: int
     ) -> tuple[Optional[dict], str]:
-        """Run policy review and the sole authoritative V1 evaluator concurrently."""
-        message = ("running policy review and combined correctness/performance validation in parallel"
-                   if self.source_checks_enabled else
-                   "multi-GPU Agate source review skipped; running correctness/performance validation")
+        """Run every independent Framework Baseline acceptance gate concurrently."""
+        message = (
+            "running policy review, combined correctness/performance validation and "
+            "supplemental numerical validation in parallel"
+            if self.source_checks_enabled
+            else
+            "source review skipped; running correctness/performance and supplemental "
+            "numerical validation in parallel"
+        )
         print(f"[orchestrator] framework baseline: {message}", flush=True)
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             policy_future = executor.submit(copy_context().run, self._production_kernel_violations)
             validation_future = executor.submit(copy_context().run, self._validate_framework_baseline, n)
+
+            def standard_correctness_passed() -> bool:
+                try:
+                    _result, problem = validation_future.result()
+                except Exception:
+                    return False
+                return not problem
+
+            numerical_future = executor.submit(
+                copy_context().run,
+                self.supplemental_numerical_feedback,
+                self.workspace,
+                flow="framework_baseline",
+                standard_correctness_passed=standard_correctness_passed,
+            )
             try:
                 violations = policy_future.result()
             except Exception as exc:
@@ -2614,16 +2720,58 @@ class Campaign:
                     "combined validation failed: "
                     f"{type(exc).__name__}: {exc}",
                 )
+            try:
+                numerical_problem = numerical_future.result()
+            except Exception as exc:
+                numerical_problem = (
+                    "supplemental numerical validation failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        policy_problem = ""
         if violations:
-            return None, (
-                f"the candidate is not a self-contained {self.framework} implementation: "
+            target = (
+                self.framework
+                if self.specify_dsl
+                else "an Agent-selected supported GPU DSL"
+            )
+            policy_problem = (
+                f"the candidate is not a self-contained {target} implementation: "
                 + "; ".join(violations)
             )
-        if not validation_problem:
-            validation_problem = self.supplemental_numerical_feedback(
-                self.workspace, flow="framework_baseline"
+        failures = [
+            ("production_review", policy_problem),
+            ("correctness_performance", validation_problem),
+            ("numerical", numerical_problem),
+        ]
+        failures = [(name, problem) for name, problem in failures if problem]
+        if not failures:
+            return result, ""
+
+        # Preserve the primary error prefix for the existing focused recovery
+        # policy, then append the complete outcome after all parallel gates end.
+        primary_problem = failures[0][1]
+        if len(failures) == 1 and failures[0][0] == "numerical":
+            primary_problem = numerical_problem
+        statuses = {
+            "production_review": "failed" if policy_problem else "passed",
+            "correctness_performance": "failed" if validation_problem else "passed",
+            "numerical": "failed" if numerical_problem else "passed",
+        }
+        details = "\n".join(
+            f"- {name}: {statuses[name]}"
+            + (f" — {problem}" if problem else "")
+            for name, problem in (
+                ("production_review", policy_problem),
+                ("correctness_performance", validation_problem),
+                ("numerical", numerical_problem),
             )
-        return result, validation_problem
+        )
+        return result, (
+            primary_problem
+            + "\n\nAll parallel Framework Baseline acceptance checks completed:\n"
+            + details
+        )
 
     def _validate_framework_baseline(self, n: int) -> tuple[Optional[dict], str]:
         """Validate V1 once: base-case performance plus four extra correctness cases."""
@@ -2775,7 +2923,11 @@ class Campaign:
         memory["correctness"] = {"status": "UNKNOWN" if problem.startswith(SUPPLEMENTAL_PENDING_PREFIX) else "FAIL"}
         memory["optimization"] = {
             "action_category": FRAMEWORK_BASELINE_CATEGORY,
-            "action_description": f"rejected {self.framework} baseline attempt",
+            "action_description": (
+                f"rejected {self.framework} baseline attempt"
+                if self.specify_dsl
+                else "rejected Agent-selected GPU DSL baseline attempt"
+            ),
         }
         pitfalls = memory.setdefault("pitfalls_and_fixes", [])
         if not isinstance(pitfalls, list):
@@ -2787,7 +2939,11 @@ class Campaign:
                 if "self-contained" in problem
                 else "correctness",
                 "error_message": problem,
-                "lesson": f"the next attempt must land a compliant, correctness-passing {self.framework} kernel",
+                "lesson": (
+                    f"the next attempt must land a compliant, correctness-passing {self.framework} kernel"
+                    if self.specify_dsl
+                    else "the next attempt must land a compliant, correctness-passing GPU kernel in a supported DSL"
+                ),
             }
         )
         save_version_record(self.workspace, n, memory, generate_memory=self.generate_memory)
@@ -2845,7 +3001,11 @@ class Campaign:
                     "git",
                     "commit",
                     "-m",
-                    f"v{n}: framework baseline ({self.framework}) replacing the V0 PyTorch wrapper",
+                    (
+                        f"v{n}: framework baseline ({self.framework}) replacing the V0 PyTorch wrapper"
+                        if self.specify_dsl
+                        else f"v{n}: open-DSL baseline replacing the V0 PyTorch wrapper"
+                    ),
                 ],
                 cwd=str(self.workspace),
                 check=True,
@@ -2866,10 +3026,13 @@ class Campaign:
         optimization["action_category"] = FRAMEWORK_BASELINE_CATEGORY
         optimization["action_description"] = (
             f"first self-contained {self.framework} implementation of the whole operator"
+            if self.specify_dsl
+            else "first self-contained implementation of the whole operator in an Agent-selected GPU DSL"
         )
         memory["git_commit_hash"] = kernel_commit
         memory[FRAMEWORK_BASELINE_CATEGORY] = {
-            "framework": self.framework,
+            "framework": self.framework if self.specify_dsl else None,
+            "dsl_policy": "pinned" if self.specify_dsl else "open",
             "validated_stages": ["combined-base-performance+five-cases" if self.atrex_bench_root
                                  else "combined-base-performance+multi-seed-5"],
         }
@@ -2891,7 +3054,8 @@ class Campaign:
         marker = {
             "schema_version": 1,
             "version": f"v{version}",
-            "framework": self.framework,
+            "framework": self.framework if self.specify_dsl else None,
+            "dsl_policy": "pinned" if self.specify_dsl else "open",
             "platform": self.platform,
             "arch": self.arch,
             "commit": commit,

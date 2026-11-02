@@ -240,6 +240,7 @@ class RuntimeConfig:
     wiki_profile_root: Path | None = None
     task_id: str = ""
     optimization_mode: str = "leaderboard"
+    workspace_policy: str = ""
     workspace: Path | None = None
     # None preserves the Gateway execution + remote queue grace + cleanup budget.
     request_timeout: float | None = None
@@ -252,6 +253,8 @@ class RuntimeConfig:
     wiki_provider: object | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self):
+        if not isinstance(self.workspace_policy, str):
+            raise TypeError("Runtime workspace_policy must be text")
         if type(self.pause_agent_during_requests) is not bool:
             raise TypeError("Runtime pause_agent_during_requests must be a boolean")
         if (
@@ -291,6 +294,7 @@ class JournalBinding:
     service: SupervisorJournalService
     lock: threading.Lock = field(default_factory=threading.Lock)
     view: EpisodeWorkspace | None = None
+    require_gluon: bool = False
 
 
 @dataclass
@@ -722,11 +726,13 @@ class SupervisorRuntime:
     def register_episode(self, workspace: Path, *, episode: int, base_commit: str,
                          branch: str, memory_version: int,
                          supervisor_git: bool = False,
+                         require_gluon: bool = False,
                          origin: Mapping[str, object] | None = None):
         """Trusted controller binding, never populated from an Agent request or file."""
         workspace = workspace.resolve(strict=True)
         if (type(episode) is not int or episode < 1 or type(memory_version) is not int
                 or memory_version < 1 or not isinstance(branch, str) or not branch
+                or type(require_gluon) is not bool
                 or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", base_commit) is None):
             raise ValueError("Invalid controller Episode identity")
         path = self.episode_journal_path(episode)
@@ -742,6 +748,8 @@ class SupervisorRuntime:
                     raise RuntimeError("Workspace already belongs to another Runtime Journal")
                 if existing.service.supervisor_git != supervisor_git:
                     raise RuntimeError("Cannot change Git ownership during an Episode")
+                if existing.require_gluon != require_gluon:
+                    raise RuntimeError("Cannot change the final DSL phase during an Episode")
                 return existing.view.prepare() if existing.view else workspace
             view = None
             agent_workspace = workspace
@@ -757,6 +765,7 @@ class SupervisorRuntime:
                                         research_records=self.journal_factory.research_records,
                                         research_modules=self.journal_factory.tool_modules,
                                         plugin_registry=self.plugins,
+                                        workspace_policy=self.config.workspace_policy,
                                         adaptive_root=(self.audit_root or self.root) / "adaptive-state",
                                         episode=episode, history=history)
                 agent_workspace = view.prepare()
@@ -795,7 +804,7 @@ class SupervisorRuntime:
                 campaign_root=self.journals_root, evidence_root=evidence,
                 supervisor_git=supervisor_git,
                 research_root=(self.audit_root or self.root) / "research",
-                origin=origin), view=view)
+                origin=origin), view=view, require_gluon=require_gluon)
             self.journals[workspace] = binding
             self.journals[agent_workspace] = binding
             return agent_workspace
@@ -1121,6 +1130,7 @@ class SupervisorRuntime:
 
     def _validate_candidate_correctness(self, capability: Capability, source: bytes) -> dict:
         validator = getattr(self, "numerical_validator", None)
+        policy_validator = getattr(self, "production_policy_validator", None)
 
         def ensure_live():
             if not self._live(capability):
@@ -1136,8 +1146,17 @@ class SupervisorRuntime:
             read_record=self.measurements.read, ensure_live=ensure_live,
             research_records=self.journal_factory.research_records,
             experiments_enabled=self.journal_factory.experiments_enabled,
-            supplemental=(lambda frozen: validator(
-                capability.journal.service.git_workspace, frozen, parent=capability
+            production_policy=(lambda frozen: policy_validator(
+                capability.journal.service.git_workspace,
+                frozen,
+                parent=capability,
+                require_gluon=capability.journal.require_gluon,
+            )) if policy_validator and capability.journal else None,
+            supplemental=(lambda frozen, correctness_passed: validator(
+                capability.journal.service.git_workspace,
+                frozen,
+                parent=capability,
+                standard_correctness_passed=correctness_passed,
             )) if validator else None,
         )
         return self.acceptance.validate_candidate(context, source)

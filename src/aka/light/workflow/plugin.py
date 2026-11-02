@@ -28,6 +28,11 @@ Config = {"type": "object", "properties": {
         "trajectories": {"type": "integer", "minimum": 1, "maximum": 64},
         "episodes_per_trajectory": {"type": "integer", "minimum": 1, "maximum": 100},
         "max_parallel_episodes": {"type": "integer", "minimum": 1, "maximum": 64},
+        "synchronization": {
+            "type": "string",
+            "enum": ["synchronous", "asynchronous"],
+        },
+        "role_specialization": {"type": "boolean"},
     }, "additionalProperties": False},
 }, "additionalProperties": False}
 Defaults = {"startup": False, "numerical_validation": True, "goal_episodes": False, "generate_memory": False,

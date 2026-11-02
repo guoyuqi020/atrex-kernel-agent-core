@@ -17,6 +17,7 @@ from .evaluation import (
 class WorkflowSettings:
     platform: str
     framework: str
+    specify_dsl: bool = True
     notes: str = "none"
     arch: str = ""
     max_iters: int = 20
@@ -43,6 +44,8 @@ class WorkflowSettings:
     resume_framework_candidate: bool = False
 
     def __post_init__(self):
+        if type(self.specify_dsl) is not bool:
+            raise TypeError("specify_dsl must be a boolean")
         for name in (
             "setup_timeout",
             "framework_baseline_timeout",

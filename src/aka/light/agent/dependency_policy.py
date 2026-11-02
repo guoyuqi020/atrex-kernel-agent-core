@@ -17,9 +17,11 @@ DEPENDENCY_GUARD_ENV = "ATREX_DEPENDENCY_GUARD_ENABLED"
 def dependency_guard_enabled(environment=None):
     """Return whether dependency-policy commands must be actively blocked.
 
-    Campaigns always set this explicitly: Production enables the guard while
-    Leaderboard disables it.  Standalone callers that predate the mode flag
-    remain fail-closed so dropping the environment cannot weaken Production.
+    Managed campaigns explicitly disable development-time dependency
+    classification because Production enforces dependency provenance on the
+    sealed final candidate. Standalone callers that predate the mode flag remain
+    fail-closed; transport, shared-Gateway and outage protections are independent
+    of this switch.
     """
     values = os.environ if environment is None else environment
     value = str(values.get(DEPENDENCY_GUARD_ENV, "1")).strip().casefold()

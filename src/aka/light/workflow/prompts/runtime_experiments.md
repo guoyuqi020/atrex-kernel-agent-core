@@ -1,11 +1,11 @@
-## Runtime Journal and handoff
+## Handoff
 
-Experiment tools are enabled; Direction tools are disabled. Use `list-experiments`,
-`load-experiment`, and `record-experiment`. Experiment requests omit `direction_id` and cite real
-Kernel-bound Gateway Records.
+Write `scratch/episode-report.json` as one of:
 
-Leave the complete selected source tree in place. For `candidate_ready`, submit `status`, `summary`,
-and `selected_experiment_id`; the selected current-Episode Experiment must cite a passing standard
-full Evaluate for the exact candidate. For `pivot`, submit only `status` and `summary`; for
-`blocked`, also include `blocker`. Do not submit `gateway_record_ids` directly or manage Git.
-Correct rejected reports and stop only after the Runtime accepts the report.
+```json
+{"status":"candidate_ready","summary":"...","selected_experiment_id":"experiment_..."}
+{"status":"pivot","summary":"..."}
+{"status":"blocked","summary":"...","blocker":"..."}
+```
+
+For `candidate_ready`, select a current-Episode Experiment that cites a passing standard full Evaluate for the exact source left in the workspace. Do not add `gateway_record_ids` directly. Submit with `python3 tools/sandbox.py --kind episode-report --request-file scratch/episode-report.json`. Correct a rejected handoff and resubmit; stop only after acceptance. Do not commit—the Supervisor seals the source.

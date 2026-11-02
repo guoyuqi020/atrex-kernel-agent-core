@@ -83,7 +83,15 @@ class NumericalCancellation:
         return seconds
 
 
-def validate_candidate(campaign, workspace, *, source=None, parent=None, flow="episode"):
+def validate_candidate(
+    campaign,
+    workspace,
+    *,
+    source=None,
+    parent=None,
+    flow="episode",
+    standard_correctness_passed=True,
+):
     """Freeze inputs outside the Agent workspace before planning or execution.
 
     The caller must have verified ordinary correctness of these candidate bytes.
@@ -135,8 +143,14 @@ def validate_candidate(campaign, workspace, *, source=None, parent=None, flow="e
                     return ""
                 return f"{SUPPLEMENTAL_PENDING_PREFIX}: trusted input.py/reference.py/shapes.json unavailable"
             publish(frozen, "test_kernel.py", HARNESS.read_bytes())
-            return supplemental_feedback(campaign, frozen, state_root=state_root,
-                                         standard_correctness_passed=True, cancel=cancel, flow=flow)
+            return supplemental_feedback(
+                campaign,
+                frozen,
+                state_root=state_root,
+                standard_correctness_passed=standard_correctness_passed,
+                cancel=cancel,
+                flow=flow,
+            )
 
 
 def _digest(files):
@@ -402,7 +416,11 @@ def supplemental_feedback(campaign, workspace, *, state_root, standard_correctne
         campaign, "research_modules", ("directions", "experiments") if research_records else ()
     ))
     experiments_enabled = "experiments" in research_modules
-    key = (str(state_root), validation_digest, standard_correctness_passed, flow,
+    correctness_cache_key = (
+        "deferred" if callable(standard_correctness_passed)
+        else bool(standard_correctness_passed)
+    )
+    key = (str(state_root), validation_digest, correctness_cache_key, flow,
            research_modules)
     if key in cache:
         return cache[key]
@@ -497,7 +515,11 @@ def supplemental_feedback(campaign, workspace, *, state_root, standard_correctne
         try:
             # Only the controller's just-verified sealed evidence permits a skip;
             # Agent-writable legacy evaluation logs are never a trust source.
-            standard_passed = standard_correctness_passed
+            standard_passed = (
+                standard_correctness_passed()
+                if callable(standard_correctness_passed)
+                else bool(standard_correctness_passed)
+            )
             measured_failure = record.get("known_candidate_failure", False) or any(
                 evaluation.get("status") == "needs_repair"
                 or any(probe.get("status") == "needs_repair"

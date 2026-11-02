@@ -1,12 +1,11 @@
-## Runtime Journal and handoff
+## Handoff
 
-Direction tools are enabled; Experiment tools are disabled. Use `list-directions`,
-`load-direction`, and `update-direction`. Start at most three Directions per Episode and keep only
-one in progress. Close every in-progress Direction before reporting. A closure requires
-`analysis` and `hypothesis_status`, and must omit `supporting_experiment_ids`.
+Before reporting, close every local in-progress Direction. Write `scratch/episode-report.json` as one of:
 
-Leave the complete selected source tree in place. For `candidate_ready`, submit `status`, `summary`,
-and `gateway_record_ids`; at least one cited record must be a passing standard full Evaluate for
-the exact candidate. For `pivot`, submit only `status` and `summary`; for `blocked`, also include
-`blocker`. Do not submit `selected_experiment_id` or manage Git. Correct rejected reports and stop
-only after the Runtime accepts the report.
+```json
+{"status":"candidate_ready","summary":"...","gateway_record_ids":["..."]}
+{"status":"pivot","summary":"..."}
+{"status":"blocked","summary":"...","blocker":"..."}
+```
+
+For `candidate_ready`, cite a passing standard full Evaluate for the exact source left in the workspace. Do not add `selected_experiment_id`. Submit with `python3 tools/sandbox.py --kind episode-report --request-file scratch/episode-report.json`. Correct a rejected handoff and resubmit; stop only after acceptance. Do not commit—the Supervisor seals the source.

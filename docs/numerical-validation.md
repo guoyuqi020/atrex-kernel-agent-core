@@ -25,7 +25,7 @@ flowchart TD
 
 ## Report and repair
 
-`SupervisorRuntime._validate_candidate_correctness` invokes the numerical gate after ordinary correctness and before report sealing. Measured failures return `candidate_numerical_failed` with public distributions, metrics and Gateway Record IDs. Repair the candidate, measure it, record its Experiment and resubmit `episode-report`. Plans survive candidate edits and Supervisor restarts; changing the candidate does not let a planner waive the retained tests. Recovery also checks the sealed commit, not mutable draft bytes.
+`SupervisorRuntime._validate_candidate_correctness` starts ordinary correctness, independent Production Review and the numerical gate concurrently against the same sealed candidate, then waits for all three and returns their statuses together before report sealing. Measured numerical failures return `candidate_numerical_failed` when they are the only failure, or `candidate_acceptance_failed` alongside the other failed checks. Public feedback includes distributions, metrics and Gateway Record IDs. Repair the candidate, measure it, record its Experiment and resubmit `episode-report`. Plans survive candidate edits and Supervisor restarts; changing the candidate does not let a planner waive the retained tests. Recovery also checks the sealed commit, not mutable draft bytes.
 
 Reference non-finite outputs, invalid generation or incomplete receipts return to the planner for one plan-repair attempt. The case IDs must be preserved. Unresolved validation yields `candidate_numerical_pending`, not a Kernel correctness failure. Baselines get up to two supplemental Kernel-repair turns; Episodes retain their existing continuation budget.
 

@@ -46,6 +46,9 @@ and finish procedure. Do not assume another DSL, library, or validation procedur
   `tools/plugin.py` are Supervisor-owned; do not modify them. Use `scratch/` for
   temporary requests, diagnostic probes, outputs and saved exact Kernel copies.
   The Workspace contract defines inheritance and fresh-Episode/recovery behavior.
+- Do not create replacement planning, profiling, or benchmark documents unless the current stage
+  Prompt or an enabled Skill explicitly requires one. Keep transient reasoning in the Conversation
+  and temporary probes or outputs under `scratch/`.
 - `input/evidence/index.json` locates read-only historical `conversation.jsonl`
   files from completed earlier Episodes. Missing/partial capture
   is marked explicitly. These are frozen reading copies, not live conversations;
@@ -57,8 +60,8 @@ and finish procedure. Do not assume another DSL, library, or validation procedur
 
 ## Runtime tools
 
-Use `python3 tools/sandbox.py` for GPU, Wiki, history, Journal, and report requests. The session
-Prompt lists mounted resources. These Skills are always available:
+Use `python3 tools/sandbox.py` for GPU, Wiki, history, Journal, and report requests. Installed
+Skills define the operations enabled for the current Session. These Skills are always available:
 
 - `skills/gpu-measurement/SKILL.md`: GPU operations and request examples.
 - `skills/runtime-records/SKILL.md`: historical results, Kernel source, Journal, and report formats.
@@ -74,8 +77,8 @@ are also remote and stateless: every call starts with a fresh workspace and does
 processes, packages, compiled artifacts, environment mutations, or the working directory from a prior
 Dev call. Declare every required extra input again and explicitly synchronize outputs you need to keep.
 
-When Wiki is enabled, `skills/KernelWiki/SKILL.md` describes knowledge queries. If it is not
-listed in the session Prompt, use the supplied public information and measured evidence;
+When Wiki is enabled, `skills/KernelWiki/SKILL.md` is installed and describes knowledge queries.
+If that Skill is absent, use the supplied public information and measured evidence;
 do not invoke a disabled knowledge service or invent missing hardware facts.
 
 Reuse saved results and exact source when applicable. Runtime persists measurements, retries
@@ -98,5 +101,6 @@ with `2>&1`.
 On failure, follow `error.next_action`. Repair invalid arguments or Journal state before retrying.
 For `request_not_started`, wait at least `retry_after_seconds` and retry with backoff; no executor started. If the outcome is unknown, check records before resubmitting;
 private-state or dependency failures may need operator help. Correct rejected `episode-report`
-requests and retry until accepted, then stop. A Baseline session has its own smoke-and-exit
-procedure and does not submit an Episode report.
+requests and retry until accepted, then stop. A Framework Baseline Session writes its candidate
+and stops; the Supervisor performs validation and returns diagnostics to a recovery Session when
+repair is needed. Framework Baseline does not submit an Episode report.

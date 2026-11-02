@@ -352,6 +352,13 @@ flat names such as `/path/to/runs/kernel_opt_<name>_triton_h20`; production work
 Passing `--framework` selects one campaign but keeps the same mode-specific naming convention.
 Every campaign optimizes the complete workload set in one version line.
 
+Use `--no-specify-dsl` to run one open-DSL campaign instead of dispatching or pinning a
+framework. In this mode the Agent chooses a supported self-authored GPU DSL (or a justified
+compatible mixture) from implementation and measurement evidence. Prompts, production review,
+workspace identity, and acceptance do not retain an incidental `--framework`; framework-specific
+Triton-to-Gluon conversion is disabled. The default `--specify-dsl` preserves the pinned and
+auto-dispatched behavior above.
+
 ### Production mode
 
 The default `--optimization-mode leaderboard` retains the existing permissive workflow: third-party kernel
@@ -369,8 +376,15 @@ aka optimize --repo-root "$PWD" --profile workflow -- \
 Production mode may omit `--framework`; like leaderboard mode, it auto-dispatches all frameworks supported
 by the detected hardware. Every child receives one explicit framework constraint. V0 remains a PyTorch
 correctness baseline, while every accepted optimization commit must implement the GPU computation exclusively
-in that child's framework. The supervisor sends every candidate to a separate read-only policy Agent for a
-complete implementation and manifest review, without package-name allowlists: build/ABI/launch plumbing for
+in that child's framework. This is a final-candidate rule, not a restriction on the development process: the
+Agent may use another language or DSL for temporary prototypes, compiler probes, microbenchmarks, and reference
+comparisons. It may likewise use PyTorch/ATen, prebuilt operators, third-party compute libraries, external
+implementations, and hidden or dynamic dispatch as development-only references or probes, provided those
+artifacts and compute paths are removed from the submitted Kernel. When the Agent submits
+`episode-report`, the Supervisor sends the exact sealed candidate to a separate read-only policy Agent
+before accepting, finalizing, or committing the report. A rejection is returned immediately with concrete
+violations so the same Episode can repair and resubmit. The complete implementation and manifest review has
+no package-name allowlist: build/ABI/launch plumbing for
 a self-authored kernel may be accepted, while prebuilt compute, alternate frameworks, PyTorch compute
 fallbacks, hidden dispatch, and external implementation loading are rejected. The orchestrator writes the
 policy into the workspace, injects it into every episode,
@@ -420,6 +434,7 @@ Rerunning the same command keeps the interrupted worktree and resumes V1 from th
                                                     Configure full ask-qoder (default: off)
 --optimization-mode MODE         leaderboard (default) or production
 --framework DSL                  Explicit DSL; omit for automatic parallel dispatch
+--specify-dsl / --no-specify-dsl Pin/auto-dispatch a DSL (default), or let one Agent choose it
 --framework-baseline MODE        auto, always, or never
 --framework-baseline-timeout S   Framework bring-up wall-clock budget (default: 28800)
 --target-util PCT                Peak-utilization short-circuit (default: 90)

@@ -8,14 +8,12 @@ import aka.light.agent.runtime.process as _agent_process
 from aka.light.workflow.bootstrap import Campaign
 from aka.light.workflow.constants import DEFAULT_CONVERT_AFTER
 from aka.light.evaluation.hardware import (
-    hardware_directive,
     hardware_vendor,
     head_kernel_is_gluon,
     should_convert_to_gluon,
 )
 from aka.light.acceptance.source_policy import install_workspace_policy
 from aka.light.workflow.session_io import _sandbox_command
-from aka.light.workspace.assets import (_agent_runtime_directive)
 from aka.light.workspace.state import (
     git_head,
     head_kernel_is_initial_baseline,
@@ -73,23 +71,14 @@ def link_episode_runtime(campaign: Campaign, workspace: Path) -> None:
         workspace, campaign.optimization_mode, campaign.framework,
         update_tracked_files=False,
         source_checks_enabled=campaign.source_checks_enabled,
+        specify_dsl=campaign.specify_dsl,
     )
 
 
 def episode_directives(campaign: Campaign, version: int) -> dict[str, str]:
-    """Public operator guidance for the single optimization workflow."""
+    """Return only optional task-specific additions to the Episode prompt."""
     return {
         "plugins": campaign.plugin_directive("episode"),
-        "hardware": hardware_directive(campaign.platform, campaign.arch),
-        "sandbox": campaign._sandbox_directive(),
-        "evaluator": campaign._evaluator_directive(),
-        "mode_policy": campaign._mode_directive(),
-        "agent_runtime": _agent_runtime_directive(
-            campaign.agent_cli, is_ppu=hardware_vendor(campaign.platform, campaign.arch) == "ppu",
-            wiki=campaign.tool_runtime.wiki,
-            pause_agent_during_requests=campaign.tool_runtime.pause_agent_during_requests,
-            knowledge_skills=campaign.plugin_registry.knowledge_skills() if campaign.tool_runtime.wiki else (),
-        ),
     }
 
 
@@ -165,7 +154,7 @@ def candidate_policy_violations(
 
 
 def conversion_required(campaign: Campaign, stall: int, workspace: Path) -> bool:
-    if not campaign.source_checks_enabled:
+    if not campaign.source_checks_enabled or not campaign.specify_dsl:
         return False
     return should_convert_to_gluon(
         campaign.framework,

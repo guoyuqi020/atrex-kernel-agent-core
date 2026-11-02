@@ -552,9 +552,16 @@ Pooled search 应采用 island model，不能每轮都用 Epoch winner 替换所
 - 私有 WIP checkpoint；
 - 开启连续性时的 Provider Session。
 
-Epoch 边界只共享最终 Direction 状态和队列调整、Experiment 标注、完成的 Measurement Record、被引用的 Kernel Artifact、密封且经过源码范围过滤的 Git 历史，以及全局 Pareto frontier。不共享实时草稿、scratch、conversation 或未验证分析。共享历史中的未测量 commit 只作为工程过程，不作为证据。
+跨 trajectory 调度由 `search.synchronization` 显式选择：
 
-三条 trajectory 的推荐默认职责：
+- `synchronous`（默认）保留严格 Epoch barrier，所有 trajectory 的本轮 Episode 都终态后才密封共享；
+- `asynchronous` 取消全局准入 barrier。每条 trajectory 内部仍串行，某条 trajectory 终态后立即形成累计 publication，并可直接开始下一 Episode。调度使用 round-robin，避免并发槽位少于 trajectory 数量时快岛长期饿死未启动的岛。
+
+两种模式都只共享最终 Direction 状态和队列调整、Experiment 标注、完成的 Measurement Record、被引用的 Kernel Artifact、密封且经过源码范围过滤的 Git 历史，以及全局 Pareto frontier。不共享实时草稿、scratch、conversation 或未验证分析。异步 publication 按终态 Episode 边界过滤 Research event 和评测引用，不能读取仍在运行的同伴 Episode。共享历史中的未测量 commit 只作为工程过程，不作为证据。
+
+`search.role_specialization` 决定是否向三条 trajectory 注入不同职责，新搜索默认关闭。
+关闭时三条 trajectory 收到相同的通用 island 指令；调度、共享、lineage、Git 和 Session
+持久化均不改变。旧 checkpoint 仍按历史语义使用角色区分；启用时的推荐职责为：
 
 | Trajectory | 默认职责 |
 | --- | --- |

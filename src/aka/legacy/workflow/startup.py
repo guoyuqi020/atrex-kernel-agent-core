@@ -88,7 +88,7 @@ class WorkflowStartup:
             if launch.request != frozen:
                 raise ValueError('existing campaign requires its frozen request for resume')
         request, frameworks = prepare_request(launch, problem, frozen=context is not None)
-        if not launch.request.settings.framework:
+        if not launch.request.settings.framework and launch.request.settings.specify_dsl:
             from .dispatch import dispatch_framework_campaigns
             from dataclasses import replace
             from aka.legacy.task.hardware import framework_workspace_suffix

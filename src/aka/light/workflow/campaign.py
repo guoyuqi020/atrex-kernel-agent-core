@@ -110,7 +110,13 @@ class ManagedCampaign(Campaign):
             ))
         else:
             content = self.source_provider.prepare(SourceRequest(
-                initial=initial, name=self.campaign_name, framework=self.framework,
+                initial=initial,
+                name=self.campaign_name,
+                framework=(
+                    self.framework
+                    if self.specify_dsl
+                    else "Agent-selected supported GPU DSL"
+                ),
                 platform=self.platform))
 
         # Native tasks enter the unified representation before V0 is committed

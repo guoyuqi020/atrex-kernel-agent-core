@@ -4,11 +4,13 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from threading import Event, Lock
 from types import SimpleNamespace
 
 import pytest
 
 from aka.contracts.agent import AgentRuntimeCapabilities, NativeInvocation, TokenUsage
+from aka.contracts.workspace import CandidateHandle
 from aka.legacy.task.problem.layout import public_shapes_payload, validate_public_shapes
 from aka.light.agent.home import SESSION_HOME_ROOT_ENV, prepare_agent_environment
 from aka.light.experiment.store import MeasurementStore
@@ -26,6 +28,7 @@ from aka.light.workflow.journal_service import (
     shared_research_path,
 )
 from aka.light.workflow.models import EpisodeHandoff, SupervisorState
+from aka.light.workflow.episode import LongHorizonCampaign
 from aka.light.workflow.search import PooledSearch, SearchOptions, read_state
 from aka.light.workflow.search_driver import EpisodeSearchDriver
 from aka.light.workflow.session import LongSessionRunner
@@ -711,6 +714,145 @@ def test_pooled_search_seals_before_publishing(tmp_path):
     assert calls.index(("seal", 1)) < calls.index(("publish", 1))
 
 
+def test_search_synchronization_rejects_unknown_mode():
+    with pytest.raises(ValueError, match="synchronous or asynchronous"):
+        SearchOptions(synchronization="eventually")
+
+
+def test_search_role_specialization_is_optional_and_defaults_disabled():
+    assert SearchOptions().role_specialization is False
+    assert SearchOptions(role_specialization=True).role_specialization is True
+    with pytest.raises(TypeError, match="role_specialization must be a boolean"):
+        SearchOptions(role_specialization=1)
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_episode_search_role_specialization_prompt_switch(tmp_path, enabled):
+    base = SimpleNamespace(
+        workspace=tmp_path,
+        platform="L20D",
+        arch="sm_103",
+        notes="none",
+        research_records=False,
+        research_modules=(),
+        search_coordinate={
+            "epoch": 1,
+            "trajectory": 1,
+            "episode": 1,
+            "role_specialization": enabled,
+        },
+        module_options=SimpleNamespace(goal_episodes=False),
+        specify_dsl=True,
+        framework="Cuda",
+        dsl_context="- DSL: `Cuda`",
+        plugin_directive=lambda stage: "",
+        research_board=lambda: {},
+        tool_runtime=SimpleNamespace(pause_agent_during_requests=True),
+    )
+    prompt = LongHorizonCampaign(base)._prompt(
+        episode=1,
+        version=1,
+        worktree=CandidateHandle(1, "a" * 40, "work", tmp_path),
+        conversion_pending=False,
+    )
+    assert "Search location: Epoch 1, Trajectory 1, Episode 1" in prompt
+    assert ("T1 role: bounded exploitation" in prompt) is enabled
+
+
+def test_asynchronous_search_advances_without_waiting_for_slow_peer(tmp_path):
+    seed = {"latency_us_geomean": 10.0, "name": "seed"}
+    first_trajectory_advanced = Event()
+    slow_peer_released = Event()
+    lock = Lock()
+    calls = []
+    token_count = 0
+
+    class Driver:
+        def identity(self):
+            return "binding"
+
+        def bootstrap(self):
+            return seed
+
+        def initialize(self, initial, trajectories):
+            assert initial == seed and trajectories == 2
+
+        def prepare_trajectory(
+            self,
+            epoch,
+            trajectory,
+            episode,
+            working_kernel,
+            official_kernel,
+            shared_publication,
+            peer_kernels,
+        ):
+            assert working_kernel == seed
+            assert official_kernel == seed
+            assert type(shared_publication) is int
+            assert set(peer_kernels) == {"1", "2"}
+            with lock:
+                calls.append(("prepare", trajectory, episode))
+
+        def run_episode(self, epoch, trajectory, episode):
+            nonlocal token_count
+            if (trajectory, episode) == (2, 1):
+                assert first_trajectory_advanced.wait(2)
+                slow_peer_released.set()
+            elif (trajectory, episode) == (1, 2):
+                first_trajectory_advanced.set()
+            with lock:
+                calls.append(("run", trajectory, episode))
+                token_count += 1
+            return {
+                "epoch": epoch,
+                "trajectory": trajectory,
+                "episode": episode,
+                "retained_kernel": None,
+                "tokens": 1,
+                "session_id": f"session-t{trajectory}",
+            }
+
+        def seal_epoch(self, publication, jobs):
+            assert jobs
+            assert all(job["status"] == "completed" for job in jobs)
+            with lock:
+                calls.append(("seal", publication))
+
+        def publish_epoch(self, publication, winner):
+            assert winner == seed
+            with lock:
+                calls.append(("publish", publication))
+
+        def tokens(self):
+            return token_count
+
+        def interrupt(self):
+            slow_peer_released.set()
+
+    root = tmp_path / "search"
+    result = PooledSearch(
+        root,
+        SearchOptions(
+            epochs=2,
+            trajectories=2,
+            episodes_per_trajectory=1,
+            max_parallel_episodes=2,
+            synchronization="asynchronous",
+        ),
+        Driver(),
+    ).run()
+
+    assert result == "search: completed asynchronous Episode budget"
+    assert slow_peer_released.is_set()
+    assert calls.index(("run", 1, 2)) < calls.index(("run", 2, 1))
+    state = read_state(root / "state.json")
+    assert state["lineages"]["1"]["completed_episodes"] == 2
+    assert state["lineages"]["2"]["completed_episodes"] == 2
+    assert state["completed_epochs"] == 2
+    assert state["asynchronous"]["latest_publication"] == 4
+
+
 def test_wiki_query_missing_input_file_is_a_structured_agent_error(tmp_path):
     runtime = SupervisorRuntime.__new__(SupervisorRuntime)
     runtime.config = SimpleNamespace(wiki_enabled=True)
@@ -820,6 +962,29 @@ def test_research_store_rebuilds_queue_progress_and_adoption(tmp_path):
     assert [item["direction_id"] for item in board["open_queue"]] == [first, second]
     assert board["open_queue"][1]["status"] == "in_progress(T1)"
     assert board["open_queue"][1]["next_step"] == "measure"
+
+
+def test_research_store_terminal_projection_excludes_newer_live_episode(tmp_path):
+    store = ResearchStore(tmp_path / "research")
+    direction_id = "direction_" + "4" * 32
+    store.observe_direction(
+        {
+            "direction_id": direction_id,
+            "name": "terminal direction",
+            "change_scope": "major_redesign",
+            "status": "in_progress",
+            "plan": ["probe", "measure"],
+        },
+        origin={"trajectory": 1, "episode": 1},
+    )
+    store.progress(direction_id, 0, origin={"trajectory": 1, "episode": 2})
+
+    terminal = store.read_through_episode(1)
+
+    assert terminal["directions"][direction_id]["completed_plan_steps"] == []
+    assert terminal["directions"][direction_id]["next_step"] == "probe"
+    assert len(store.events_through_episode(1)) == 1
+    assert store.read()["directions"][direction_id]["completed_plan_steps"] == [0]
 
 
 def test_public_shapes_are_canonical_first_five_and_tamper_evident(tmp_path):
@@ -1192,7 +1357,11 @@ def test_pooled_search_keeps_each_lineage_instead_of_broadcasting_winner(tmp_pat
 def test_pooled_search_migrates_the_old_shared_seed_checkpoint(tmp_path):
     seed = {"latency_us_geomean": 10.0, "name": "legacy-seed"}
     options = SearchOptions(
-        epochs=2, trajectories=2, episodes_per_trajectory=1, max_parallel_episodes=2
+        epochs=2,
+        trajectories=2,
+        episodes_per_trajectory=1,
+        max_parallel_episodes=2,
+        role_specialization=True,
     )
 
     class Driver:
@@ -1228,3 +1397,5 @@ def test_pooled_search_migrates_the_old_shared_seed_checkpoint(tmp_path):
     assert migrated["official_incumbent"] == seed
     assert migrated["lineages"]["1"]["working_kernel"] == seed
     assert migrated["lineages"]["2"]["working_kernel"] == seed
+    assert migrated["options"]["synchronization"] == "synchronous"
+    assert migrated["options"]["role_specialization"] is True

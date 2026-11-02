@@ -222,11 +222,18 @@ def _production_review_digest(
     workspace: Path,
     framework: str,
     require_gluon: bool,
+    specify_dsl: bool = True,
 ) -> str:
     digest = hashlib.sha256()
     digest.update(f"production-review-v{DEPENDENCY_REVIEW_SCHEMA_VERSION}\0".encode())
     digest.update(framework.encode("utf-8", errors="replace"))
-    digest.update(b"\0gluon-required\0" if require_gluon else b"\0selected-framework\0")
+    digest.update(
+        b"\0open-dsl\0"
+        if not specify_dsl
+        else b"\0gluon-required\0"
+        if require_gluon
+        else b"\0selected-framework\0"
+    )
     for path in _production_review_candidate_paths(workspace):
         relative = path.relative_to(workspace).as_posix()
         contents = path.read_bytes()

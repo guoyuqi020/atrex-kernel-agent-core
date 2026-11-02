@@ -1,48 +1,5 @@
-## Prior iteration state
+## Direction and Experiment records
 
-Begin with the injected Research Board. Before proposing or starting any Direction in this Episode,
-refresh the compact catalog with `list-directions` when needed so every visible Direction is
-considered. Load the queue leader and any plausible competing Direction in full before choosing;
-do not bulk-load unrelated closed entries. Compare expected performance impact, supporting evidence,
-implementation cost, unresolved uncertainty, and whether a valuable redesign was previously deferred.
-Finding a locally faster checkpoint is not by itself a reason to hand off. Continue the selected
-Direction while a high-value plan step remains, especially for `major_redesign`; commit or tag a
-known-correct checkpoint before risky changes.
-Choose the single most important Direction rather than the easiest local edit, reuse its ID when the
-hypothesis is unchanged, and explain the comparison in the `start` event's `analysis`. If no existing
-Direction deserves work, propose and start a new one. Use optional `memory/v*.json` summaries as
-additional context. Treat prior analysis as interpretation, not measurement authority. Revisit a
-rejected Direction only with new evidence or a materially different implementation.
+Both modules are enabled. Inspect the Board and `list-directions`, load the queue leader and plausible alternatives, and choose the highest-value unresolved Direction rather than the easiest edit. Reuse the same Direction for the same hypothesis and record implementation variants as Experiments; check visible Directions before proposing a distinct idea. A new idea may remain `proposed` while the selected Direction continues. Preserve the current best and keep a valuable `major_redesign` active across Episodes until a milestone, stop condition, blocker, or completion.
 
-## Engineering loop
-
-Use this as a working guide when useful, not as additional mandatory stages:
-
-1. **Understand the starting point.** Inspect the current Kernel, public contract, and relevant
-   history. Identify existing measurements, the likely bottleneck, and what remains uncertain.
-2. **Choose a Direction.** State the hypothesis, expected benefit, concrete change, validation
-   method, and stopping condition. Classify `change_scope` as `local` or `major_redesign`. For a
-   major redesign, preserve the current best and identify a bounded, reversible probe that tests
-   the central uncertainty before falling back to easier local work. Register the Direction before
-   exploration; keep the concise plan in the Direction Journal rather than creating separate draft
-   or plan files.
-3. **Research the question.** Use available references, Profile, or an explicitly enabled knowledge
-   tool to resolve a specific uncertainty that informs the next change. Do not call disabled Wiki
-   or research/profile without a concrete purpose. If research reveals a distinct promising idea,
-   refresh `list-directions` before proposing it, load likely name/scope matches, and compare their
-   hypotheses. Reuse an existing Direction for the same hypothesis and record implementation
-   variants as Experiments. Otherwise propose the new Direction immediately so it is not lost, but leave it
-   `proposed`; do not interrupt the current `in_progress` Direction merely to start the new idea.
-4. **Implement and validate.** Work on one coherent candidate at a time. Use Gateway Evaluate for
-   correctness and performance, reusing a matching saved result instead of repeating the measurement.
-5. **Record and decide.** Record each decisive result as an Experiment with a short `name`, the
-   concrete question in `intent`, the relevant `gateway_record_ids`, and a bounded
-   `interpretation`. Runtime derives source changes, Kernel identities, correctness, latency and
-   failure facts from those records; do not restate them. Use `record-read` when you need the full
-   result. Use those facts to continue, repair, restore a measured Kernel, or change Direction.
-   Prepare the report as work proceeds, but do not submit it merely because one candidate is already
-   promotable. Submit an evidence-backed candidate, pivot, or blocker using the terminal contract
-   below only after no remaining concrete high-value step fits an explicitly configured active-time budget. When deferring
-   a Direction, record the smallest next probe and the exact evidence or budget constraint that stopped
-   it. If the same high-value Direction was previously deferred without new contrary evidence, test its
-   bounded probe before starting a lower-value Direction.
+After each decisive measurement, call `record-experiment` with only `name`, a concrete question in `intent`, the relevant `gateway_record_ids`, and a bounded `interpretation`. Runtime derives measurement and source facts; use `record-read` instead of restating them. Update the selected Direction from those facts. Peer in-progress Directions are read-only. After importing an exact measured peer Kernel through Git, call `adopt-kernel` before using it as local evidence.

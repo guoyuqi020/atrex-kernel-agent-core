@@ -249,6 +249,34 @@ class ResearchStore:
         with self._locked():
             return deepcopy(self._events())
 
+    @staticmethod
+    def _through_episode(
+        events: list[dict[str, Any]], episode: int
+    ) -> list[dict[str, Any]]:
+        if type(episode) is not int or episode < 0:
+            raise ValueError("Research Episode boundary must be a non-negative integer")
+        result = []
+        for event in events:
+            origin = event.get("origin")
+            event_episode = origin.get("episode") if isinstance(origin, Mapping) else None
+            if type(event_episode) is int and event_episode > episode:
+                continue
+            result.append(event)
+        return result
+
+    def read_through_episode(self, episode: int) -> dict[str, Any]:
+        """Rebuild a terminal projection without observing a newer live Episode."""
+        with self._locked():
+            state = _empty()
+            for event in self._through_episode(self._events(), episode):
+                _apply(state, event)
+            return deepcopy(state)
+
+    def events_through_episode(self, episode: int) -> list[dict[str, Any]]:
+        """Return only events eligible for a terminal Episode publication."""
+        with self._locked():
+            return deepcopy(self._through_episode(self._events(), episode))
+
     def append(
         self,
         event_type: str,

@@ -31,6 +31,8 @@ class WorkflowLaunch:
         for name in ("hardware",):
             if not isinstance(getattr(runtime, name), str):
                 raise TypeError(f"{name} must be a string")
+        if type(settings.specify_dsl) is not bool:
+            raise TypeError("specify_dsl must be a boolean")
         for name, value in (("timeout", runtime.timeout), ("verify_repeats", runtime.verify_repeats),
                             ("shape_batch_size", runtime.shape_batch_size),
                             ("evaluation_step_timeout", runtime.evaluation_step_timeout),

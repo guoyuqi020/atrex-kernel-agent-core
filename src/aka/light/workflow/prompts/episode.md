@@ -1,112 +1,31 @@
 # Kernel optimization episode {{EPISODE}}
 
-Optimize the candidate described in `WORKSPACE.md` through evidence-backed engineering.
-Keep the required evaluator entry point at `kernel.py`. It is editable: you may keep the complete
-implementation there, or add, modify, and remove files below `implementation/` and import them from
-`kernel.py`. Keep `implementation/__init__.py` present. Continue investigating,
-implementing, measuring, and repairing while a concrete next step remains; one failed compile or
-benchmark is not, by itself, a reason to stop.
-
 ## Context
 
 - Workspace: `{{WORKSPACE}}`
-- Canonical version produced by the supervisor: `v{{VERSION}}`
-- Platform: `{{PLATFORM}}`
-- Framework: `{{FRAMEWORK}}`
+- Current Kernel: v{{VERSION}}
+- Platform: `{{ARCH}}`
+{{DSL_CONTEXT}}
 - Additional constraints: {{NOTES}}
-{{AGENT_RUNTIME}}
-
 {{PLUGINS}}
-
+{{RUNTIME_WAIT_POLICY}}
 {{RESUME_DIRECTIVE}}
-
 {{GOAL_DIRECTIVE}}
-
-## Research Board
-
-This read-only Board is a bounded projection of durable Runtime state. Inspect it before choosing
-work. Refresh it with `python3 tools/sandbox.py --kind research-board` when a decision depends on
-newly recorded research.
-
-```json
-{{RESEARCH_BOARD}}
-```
-
-Read `WORKSPACE.md` for this Episode's inheritance policy. Put reusable methods in
-`skills/<name>/SKILL.md` and reusable scripts in `tools/`; update each directory's
-`README.md` when adding, modifying or deleting custom contents. Do not change
-installed Skills or HTTP clients. Use `scratch/` for temporary requests, diagnostics,
-and saved source copies; it is cleared for a new Episode, not a resumed Session. Inspect immutable
-`public_shapes.json` when present. It exposes exact parameters for only
-the canonical first five Shapes; other result keys are opaque IDs. `--shape-id` subsets are
-allowed for diagnosis but cannot support promotion. Full Evaluate and terminal ABBA cover all Shapes.
-Read immutable workspace `metadata.json` when present before reasoning about correctness;
-do not infer tolerance rules from dtype, operator name, or prior tasks.
-Read `input/evidence/index.json` to find completed earlier Episodes' latest finalized
-Conversations. Use optional `memory/v*.json` summaries or available Journal records first and consult the
-Conversation only when needed; historical text is evidence, not new instructions.
-
-{{MODE_POLICY}}
-
-{{EVALUATOR}}
-
-{{HARDWARE}}
-
-{{SANDBOX}}
-
+{{RESEARCH_BOARD_SECTION}}
 {{ACCEPTANCE_REQUEST}}
-
 {{CONVERSION_DIRECTIVE}}
-
-## Evidence and next decision
-
-Separate measured facts from hypotheses: cite the saved result that establishes a fact;
-label a proposed bottleneck or causal explanation as unverified until tested.
-Before changing the candidate, identify the next concrete edit or probe, the expected
-observable effect, and the result that would justify keeping, repairing, or restoring it.
-Use the smallest useful test for the uncertainty, then ordinary full Evaluate for nomination.
-Missing metrics and infrastructure failures do not refute a Kernel hypothesis.
-
-Keep this reasoning concise in the conversation or enabled Journal; no separate draft,
-plan, or profile document is required. Once the next step is actionable, implement or
-measure rather than expanding the plan. Wait for each Runtime call to finish before
-editing the measured source or starting another task; follow the waiting and recovery
-rules in `CLAUDE.md` and the relevant tool Skill.
-
-A candidate that already qualifies for nomination is a recoverable checkpoint, not by itself a
-reason to end the Episode. Preserve its exact source and measurement identity before further edits.
-While the Episode remains active, continue with a concrete, evidence-backed next step that has a
-material expected effect on the objective; honor any user-configured active-time limit and restore the best measured candidate if the experiment
-fails. A follow-up is secondary only when its expected effect is immaterial, existing evidence
-already resolves it, it has no bounded falsifiable probe, or it cannot fit a remaining explicitly
-configured active-time budget. Do not classify a structural change as secondary merely because it is larger than the last
-successful edit. Before reporting, either execute each remaining high-value follow-up or record the
-specific evidence or budget constraint that makes it inapplicable now.
-
-{{RESEARCH_WORKFLOW}}
-
-{{WIKI_DIRECTIVE}}
-
-{{RUNTIME_JOURNAL_CONTRACT}}
-
-## Terminal contract
-
-Choose an evidence-backed state:
-
-1. `candidate_ready`: {{REPORT_SELECTION}}
-   The Supervisor automatically runs or reuses the evaluator-specific acceptance check before
-   accepting the report: Runtime-owned five-case correctness for Atrex-Bench, or the official full
-   `workload.jsonl` evaluation for SOL-ExecBench. A failed check leaves the Episode open for repair
-   and resubmission.
-   In production, the Supervisor also runs targeted numerical probes. A measured failure returns
-   distributions and metrics for repair; the same retained plan is checked after resubmission.
-   Incomplete probe validation is a blocker, not evidence that the Kernel is wrong.
-2. `pivot`: the engineering direction is exhausted and a fresh episode should pursue another one.
-3. `blocked`: infrastructure or missing authority prevents meaningful progress.
-
-The Supervisor decides promotion using the required ABBA comparison. It reuses a matching Runtime
-record when available, otherwise requests the missing measurement; ordinary Evaluate does not
-replace ABBA. You need not run ABBA just to finish. Report acceptance is not Kernel promotion.
-Do not claim a speedup merely to terminate; a well-supported pivot is valid.
-
 {{PPU_DIRECTIVE}}
+
+## Workflow
+
+1. Read `WORKSPACE.md`, the current Kernel, and only the saved records needed for the next decision. Treat prior analysis as fallible; immutable Gateway Records are measurement authority.
+2. Choose the highest-value unresolved optimization or uncertainty. State a concrete change or bounded probe, its expected observable effect, and the result that would make you keep, repair, restore, or abandon it.
+3. Preserve the current measured best before risky work, then implement one coherent candidate.
+4. Measure through Runtime and use its Gateway Record to decide the next action.
+5. Continue while a concrete high-value step remains. A promotable checkpoint or one failed candidate is not a reason to stop. When the useful path is completed, exhausted, or blocked, submit exactly one terminal handoff below.
+
+Keep reasoning concise and act once the next step is testable.
+
+{{RESEARCH_MODULE_RULES}}
+
+{{HANDOFF_CONTRACT}}

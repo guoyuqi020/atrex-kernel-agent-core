@@ -41,6 +41,15 @@ def _read(path: Path) -> bytes:
     return value
 
 
+def _claude_instructions(workspace_policy: str) -> bytes:
+    """Combine static Agent rules with the Supervisor-owned campaign policy."""
+    from aka.light.workspace.resource_catalog import resource
+
+    base = _read(resource("reference/CLAUDE.md")).rstrip()
+    policy = workspace_policy.strip().encode()
+    return base + (b"\n\n" + policy if policy else b"") + b"\n"
+
+
 def bounded_tree_entries(root: Path):
     """Never follow mutable symlinks; enforce aggregate limits before publication."""
     count = total = 0
@@ -64,7 +73,7 @@ class EpisodeWorkspace:
     def __init__(self, worktree: Path, directory: Path, *, is_ppu: bool = False,
                  research_records: bool = True, research_modules=("directions", "experiments"), plugin_registry=None,
                  inherit_state: bool = True, adaptive_root: Path | None = None,
-                 episode: int | None = None, history=None):
+                 episode: int | None = None, history=None, workspace_policy: str = ""):
         if plugin_registry is None:
             from aka.light.runtime.catalog import PluginRegistry
             plugin_registry = PluginRegistry()
@@ -77,6 +86,9 @@ class EpisodeWorkspace:
         self.plugin_registry = plugin_registry
         self.inherit_state = inherit_state
         self.history = history
+        if not isinstance(workspace_policy, str):
+            raise TypeError("workspace_policy must be text")
+        self.workspace_policy = workspace_policy
         self.adaptive_root = adaptive_root
         from aka.light.workspace.adaptive import AdaptiveState, reserved_paths
         self.reserved_paths = reserved_paths(plugin_registry)
@@ -135,8 +147,7 @@ class EpisodeWorkspace:
             if name == "CLAUDE.md":
                 # Instructions follow the running controller, not an old V0's
                 # retired Setup/Fast workflow. Do not rewrite the committed V0.
-                from aka.light.workspace.resource_catalog import resource
-                content = _read(resource("reference/CLAUDE.md"))
+                content = _claude_instructions(self.workspace_policy)
                 publish(self.root, name, content)
                 continue
             try:
@@ -197,6 +208,8 @@ class EpisodeWorkspace:
             "tags, diff, restore, revert and cherry-pick for engineering recovery. Network remotes, "
             "credentials, hooks, submodules and LFS are disabled. Runtime evaluates the actual bytes in "
             "kernel.py and implementation/; Git commits and refs are never promotion evidence. "
+            "The trajectory's commits, branches, tags and imported peer refs persist across Episodes "
+            "and Epochs even though each Episode receives a refreshed Agent workspace. "
             "Imported peers appear below refs/atrex/shared/ and measurement indexes in "
             "refs/notes/atrex-measurements.\n"
             "\ninput/evidence/ is a read-only snapshot of completed earlier Episodes. "

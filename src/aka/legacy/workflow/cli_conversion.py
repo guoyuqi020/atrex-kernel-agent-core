@@ -165,6 +165,16 @@ def parse_arguments(argv):
         "Each auto-dispatched production child is bound to its assigned framework.",
     )
     ap.add_argument(
+        "--specify-dsl",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Constrain and name the selected DSL in Agent prompts and production policy "
+            "(default: enabled). --no-specify-dsl lets one Agent choose any supported "
+            "self-authored GPU DSL; framework-specific conversion is disabled."
+        ),
+    )
+    ap.add_argument(
         "--notes", default="none", help="Extra constraints / known bottlenecks."
     )
     ap.add_argument(
@@ -441,10 +451,18 @@ def parse_arguments(argv):
 
 def adapt_argv(argv):
     args, raw_argv = parse_arguments(argv)
+    if not args.specify_dsl:
+        # The switch owns the semantic choice. An incidental/default framework
+        # must not leak into the frozen request, workspace identity, or policy.
+        args.framework = ""
     sandbox_hardware = args.sandbox_hardware or args.platform
     source = problem_request(args.op_dir, args.optimization_mode,
         workspace=args.workspace,
-        suffix=args.workspace_suffix or f"{args.framework}_{args.platform}")
+        suffix=args.workspace_suffix or (
+            f"{args.framework}_{args.platform}"
+            if args.specify_dsl
+            else f"open_dsl_{args.platform}"
+        ))
     values = vars(args).copy()
     from aka.legacy.execution.configuration import configure_legacy_arguments
     configure_legacy_arguments(values)
@@ -456,6 +474,8 @@ def adapt_argv(argv):
     explicit = {value.split("=",1)[0] for value in raw_argv if value.startswith("--")}
     workflow_options = {field.name for field in __import__("dataclasses").fields(request.settings)
                         if "--" + field.name.replace("_", "-") in explicit}
+    if "--no-specify-dsl" in explicit:
+        workflow_options.add("specify_dsl")
     runtime_options = {field.name for field in __import__("dataclasses").fields(request.runtime)
                        if "--" + field.name.replace("_", "-") in explicit}
     if "--verify-shape-batch-size" in explicit:

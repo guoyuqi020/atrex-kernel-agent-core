@@ -40,14 +40,13 @@ overrides are unchanged; Core resolves initialization order from dependencies,
 not JSON row order.
 
 Agent shell tools retain the launching Python environment, including symlink-based virtual
-environments. Every launched Light Agent runs Legacy's dependency-policy watchdog,
-including `observed`, `sandbox`, `light` and `light-sandbox`. Activation is independent
-of `production`/`leaderboard`, capture, Bubblewrap and outage-marker configuration;
-this is an execution-boundary rule, not the production candidate acceptance gate.
-The shared watcher uses Legacy's polling and SIGTERM/SIGKILL policy for confirmed
-local installers, GPU/JIT execution or shared-Gateway mutations. Legacy's default
-classification and launch behavior are unchanged. Linux procfs provides process
-inspection; on hosts without procfs this watcher cannot inspect local commands.
+environments. Every launched Light Agent runs the shared process watcher, including
+`observed`, `sandbox`, `light` and `light-sandbox`, but managed Campaigns disable its
+development-time dependency classifier in both Production and Leaderboard. Dependency,
+framework and compute provenance are enforced on the sealed final candidate instead.
+The watcher continues to use Legacy's polling and SIGTERM/SIGKILL policy for shared-Gateway
+mutations and environment outages. Linux procfs provides process inspection; on hosts without
+procfs the watcher cannot inspect local commands.
 Bubblewrap mounts, protected assets, HTTP authorization, active-time limits and
 cancellation remain separate. The outage-marker path still returns environment
 tempfail (75), while dependency violations carry an explicit policy diagnostic.
@@ -61,8 +60,9 @@ require the inspected process's own working directory; the Supervisor's director
 is never a substitute. A missing/inaccessible cwd or client read is inconclusive,
 not an unregistered-client violation. Only a successful content comparison can
 reject a workspace copy of the HTTP client. Verified client arguments are remote
-request data, not local install/build/import commands; separate local shell
-commands are still classified individually. Missing evidence is not a policy
+request data, not local install/build/import commands. Managed Campaigns allow those
+development commands, while standalone fail-closed callers may still classify them.
+Missing evidence is not a policy
 violation or a grant of Runtime authority; the authenticated Runtime remains the
 authority boundary. Verified remote requests do not trigger local-policy termination.
 
@@ -74,8 +74,12 @@ fail-closed reviewer gate, reviewer prompt and verdict validation. Production
 still requires self-authored computation in the selected framework: a prebuilt
 FlashInfer operator is not an acceptable replacement, while toolchain/header/ABI/
 launch support is judged by actual use rather than package name. A missing,
-invalid or rejecting policy verdict prevents candidate acceptance. Legacy's
-default prompt, gate and scoring behavior are unchanged.
+invalid or rejecting policy verdict prevents candidate acceptance. Managed Light
+runs this review inside `episode-report` acceptance against the exact sealed candidate,
+before Journal finalization and the Supervisor-owned candidate commit. Rejections
+return validated check/dependency reasons to the current Agent for repair and
+resubmission; the post-handoff gate remains as a cached consistency check. Legacy's
+default prompt and scoring behavior are otherwise unchanged.
 
 Light adapts only the workflow-facing instructions (Supervisor report submission
 instead of Agent commits; returned numerical feedback instead of a private file)
@@ -425,7 +429,9 @@ An Agate call is not an Episode. Enable pooled search with a non-empty Workflow 
       "epochs": 10,
       "trajectories": 2,
       "episodes_per_trajectory": 2,
-      "max_parallel_episodes": 2
+      "max_parallel_episodes": 2,
+      "synchronization": "synchronous",
+      "role_specialization": false
     }
   }}]
 }
@@ -437,6 +443,25 @@ The concurrency limit bounds whole Episodes, not each Episode's GPU Shape batche
 An omitted or empty `search` retains the existing serial Workflow and defaults.
 Pooled search currently requires the native Atrex-Bench Eval/ABBA route; SOL/SSH
 configurations fail before Bootstrap rather than running unverifiable search Episodes.
+
+`synchronization` controls only the cross-trajectory barrier. Its default is
+`"synchronous"`, which preserves the strict Epoch behavior: all scheduled Episodes in
+the Epoch must become terminal before evidence is sealed and the next Epoch starts.
+`"asynchronous"` keeps each trajectory serial but removes that global admission barrier.
+A trajectory that finishes may immediately start its next Episode; each terminal Episode
+creates a cumulative immutable publication of all terminal trajectory evidence available
+at that point. Directions, Experiments, Gateway Records, Kernel source and filtered Git
+history from that publication become visible to peers, while drafts, live adaptive state
+and Conversations remain private. A running peer is never treated as terminal evidence.
+The asynchronous scheduler uses round-robin admission so a fast trajectory cannot starve
+an unstarted peer when `max_parallel_episodes < trajectories`.
+
+`role_specialization` controls only the role text injected into each trajectory's Episode Prompt.
+It defaults to `false`, so every trajectory receives the same general island-search instruction.
+Set it to `true` to inject the T1 exploitation, T2 major-redesign and T3 probing roles. This does
+not change scheduling, evidence sharing, lineage isolation, Git history or Session persistence.
+Checkpoints created before this switch existed retain their historical role-specialized behavior
+and must be resumed with `role_specialization: true`.
 
 ```mermaid
 flowchart LR
@@ -477,9 +502,12 @@ Search budgets are explicit: `epochs × trajectories × episodes_per_trajectory`
 the serial `--max-iters` version budget. `--token-budget` is shared across trajectory Episode
 usage and stops new admission; already-running Episodes finish, so a parallel batch can
 overshoot it. It excludes Bootstrap/auxiliary usage as the existing Episode accounting does.
-`--max-stall` counts complete Epochs without a better retained Kernel (disabled for goal
-mode); target utilization is checked after a complete Epoch. Other Workflow switches keep
-their defaults; include them in the same whole-config patch when overriding them.
+In synchronous mode, `--max-stall` counts complete Epochs without a better retained Kernel.
+In asynchronous mode, it advances only when every trajectory has crossed the next common
+Epoch frontier, so a fast island cannot exhaust the stall limit alone. Target utilization is
+checked at the same mode-specific boundary. Both are disabled or altered by their existing
+goal-mode rules. Other Workflow switches keep their defaults; include them in the same
+whole-config patch when overriding them.
 
 The controller keeps `search/state.json`, per-Epoch summaries under `search/epochs/`,
 and private repositories under `search/trajectories/` beneath its existing private Campaign
@@ -489,10 +517,12 @@ sealed Git transaction. A coordinator lock prevents two controllers from schedul
 same search. Corrupt state, changed configuration or unrelated controller edits fail closed.
 An interrupt stops admission, revokes trajectory Runtime capabilities and cancels outage
 waits; active model turns keep their existing bounded process lifecycle before shutdown.
-Use a new workspace when switching between serial and pooled search; neither checkpoints
-nor incomplete searches are silently migrated. Resume with the same composition/options.
+Use a new workspace when switching between serial and pooled search, or between synchronous
+and asynchronous pooled search; neither checkpoints nor incomplete searches are silently
+migrated. Resume with the same composition/options. Checkpoints created before this switch
+existed are interpreted as synchronous for backward compatibility.
 
-Local validation covers 38 search checks: scheduling/concurrency, shared budgets, Epoch
+Local validation covers search checks for scheduling/concurrency, shared budgets, Epoch
 barriers, exact recovery, Git publication crash points and preservation of unrelated edits.
 A controlled subprocess harness also runs the real Episode engine, HTTP Report submission,
 Session capture and archival for two trajectories over two Epochs (four Episodes), checking

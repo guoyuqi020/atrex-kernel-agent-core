@@ -13,7 +13,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
-from threading import Event
+from threading import Event, Lock
 
 import aka.light.workflow.context as main_adapter
 from aka.light.workflow.episode import LongHorizonCampaign
@@ -148,6 +148,52 @@ class EpisodeSearchDriver:
         return (self.root / "epochs" / f"e{epoch:08d}-shared.json").is_file()
 
     def seal_epoch(self, epoch, jobs):
+        return self._seal_epoch(epoch, jobs, terminal_only=False)
+
+    def seal_publication(self, publication, jobs):
+        """Seal an asynchronous snapshot without reading newer live Episodes."""
+        return self._seal_epoch(publication, jobs, terminal_only=True)
+
+    @staticmethod
+    def _terminal_record_ids(child, terminal_episode, projection):
+        record_ids = set()
+        for experiment in projection["experiments"]:
+            values = experiment.get("gateway_record_ids")
+            if isinstance(values, list):
+                record_ids.update(item for item in values if isinstance(item, str))
+        journal = load_journal(
+            supervisor_campaign_root(child.workspace)
+            / "journals"
+            / "episodes"
+            / f"e{terminal_episode:08d}"
+            / "journal.json"
+        )
+        outcome = journal.get("outcome")
+        values = outcome.get("gateway_record_ids") if isinstance(outcome, dict) else None
+        if isinstance(values, list):
+            record_ids.update(item for item in values if isinstance(item, str))
+        attempt_path = (
+            child.workspace
+            / ".atrex_long_horizon"
+            / "episodes"
+            / f"e{terminal_episode:04d}"
+            / "attempt.json"
+        )
+        try:
+            attempt = read_state(attempt_path)
+        except FileNotFoundError:
+            attempt = {}
+        verification = attempt.get("verification")
+        record_id = (
+            verification.get("gateway_record_id")
+            if isinstance(verification, dict)
+            else None
+        )
+        if isinstance(record_id, str) and record_id:
+            record_ids.add(record_id)
+        return sorted(record_ids)
+
+    def _seal_epoch(self, epoch, jobs, *, terminal_only):
         """Publish cumulative, read-only research and measurement evidence."""
         if not jobs or any(job.get("status") != "completed" for job in jobs):
             raise RuntimeError("Cannot seal shared evidence before every Epoch Episode is terminal")
@@ -197,17 +243,27 @@ class EpisodeSearchDriver:
             "Experiment",
         )
 
-        research_states = {
+        research_stores = {
             number: ResearchStore(
                 supervisor_campaign_root(self.children[number].workspace) / "research"
-            ).read()
-            for number in sorted(self.children)
+            )
+            for number in sorted(terminal)
+        }
+        research_states = {
+            number: (
+                store.read_through_episode(terminal[number])
+                if terminal_only
+                else store.read()
+            )
+            for number, store in research_stores.items()
         }
         research_events = {
-            number: ResearchStore(
-                supervisor_campaign_root(self.children[number].workspace) / "research"
-            ).events()
-            for number in sorted(self.children)
+            number: (
+                store.events_through_episode(terminal[number])
+                if terminal_only
+                else store.events()
+            )
+            for number, store in research_stores.items()
         }
         # A progress step is monotonic. Merge the union so a peer's completed
         # milestone cannot disappear when the Direction crosses an Epoch.
@@ -246,9 +302,15 @@ class EpisodeSearchDriver:
         central = MeasurementStore(self.root / "shared" / "measurements")
         record_origins = copy.deepcopy(previous.get("records", {}))
         new_record_ids = []
-        for number, child in sorted(self.children.items()):
+        for number in sorted(terminal):
+            child = self.children[number]
             source = MeasurementStore(supervisor_campaign_root(child.workspace) / "measurements")
-            for record_id in source.record_ids():
+            record_ids = (
+                self._terminal_record_ids(child, terminal[number], projections[number])
+                if terminal_only
+                else source.record_ids()
+            )
+            for record_id in record_ids:
                 if record_id in record_origins:
                     continue
                 central.import_record(source, record_id)
@@ -383,6 +445,7 @@ class EpisodeSearchDriver:
             child.request = replace(self.campaign.request, workspace=workspace)
             child._supervisor_runtime = None
             child._production_review_cache = {}
+            child._account_lock = Lock()
             child.workspace_suffix = f"trajectory-{number:04d}"
             child.target_util = 0.0  # Search budget, not a local utilization stop, owns admission.
             child.tokens_spent = 0
@@ -526,6 +589,133 @@ class EpisodeSearchDriver:
                         "reason": "all_peer_episodes_predate_agent_git",
                     })
 
+    def prepare_trajectory(
+        self,
+        epoch,
+        trajectory,
+        episode,
+        expected_kernel,
+        official,
+        shared_publication,
+        peer_kernels,
+    ):
+        """Prepare one asynchronous island without waiting for its peers."""
+        child = self.children[trajectory]
+        store = self._state(child)
+        active = child.workspace / ".atrex_long_horizon/active_episode.json"
+        if store["episodes"] == episode:
+            # The Episode reached its durable outcome before the coordinator
+            # recorded the result. run_episode() will read the archive only.
+            return
+        if store["episodes"] != episode - 1:
+            raise RuntimeError(
+                "Cannot prepare asynchronous trajectory with unexpected Episode progress"
+            )
+        if active.exists():
+            # Preserve the exact WIP checkout and shared snapshot selected when
+            # this Episode was first admitted. Normal Episode recovery owns it.
+            child.start_runtime()
+            return
+        if not isinstance(expected_kernel, dict) or not isinstance(official, dict):
+            raise RuntimeError("Asynchronous search checkpoint has no valid Kernel identity")
+        if type(shared_publication) is not int or shared_publication < 0:
+            raise RuntimeError("Asynchronous shared publication is invalid")
+        if not isinstance(peer_kernels, dict):
+            raise RuntimeError("Asynchronous peer Kernel snapshot is invalid")
+
+        current_source = source_snapshot(child.workspace)
+        if hashlib.sha256(current_source).hexdigest() != expected_kernel["sha256"]:
+            self._publish(
+                child.workspace,
+                episode,
+                expected_kernel,
+                f"trajectory-{trajectory:04d}-lineage-restore",
+            )
+        child.start_runtime()
+        kernel_identity = child._supervisor_runtime.measurements.kernel(
+            self.source(expected_kernel)
+        )
+        official_identity = child._supervisor_runtime.measurements.kernel(
+            self.source(official)
+        )
+        child._supervisor_runtime.research.checkpoint_lineage(
+            {
+                "working_kernel_id": kernel_identity["kernel_id"],
+                "lineage_best_kernel_id": kernel_identity["kernel_id"],
+                "last_correct_kernel_id": kernel_identity["kernel_id"],
+            },
+            origin={"epoch": epoch, "trajectory": trajectory, "episode": episode},
+        )
+        child._supervisor_runtime.research.append(
+            "promotion.accepted",
+            {
+                "kernel_id": official_identity["kernel_id"],
+                "latency_us_geomean": official["latency_us_geomean"],
+            },
+            origin={"epoch": epoch, "trajectory": trajectory, "episode": episode},
+            dedupe_key=(
+                f"async-incumbent:{trajectory}:{episode}:{official['sha256']}"
+            ),
+        )
+        if shared_publication == 0:
+            return
+
+        exports = []
+        exported_peers = []
+        for peer in sorted(self.children):
+            if peer == trajectory:
+                continue
+            root = self.root / "shared" / "git" / f"T{peer}"
+            export = root / f"e{shared_publication:08d}.fast-export"
+            if export.is_file():
+                exports.append(export)
+                exported_peers.append(peer)
+                continue
+            receipt_path = root / f"e{shared_publication:08d}.json"
+            try:
+                receipt = read_state(receipt_path)
+            except FileNotFoundError:
+                # This peer had not completed an Episode in that cumulative
+                # publication, so it legitimately has no exported history.
+                continue
+            if receipt.get("status") != "unavailable":
+                raise RuntimeError(f"Asynchronous peer Git export is missing: {export}")
+        notes = {}
+        for peer, kernel in peer_kernels.items():
+            if int(peer) not in exported_peers:
+                continue
+            ref = f"refs/atrex/shared/T{peer}/e{shared_publication:04d}/head"
+            notes[ref] = {
+                "measurement_status": "measured",
+                "kernel_sha256": kernel["sha256"],
+                "correctness": "pass",
+                "latency_us_geomean": kernel["latency_us_geomean"],
+            }
+        runtime_root = supervisor_campaign_root(child.workspace)
+        audit_path = (
+            runtime_root
+            / "adaptive-state"
+            / "git-imports"
+            / f"episode-{episode:08d}-publication-{shared_publication:08d}.json"
+        )
+        if exports:
+            import_exports(
+                runtime_root / "adaptive-state" / "agent-git.bundle",
+                exports,
+                notes=notes,
+                audit_path=audit_path,
+            )
+        else:
+            private_write(
+                audit_path,
+                {
+                    "schema_version": 1,
+                    "imports": [],
+                    "status": "unavailable",
+                    "reason": "no_peer_history_in_selected_publication",
+                },
+            )
+
     def _state(self, child):
         path = child.workspace / ".atrex_long_horizon/state.json"
         try:
@@ -552,7 +742,14 @@ class EpisodeSearchDriver:
         current = self._state(child)["episodes"]
         if current not in {episode - 1, episode}:
             raise RuntimeError("Trajectory Episode sequence differs from the Epoch schedule")
-        child.search_coordinate = {"epoch": epoch, "trajectory": trajectory, "episode": episode}
+        child.search_coordinate = {
+            "epoch": epoch,
+            "trajectory": trajectory,
+            "episode": episode,
+            "role_specialization": (
+                self.campaign.module_options.search.role_specialization
+            ),
+        }
         # An archived terminal Episode is not run again after coordinator restart.
         if current < episode or (child.workspace / ".atrex_long_horizon/active_episode.json").exists():
             child.start_runtime()

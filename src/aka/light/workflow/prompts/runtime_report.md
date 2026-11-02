@@ -1,17 +1,11 @@
-## Episode handoff
+## Handoff
 
-Leave the complete selected source tree in place, including editable `kernel.py` and every
-file it uses below `implementation/`; retain `implementation/__init__.py`. Submit `status`, `summary`, and
-`gateway_record_ids` for `candidate_ready`; at least one cited record must be a passing standard
-full Evaluate for that exact source. Profile, ABBA, and correctness-only checks alone are insufficient.
-Do not submit `selected_experiment_id` or manage Git. The Supervisor validates and seals the source.
+Write `scratch/episode-report.json` as one of:
 
-For `pivot`, submit only `status` and `summary`; for `blocked`, also supply `blocker`.
-Chat text is not a handoff. Follow `skills/runtime-records/references/journal.md` and run:
-
-```bash
-python3 tools/sandbox.py --kind episode-report --request-file scratch/episode-report.json
+```json
+{"status":"candidate_ready","summary":"...","gateway_record_ids":["..."]}
+{"status":"pivot","summary":"..."}
+{"status":"blocked","summary":"...","blocker":"..."}
 ```
 
-Correct rejected fields or evidence and resubmit. A rejected report leaves the Episode open;
-stop after acceptance. Acceptance checks and promotion policy are unchanged by research recording.
+For `candidate_ready`, cite a passing standard full Evaluate for the exact source left in the workspace; correctness-only, Profile, Dev, and ABBA are insufficient. Do not add `selected_experiment_id`. Submit with `python3 tools/sandbox.py --kind episode-report --request-file scratch/episode-report.json`. Correct a rejected handoff and resubmit; stop only after acceptance. Do not commit—the Supervisor seals the source.

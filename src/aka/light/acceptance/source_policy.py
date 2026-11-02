@@ -15,16 +15,51 @@ from aka.legacy.workflow.policy import (
 
 
 def optimization_mode_directive(
-    mode: str, framework: str, *, source_checks_enabled: bool = True
+    mode: str,
+    framework: str,
+    *,
+    source_checks_enabled: bool = True,
+    specify_dsl: bool = True,
 ) -> str:
     """Use the same production rules, without requiring Agent Git/private-file access."""
     if mode == "leaderboard":
+        dsl = (
+            "The requested framework is a recommended direction: compatible mixed or alternate "
+            "implementations and third-party helper/kernel libraries are allowed when evidence "
+            "supports them, unless a task-specific rule explicitly forbids them."
+            if specify_dsl
+            else "No DSL is prescribed. Choose the implementation framework from measured evidence; "
+            "compatible mixed implementations and third-party helper/kernel libraries are allowed "
+            "unless a task-specific rule explicitly forbids them."
+        )
         return (
             "## Optimization mode: leaderboard\n\n"
-            "Follow the workspace `CLAUDE.md` and the injected task constraints. The requested "
-            "framework is a recommended direction: compatible mixed or alternate implementations "
-            "and third-party helper/kernel libraries are allowed when evidence supports them, "
-            "unless a task-specific rule explicitly forbids them.\n"
+            "Follow the workspace `CLAUDE.md` and the injected task constraints. " + dsl + "\n"
+        )
+    if not specify_dsl and mode == "production":
+        review_policy = (
+            "The Supervisor independently reviews source provenance, dependencies, loaders and "
+            "manifest consistency without imposing a selected DSL.\n"
+            if source_checks_enabled
+            else "Independent source review is disabled for this task; correctness and the open "
+            "DSL policy still apply.\n"
+        )
+        return (
+            "## Optimization mode: production (open DSL)\n\n"
+            "No DSL is prescribed. Choose any supported GPU implementation framework, or a "
+            "compatible mixture, from evidence. Every production candidate must implement the "
+            "operator's GPU computation directly with self-authored kernels. Compiler bindings, "
+            "header discovery, ABI/launch plumbing and ordinary non-compute utilities are allowed; "
+            "in the submitted candidate, PyTorch/ATen compute fallbacks, prebuilt "
+            "kernels/operators/math implementations, third-party core computation, hidden dispatch "
+            "and external implementation loading are forbidden. During development, these same "
+            "mechanisms may be used as temporary references, probes, microbenchmarks or prototypes, "
+            "but they must not remain in the submitted Kernel source tree or runtime compute path. "
+            "Keep `solution.json` "
+            "consistent with the actual implementation.\n"
+            "Validate correctness with the immutable evaluator over the full workload. Read "
+            "`metadata.json` when present; every declared correctness condition must pass. "
+            + review_policy
         )
     return workflow_policy.optimization_mode_directive(
         mode, framework, source_checks_enabled=source_checks_enabled,
@@ -48,10 +83,17 @@ def optimization_mode_directive(
 
 
 def workspace_policy_block(
-    mode: str, framework: str, *, source_checks_enabled: bool = True
+    mode: str,
+    framework: str,
+    *,
+    source_checks_enabled: bool = True,
+    specify_dsl: bool = True,
 ) -> str:
     directive = optimization_mode_directive(
-        mode, framework, source_checks_enabled=source_checks_enabled
+        mode,
+        framework,
+        source_checks_enabled=source_checks_enabled,
+        specify_dsl=specify_dsl,
     ).rstrip()
     return f"{POLICY_BEGIN}\n\n{directive}\n\n{POLICY_END}\n"
 
@@ -64,6 +106,7 @@ def install_workspace_policy(
     agent_runtime: str | None = None,
     update_tracked_files: bool = True,
     source_checks_enabled: bool = True,
+    specify_dsl: bool = True,
 ) -> None:
     """Persist immutable mode, framework, and optional campaign runtime identity.
 
@@ -73,6 +116,7 @@ def install_workspace_policy(
     """
     if mode not in OPTIMIZATION_MODE_CHOICES:
         raise ValueError(f"unsupported optimization mode: {mode!r}")
+    policy_framework = framework if specify_dsl else ""
     requested_runtime = (
         str(agent_runtime).strip() if agent_runtime is not None else None
     )
@@ -89,11 +133,17 @@ def install_workspace_policy(
             raise RuntimeError(f"invalid optimization-mode state: {state_path}") from exc
         existing_mode = state.get("mode")
         existing_framework = state.get("framework")
-        if existing_mode != mode or existing_framework != framework:
+        existing_specify_dsl = state.get("specify_dsl", True)
+        if (
+            existing_mode != mode
+            or existing_framework != policy_framework
+            or existing_specify_dsl != specify_dsl
+        ):
             raise RuntimeError(
                 "workspace policy mismatch: "
-                f"recorded mode/framework={existing_mode}/{existing_framework}, "
-                f"requested={mode}/{framework}"
+                "recorded mode/framework/specify_dsl="
+                f"{existing_mode}/{existing_framework}/{existing_specify_dsl}, "
+                f"requested={mode}/{policy_framework}/{specify_dsl}"
             )
         existing_runtime = str(state.get("agent_runtime") or "").strip()
         if requested_runtime and existing_runtime and existing_runtime != requested_runtime:
@@ -106,7 +156,11 @@ def install_workspace_policy(
             state["agent_runtime"] = requested_runtime
             state_changed = True
     else:
-        state = {"mode": mode, "framework": framework}
+        state = {
+            "mode": mode,
+            "framework": policy_framework,
+            "specify_dsl": specify_dsl,
+        }
         if requested_runtime:
             state["agent_runtime"] = requested_runtime
         state_changed = True
@@ -122,13 +176,16 @@ def install_workspace_policy(
 
     if not update_tracked_files:
         # Episode checkouts preserve their protected Git boundary. The current
-        # policy is supplied by optimization_mode_directive in every prompt.
+        # policy is supplied by the Runtime when it projects Agent CLAUDE.md.
         return
 
     claude_path = workspace / "CLAUDE.md"
     current = claude_path.read_text(encoding="utf-8") if claude_path.exists() else ""
     generated = workspace_policy_block(
-        mode, framework, source_checks_enabled=source_checks_enabled
+        mode,
+        policy_framework,
+        source_checks_enabled=source_checks_enabled,
+        specify_dsl=specify_dsl,
     )
     if POLICY_BEGIN in current and POLICY_END in current:
         before, remainder = current.split(POLICY_BEGIN, 1)
@@ -154,6 +211,7 @@ def production_structure_violations(
     framework: str,
     *,
     require_gluon: bool = False,
+    specify_dsl: bool = True,
 ) -> list[str]:
     """Validate the editable Kernel entry point and source-tree boundary."""
     from aka.light.workspace.sources import policy_at, collect
@@ -161,9 +219,14 @@ def production_structure_violations(
     policy = policy_at(workspace)
     if policy is None:
         return legacy_policy.production_structure_violations(
-            workspace, framework, require_gluon=require_gluon,
+            workspace,
+            framework if specify_dsl else "Cuda",
+            require_gluon=require_gluon if specify_dsl else False,
         )
-    if framework_key(framework) not in legacy_policy.SUPPORTED_PRODUCTION_FRAMEWORKS:
+    if (
+        specify_dsl
+        and framework_key(framework) not in legacy_policy.SUPPORTED_PRODUCTION_FRAMEWORKS
+    ):
         return [f"unsupported production framework: {framework}"]
     try:
         files = collect(workspace, policy)
@@ -176,7 +239,7 @@ def production_structure_violations(
             ast.parse(data.decode("utf-8"), filename=name)
         except SyntaxError as exc:
             return [f"{name} is not valid Python: {exc.msg} (line {exc.lineno})"]
-    if require_gluon and not any(
+    if specify_dsl and require_gluon and not any(
         source_uses_gluon(data.decode("utf-8", errors="ignore"))
         for data in files.values()
     ):
@@ -189,11 +252,20 @@ def production_kernel_violations(
     framework: str,
     *,
     require_gluon: bool = False,
+    specify_dsl: bool = True,
     production_reviewer: ProductionReviewer | None = None,
 ) -> list[str]:
     """Share Legacy's fail-closed reviewer gate for raw and tree candidates."""
+    def validate_structure(path, selected_framework, *, require_gluon=False):
+        return production_structure_violations(
+            path,
+            selected_framework,
+            require_gluon=require_gluon,
+            specify_dsl=specify_dsl,
+        )
+
     return legacy_policy.production_kernel_violations(
         workspace, framework, require_gluon=require_gluon,
         production_reviewer=production_reviewer,
-        structure_validator=production_structure_violations,
+        structure_validator=validate_structure,
     )

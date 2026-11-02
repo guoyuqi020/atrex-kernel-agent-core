@@ -1,14 +1,3 @@
-## Prior iteration state and engineering loop
+## Experiment records
 
-At Episode start, call `list-experiments`, then load the Experiments relevant to the current Kernel
-and likely bottleneck. Treat their analysis as interpretation and their cited Gateway Records as
-measurement authority. Direction recording is disabled: do not call Direction tools and omit
-`direction_id` from Experiment requests.
-
-Choose and implement the highest-value coherent change. After each decisive measurement, record an
-Experiment with `name`, a concrete question in `intent`, the relevant `gateway_record_ids`, and a
-bounded `interpretation`. Runtime derives source changes, Kernel identities, correctness, latency
-and failure facts from those records. Use `record-read` instead of copying measurement facts into
-prose. Preserve the current best while testing major redesigns with bounded probes. Do not stop
-merely because one candidate is promotable; continue until no remaining high-value step fits an
-explicitly configured active-time budget.
+Experiment tools are enabled; Direction tools are disabled. At the start, call `list-experiments` and load only entries relevant to the current Kernel or likely bottleneck. After each decisive measurement, call `record-experiment` with `name`, a concrete question in `intent`, the relevant `gateway_record_ids`, and a bounded `interpretation`; omit `direction_id`. Runtime derives source, Kernel, correctness, latency, and failure facts from the cited records, so use `record-read` instead of restating them.

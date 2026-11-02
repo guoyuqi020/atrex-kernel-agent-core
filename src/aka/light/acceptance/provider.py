@@ -1,5 +1,7 @@
 """Acceptance interprets evidence; it neither authorizes HTTP nor seals Git."""
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 from collections.abc import Callable
 import hashlib
@@ -77,7 +79,8 @@ class CandidateValidation:
     measure: Callable[[list[str], bytes, bool], dict]
     read_record: Callable[[str], dict]
     ensure_live: Callable[[], None]
-    supplemental: Callable[[bytes], str] | None = None
+    production_policy: Callable[[bytes], list[str]] | None = None
+    supplemental: Callable[[bytes, Callable[[], bool]], str] | None = None
     research_records: bool = False
     experiments_enabled: bool = False
 
@@ -87,7 +90,7 @@ class RecordedAcceptance:
         from aka.light.acceptance.recorded_verifier import RecordedABBAValidator
         return RecordedABBAValidator(**options)
 
-    def validate_candidate(self, context: CandidateValidation, source: bytes) -> dict:
+    def _validate_correctness(self, context: CandidateValidation, source: bytes) -> dict:
         """Reuse or execute the evaluator-specific mandatory correctness gate.
 
         Atrex-Bench uses its typed five-case gate. SOL-ExecBench executes the
@@ -179,21 +182,148 @@ class RecordedAcceptance:
             evidence.update(additional_seeds=CORRECTNESS_CASES - 1, correctness_cases=CORRECTNESS_CASES, evaluator="atrex_bench")
         else:
             evidence.update(additional_seeds=0, workloads=total, evaluator="sol_execbench")
-        validator = context.supplemental
-        if context.production:
-            if validator is None:
-                raise RuntimeStateError("Production numerical validator is not configured")
-            feedback = validator(source)
-            context.ensure_live()
-            if feedback:
-                from aka.light.workflow.constants import SUPPLEMENTAL_REPAIR_PREFIX
-                if feedback.startswith(SUPPLEMENTAL_REPAIR_PREFIX):
-                    raise AgentRequestError(
-                        "The candidate failed a measured supplemental numerical probe; report not accepted.",
-                        code="candidate_numerical_failed", next_action=feedback,
-                    )
-                raise RuntimeStateError(
-                    "Supplemental numerical validation is incomplete; report not accepted.",
-                    code="candidate_numerical_pending", next_action=feedback,
-                )
         return evidence
+
+    @staticmethod
+    def _validate_policy(context: CandidateValidation, source: bytes) -> dict:
+        policy = context.production_policy
+        if policy is None:
+            raise RuntimeStateError(
+                "Production policy validator is not configured",
+                code="candidate_production_review_unavailable",
+            )
+        violations = policy(source)
+        context.ensure_live()
+        if violations:
+            raise AgentRequestError(
+                "Independent Production Review rejected the submitted candidate.",
+                code="candidate_production_policy_failed",
+                violations=violations,
+                next_action=(
+                    "Repair the final Kernel source tree and runtime compute path using the "
+                    "reported Production Review violations. Development probes may continue "
+                    "to use other DSLs, PyTorch/ATen, prebuilt operators, third-party libraries "
+                    "or external implementations, but remove them from the final candidate. "
+                    "Measure the repaired candidate and resubmit episode-report."
+                ),
+            )
+        return {"status": "passed"}
+
+    @staticmethod
+    def _validate_numerical(
+        context: CandidateValidation,
+        source: bytes,
+        correctness_passed: Callable[[], bool],
+    ) -> dict:
+        validator = context.supplemental
+        if validator is None:
+            raise RuntimeStateError("Production numerical validator is not configured")
+        feedback = validator(source, correctness_passed)
+        context.ensure_live()
+        if feedback:
+            from aka.light.workflow.constants import SUPPLEMENTAL_REPAIR_PREFIX
+            if feedback.startswith(SUPPLEMENTAL_REPAIR_PREFIX):
+                raise AgentRequestError(
+                    "The candidate failed a measured supplemental numerical probe; report not accepted.",
+                    code="candidate_numerical_failed", next_action=feedback,
+                )
+            raise RuntimeStateError(
+                "Supplemental numerical validation is incomplete; report not accepted.",
+                code="candidate_numerical_pending", next_action=feedback,
+            )
+        return {"status": "passed"}
+
+    @staticmethod
+    def _failure_check(error: Exception) -> tuple[dict, AgentRequestError | RuntimeStateError]:
+        if isinstance(error, (AgentRequestError, RuntimeStateError)):
+            wrapped = error
+        else:
+            wrapped = RuntimeStateError(
+                "Candidate acceptance check failed unexpectedly: "
+                f"{type(error).__name__}: {error}",
+                code="candidate_acceptance_unavailable",
+            )
+        response = wrapped.response
+        return {
+            "status": "failed",
+            "repairable": response.get("repairable", False),
+            "error": response["error"],
+        }, wrapped
+
+    def validate_candidate(self, context: CandidateValidation, source: bytes) -> dict:
+        """Run independent final-candidate gates concurrently and report them together."""
+        with ThreadPoolExecutor(
+            max_workers=3 if context.production else 1,
+            thread_name_prefix="candidate-acceptance",
+        ) as executor:
+            correctness_future = executor.submit(
+                copy_context().run,
+                self._validate_correctness,
+                context,
+                source,
+            )
+            futures = {"correctness": correctness_future}
+            if context.production:
+                futures["production_review"] = executor.submit(
+                    copy_context().run,
+                    self._validate_policy,
+                    context,
+                    source,
+                )
+
+                def correctness_passed() -> bool:
+                    try:
+                        correctness_future.result()
+                    except Exception:
+                        return False
+                    return True
+
+                futures["numerical"] = executor.submit(
+                    copy_context().run,
+                    self._validate_numerical,
+                    context,
+                    source,
+                    correctness_passed,
+                )
+
+            checks: dict[str, dict] = {}
+            failures: list[AgentRequestError | RuntimeStateError] = []
+            correctness_evidence: dict = {}
+            for name, future in futures.items():
+                try:
+                    value = future.result()
+                except Exception as error:
+                    checks[name], wrapped = self._failure_check(error)
+                    failures.append(wrapped)
+                else:
+                    checks[name] = {"status": "passed", "evidence": value}
+                    if name == "correctness":
+                        correctness_evidence = value
+
+        if failures:
+            if len(failures) == 1:
+                failure = failures[0]
+                failure.response["checks"] = checks
+                failure.response["error"]["checks"] = checks
+                raise failure
+            repairable = all(
+                failure.response.get("repairable", False) for failure in failures
+            )
+            actions = list(dict.fromkeys(
+                str(failure.response["error"].get("next_action", "")).strip()
+                for failure in failures
+                if str(failure.response["error"].get("next_action", "")).strip()
+            ))
+            raise AgentRequestError(
+                "Multiple final-candidate acceptance checks failed.",
+                code="candidate_acceptance_failed",
+                repairable=repairable,
+                failed_checks=[
+                    name for name, result in checks.items()
+                    if result["status"] == "failed"
+                ],
+                checks=checks,
+                next_action=" ".join(actions),
+            )
+
+        return {**correctness_evidence, "checks": checks}

@@ -1,9 +1,3 @@
-## Required Triton-to-Gluon conversion
+## Required conversion
 
-Use this Episode for conversion, preserving algorithm, tiling, signatures, and evaluator behavior.
-Do not submit another Triton kernel. Extract TTGIR before writing Gluon and derive layouts from the
-real Kernel; never fabricate them. Repair compile/correctness/parity defects before handoff.
-The candidate must pass correctness and be plausibly within {{CONVERSION_TOLERANCE}} of incumbent
-latency; the Supervisor independently enforces parity.
-
-{{CONVERSION_RESEARCH}}
+Convert the current Triton Kernel to Gluon while preserving its algorithm, tiling, signatures, and evaluator behavior. Do not submit another Triton Kernel. Extract TTGIR and derive layouts from the actual Kernel; do not invent architecture-specific layouts. Repair compile, correctness, and parity defects before handoff. The candidate must be correct and plausibly within {{CONVERSION_TOLERANCE}} of incumbent latency; the Supervisor independently enforces parity. Use the relevant compiler or knowledge Skill only when a concrete missing fact blocks the next edit.

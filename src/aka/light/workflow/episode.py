@@ -69,7 +69,9 @@ def _session_terminal_status(result: Any) -> str:
 def _render(template: str, values: dict[str, object]) -> str:
     for key, value in values.items():
         template = template.replace("{{" + key + "}}", str(value))
-    return template
+    while "\n\n\n" in template:
+        template = template.replace("\n\n\n", "\n\n")
+    return template.strip() + "\n"
 
 
 def _iso_timestamp(value: str) -> float:
@@ -561,23 +563,21 @@ class LongHorizonCampaign:
         research_records = self.base_campaign.research_records
         research_modules = set(self.base_campaign.research_modules)
         if research_modules == {"directions", "experiments"}:
-            workflow_fragment, journal_fragment = "episode_research.md", "runtime_journal.md"
+            module_fragment, handoff_fragment = "episode_research.md", "runtime_journal.md"
         elif research_modules == {"directions"}:
-            workflow_fragment, journal_fragment = "episode_directions.md", "runtime_directions.md"
+            module_fragment, handoff_fragment = "episode_directions.md", "runtime_directions.md"
         elif research_modules == {"experiments"}:
-            workflow_fragment, journal_fragment = "episode_experiments.md", "runtime_experiments.md"
+            module_fragment, handoff_fragment = "episode_experiments.md", "runtime_experiments.md"
         else:
-            workflow_fragment, journal_fragment = "episode_unrecorded.md", "runtime_report.md"
+            module_fragment, handoff_fragment = "episode_unrecorded.md", "runtime_report.md"
         fragments = {
-            "RESEARCH_WORKFLOW": workflow_fragment,
-            "RUNTIME_JOURNAL_CONTRACT": journal_fragment,
-            "WIKI_DIRECTIVE": "episode_wiki.md" if self.base_campaign.tool_runtime.wiki else "",
+            "RESEARCH_MODULE_RULES": module_fragment,
+            "HANDOFF_CONTRACT": handoff_fragment,
             "CONVERSION_DIRECTIVE": "",
             "PPU_DIRECTIVE": "",
         }
         if conversion_pending:
             fragments["CONVERSION_DIRECTIVE"] = "episode_conversion.md"
-            fragments["WIKI_DIRECTIVE"] = ""  # Conversion has its own initial query.
         if (
             hardware_vendor(self.base_campaign.platform, self.base_campaign.arch) == "ppu"
         ):
@@ -585,17 +585,19 @@ class LongHorizonCampaign:
         template = PROMPT_PATH.read_text(encoding="utf-8")
         coordinate = getattr(self.base_campaign, "search_coordinate", None)
         if coordinate is not None:
-            role = {
-                1: "T1 role: bounded exploitation around the global or lineage best.",
-                2: (
-                    "T2 role: continue the highest-priority major redesign until its milestone, "
-                    "stop condition, blocker, or completion; then select the next major redesign."
-                ),
-                3: "T3 role: capability probes, profiling, and independent exploration.",
-            }.get(
-                coordinate["trajectory"],
-                "Additional-island role: preserve an independent line of evidence-backed exploration.",
-            )
+            role = ""
+            if coordinate.get("role_specialization", True):
+                role = " " + {
+                    1: "T1 role: bounded exploitation around the global or lineage best.",
+                    2: (
+                        "T2 role: continue the highest-priority major redesign until its milestone, "
+                        "stop condition, blocker, or completion; then select the next major redesign."
+                    ),
+                    3: "T3 role: capability probes, profiling, and independent exploration.",
+                }.get(
+                    coordinate["trajectory"],
+                    "Additional-island role: preserve an independent line of evidence-backed exploration.",
+                )
             template = (
                 f"Search location: Epoch {coordinate['epoch']}, Trajectory {coordinate['trajectory']}, "
                 f"Episode {coordinate['episode']}. One Episode is one serial optimization step. "
@@ -603,23 +605,29 @@ class LongHorizonCampaign:
                 "lineage best, active Direction and major-redesign WIP across Epochs. The Supervisor "
                 "updates global-best metadata and imports sealed peer refs at Epoch boundaries but "
                 "does not overwrite this trajectory. Adopt peer work explicitly with Git and Runtime "
-                f"evidence, then validate it normally. {role}\n\n"
+                f"evidence, then validate it normally.{role}\n\n"
                 + template
             )
         # Insert fragments before substituting values so nested task placeholders resolve too.
-        overrides = {"WIKI_DIRECTIVE": self.base_campaign.wiki_prompt("episode")} if fragments["WIKI_DIRECTIVE"] else {}
         for marker, name in fragments.items():
-            text = overrides.get(marker)
-            if text is None:
-                text = (PROMPTS_DIR / name).read_text(encoding="utf-8").strip() if name else ""
+            text = (PROMPTS_DIR / name).read_text(encoding="utf-8").strip() if name else ""
             template = template.replace("{{" + marker + "}}", text)
-        template = template.replace("{{CONVERSION_RESEARCH}}", (
-            (self.base_campaign.wiki_prompt("conversion")
-             or (PROMPTS_DIR / "conversion_research.md").read_text(encoding="utf-8").strip())
-            if self.base_campaign.tool_runtime.wiki else
-            "Wiki is disabled. Use supplied public conversion knowledge and compiler evidence; "
-            "do not guess architecture-specific layouts. Report a blocker if necessary information is unavailable."
-        ))
+        research_board_section = ""
+        if research_records or coordinate is not None:
+            research_board_section = (
+                "## Research Board\n\n"
+                "This is a compact read-only projection of durable Runtime state. Refresh it with "
+                "`python3 tools/sandbox.py --kind research-board` when a decision depends on newly "
+                "recorded or peer state.\n\n"
+                "```json\n"
+                + json.dumps(
+                    self.base_campaign.research_board(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                )
+                + "\n```"
+            )
         return _render(
             template,
             {
@@ -637,43 +645,28 @@ class LongHorizonCampaign:
                 "VERSION": version,
                 "WORKSPACE": agent_workspace or worktree.path,
                 "ACCEPTANCE_REQUEST": acceptance_request,
-                "REPORT_SELECTION": (
-                    "the selected Experiment cites a passing full Evaluate for the exact candidate."
-                    if "experiments" in research_modules else
-                    "gateway_record_ids directly cite a passing full Evaluate for the exact candidate."
-                ),
-                "OPERATOR": self.base_campaign.name,
-                "PLATFORM": self.base_campaign.platform,
                 "ARCH": self.base_campaign.arch or "<authoritative runtime architecture>",
-                "FRAMEWORK": self.base_campaign.framework,
+                "DSL_CONTEXT": self.base_campaign.dsl_context,
                 "NOTES": self.base_campaign.notes,
-                "MODE_POLICY": directives["mode_policy"],
-                "EVALUATOR": directives["evaluator"],
-                "HARDWARE": directives["hardware"],
-                "SANDBOX": directives["sandbox"],
-                "AGENT_RUNTIME": directives["agent_runtime"],
                 "PLUGINS": directives["plugins"],
+                "RUNTIME_WAIT_POLICY": (
+                    "- Runtime requests: Agent and subagent execution is suspended while an "
+                    "authenticated request is pending; this wait is excluded from the configured "
+                    "active-time budget."
+                    if self.base_campaign.tool_runtime.pause_agent_during_requests
+                    else "- Runtime requests: suspension is disabled, so request wait counts toward "
+                    "the configured active-time budget; keep the invocation in the foreground and "
+                    "wait for it to finish."
+                ),
                 "RESUME_DIRECTIVE": (
-                    "This episode is resuming after a supervisor restart. Keep and reuse the "
-                    "existing workspace, scratch files, and source "
-                    "edits. Inspect them before acting; do not discard them. Use the "
-                    + ("enabled Runtime Journal list/load tools" if research_records else "record-read and kernel-records tools") +
-                    " to inspect durable evidence, then continue the "
-                    "in-progress work or repair and resubmit its terminal report."
+                    "Resume the unfinished Session state already present in this workspace. Inspect "
+                    "and preserve its source edits, scratch files, and durable evidence before "
+                    "continuing or repairing its terminal handoff."
                     if resumed
-                    else "This is a new Episode worktree. `scratch/` starts empty; earlier "
-                    "scratch files are not inherited. Reusable custom `skills/` and `tools/` "
-                    "follow the inheritance policy in `WORKSPACE.md`; use the files already present."
+                    else ""
                 ),
                 "CONVERSION_TOLERANCE": f"{main_adapter.CONVERT_PERF_TOL:.0%}",
-                "RESEARCH_BOARD": (
-                    json.dumps(
-                        self.base_campaign.research_board(),
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        indent=2,
-                    )
-                ),
+                "RESEARCH_BOARD_SECTION": research_board_section,
             },
         )
 
@@ -1944,6 +1937,10 @@ class LongHorizonCampaign:
             agent_workspace = self.base_campaign.register_runtime_episode(
                 worktree.path, episode=episode, memory_version=memory_version,
                 base_commit=base_commit, branch=worktree.branch,
+                require_gluon=(
+                    conversion_pending
+                    or main_adapter.candidate_is_gluon(self.workspace)
+                ),
             )
             prompt = self._prompt(
                 episode=episode,
