@@ -34,6 +34,7 @@ class RecordedABBAValidator(GatewayABBAValidator):
             "--kind", "run", "--mode", "full", "--no-sync",
             "--baseline-path", self.BASELINE_PATH,
             "--comparison-repeats", str(self.repeats),
+            "--comparison-run-timeout", str(self.per_run_timeout),
             "--shape-batch-size", str(self.shape_batch_size),
         ]
 
@@ -47,7 +48,7 @@ class RecordedABBAValidator(GatewayABBAValidator):
 
 ABBA is optional during exploration. To make a comparison eligible for acceptance reuse,
 leave the complete candidate in place and run these exact commands
-(`kernel-read` creates a complete baseline source-tree directory):
+(for a source-tree task, `kernel-read` creates a baseline directory, not a Python file):
 
 ```bash
 {read}
@@ -56,16 +57,14 @@ leave the complete candidate in place and run these exact commands
 
 The first command copies this Episode's committed incumbent, not the current draft; it is
 safe to use after edits or resume. Do not modify `{self.BASELINE_PATH}` before the comparison.
-The second command matches the Supervisor's configured ABBA repeats and Shape batch size.
-Runtime injects the configured step timeout and applies the same five-case correctness
-policy used by ordinary Evaluate and the candidate gate. Do not add
+The second command matches the Supervisor's configured ABBA repeats, per-run timeout and
+Shape batch size. The separate candidate correctness gate owns its
+Runtime-defined coverage. Do not add
 command/input/Shape/seed/benchmark/dependency overrides.
 The Runtime supplies the evaluator, full workload and target; private inputs stay private.
 
 Supervisor measurement repetitions: **{measurement_repetitions}** per request (one result if 1;
 per-Shape median if 3). The enclosing allocation is derived from the per-run limits above.
-For multi-Shape native Eval shards, only the sequential performance phase is
-extended by the actual Shape count; fixed validation work is budgeted once.
 These are Runtime-owned settings, already applied to this request; do not loop the command
 or set environment variables to reproduce them.
 
@@ -79,11 +78,10 @@ zero-submission guarantee. ABBA does not replace the standard full Evaluate requ
     def verify(self, workspace: Path, *, base_commit: str, candidate_commit: str,
                changed_paths: list[str]) -> VerificationResult:
         try:
-            from aka.light.workspace.sources import from_git, unpack, allowed_changes, install
+            from aka.light.workspace.sources import from_git, Artifact, install
             candidate = from_git(workspace, candidate_commit)
             baseline = from_git(workspace, base_commit)
-            policy, _ = unpack(baseline)
-            if (not allowed_changes(changed_paths, policy) if policy else changed_paths != ["kernel.py"]):
+            if not Artifact(baseline).allows_changes(changed_paths):
                 raise ValueError("Recorded acceptance requires a kernel-only candidate")
             warn_kernel_mismatch(workspace, candidate)
             with tempfile.TemporaryDirectory(prefix="aka-acceptance-") as temporary:
@@ -95,15 +93,8 @@ zero-submission guarantee. ABBA does not replace the standard full Evaluate requ
                         continue
                     publish(staged, name, content)
                 install(staged, candidate)
-                if policy:
-                    install(staged / self.BASELINE_PATH, baseline)
-                else:
-                    publish(staged, self.BASELINE_PATH, baseline)
-                response = self.execute(
-                    staged,
-                    self.request_argv(),
-                    terminal_validation=True,
-                )
+                Artifact(baseline).export(staged / self.BASELINE_PATH)
+                response = self.execute(staged, self.request_argv())
             result = result_from_response(response, "same_allocation_abba")
             if not result or not result.get("gateway_record_id"):
                 raise ValueError("No authoritative ABBA record: " + response.get("stderr", "")[-1000:])

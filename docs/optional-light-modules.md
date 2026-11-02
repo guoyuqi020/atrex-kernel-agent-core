@@ -40,13 +40,14 @@ overrides are unchanged; Core resolves initialization order from dependencies,
 not JSON row order.
 
 Agent shell tools retain the launching Python environment, including symlink-based virtual
-environments. Every launched Light Agent runs the shared process watcher, including
-`observed`, `sandbox`, `light` and `light-sandbox`, but managed Campaigns disable its
-development-time dependency classifier in both Production and Leaderboard. Dependency,
-framework and compute provenance are enforced on the sealed final candidate instead.
-The watcher continues to use Legacy's polling and SIGTERM/SIGKILL policy for shared-Gateway
-mutations and environment outages. Linux procfs provides process inspection; on hosts without
-procfs the watcher cannot inspect local commands.
+environments. Every launched Light Agent runs Legacy's dependency-policy watchdog,
+including `observed`, `sandbox`, `light` and `light-sandbox`. Activation is independent
+of `production`/`leaderboard`, capture, Bubblewrap and outage-marker configuration;
+this is an execution-boundary rule, not the production candidate acceptance gate.
+The shared watcher uses Legacy's polling and SIGTERM/SIGKILL policy for confirmed
+local installers, GPU/JIT execution or shared-Gateway mutations. Legacy's default
+classification and launch behavior are unchanged. Linux procfs provides process
+inspection; on hosts without procfs this watcher cannot inspect local commands.
 Bubblewrap mounts, protected assets, HTTP authorization, active-time limits and
 cancellation remain separate. The outage-marker path still returns environment
 tempfail (75), while dependency violations carry an explicit policy diagnostic.
@@ -60,26 +61,20 @@ require the inspected process's own working directory; the Supervisor's director
 is never a substitute. A missing/inaccessible cwd or client read is inconclusive,
 not an unregistered-client violation. Only a successful content comparison can
 reject a workspace copy of the HTTP client. Verified client arguments are remote
-request data, not local install/build/import commands. Managed Campaigns allow those
-development commands, while standalone fail-closed callers may still classify them.
-Missing evidence is not a policy
+request data, not local install/build/import commands; separate local shell
+commands are still classified individually. Missing evidence is not a policy
 violation or a grant of Runtime authority; the authenticated Runtime remains the
 authority boundary. Verified remote requests do not trigger local-policy termination.
 
 ### Shared production policy
 
-Light reuses Legacy's production prompt rules and fail-closed review policy, with
-whole-tree structural checks for managed Kernels,
+Light reuses Legacy's production prompt rules, single-file structural checks,
 fail-closed reviewer gate, reviewer prompt and verdict validation. Production
 still requires self-authored computation in the selected framework: a prebuilt
 FlashInfer operator is not an acceptable replacement, while toolchain/header/ABI/
 launch support is judged by actual use rather than package name. A missing,
-invalid or rejecting policy verdict prevents candidate acceptance. Managed Light
-runs this review inside `episode-report` acceptance against the exact sealed candidate,
-before Journal finalization and the Supervisor-owned candidate commit. Rejections
-return validated check/dependency reasons to the current Agent for repair and
-resubmission; the post-handoff gate remains as a cached consistency check. Legacy's
-default prompt and scoring behavior are otherwise unchanged.
+invalid or rejecting policy verdict prevents candidate acceptance. Legacy's
+default prompt, gate and scoring behavior are unchanged.
 
 Light adapts only the workflow-facing instructions (Supervisor report submission
 instead of Agent commits; returned numerical feedback instead of a private file)
@@ -106,7 +101,7 @@ Build and install the three packages from a matching checkout:
 ```sh
 python3 -m pip install build
 python3 tools/build_distributions.py --output /tmp/aka-wheels atrex-aka-framework atrex-aka-legacy atrex-aka-light
-python3 -m pip install --find-links /tmp/aka-wheels atrex-aka-light
+python3 -m pip install --force-reinstall --no-index --find-links /tmp/aka-wheels atrex-aka-light
 aka optimize --repo-root /path/to/aka --profile light -- --op-dir /path/to/problem --platform L20N --framework Cuda
 ```
 
@@ -262,9 +257,8 @@ an `provider_error` receipt state; they cannot impersonate `completed` or `reuse
 Journal attribution supports the existing `wiki_usage` rows with `wiki_id`
 (`store::record`) as well as versioned `cite` (`wiki@version relative-path:start-end`).
 Copy the provider's emitted query ID verbatim; IDs are bounded opaque tokens, not
-restricted to the local query prefix. Each row retains `disposition` and may carry
-both a record ID and a citation. The Experiment's `change`, `analysis`, and Gateway
-Records already describe application and measured evidence. `wiki_query_ids` and
+restricted to the local query prefix. Each row retains `disposition`, `use` and
+`evidence`, and may carry both a record ID and a citation. `wiki_query_ids` and
 `wiki_usage_status` keep the same use/no-use semantics. New Light Experiment requests
 with invalid attribution fail before writing and return repairable field issues and
 the complete request schema; resubmit corrected fields with the same Gateway Record
@@ -281,27 +275,31 @@ Provider configuration uses the existing Core composition patch format. For exam
   "patches": [
     {"id": "agent", "config": {"sandbox": "bwrap", "capture": false, "bwrap_executable": "bwrap", "read_only_paths": []}},
     {"id": "tool_runtime", "config": {"measurement_repetitions": 3, "wiki": false, "queue_timeout": 60, "request_timeout": 1800}},
-    {"id": "workflow", "config": {"numerical_validation": false, "goal_episodes": false, "generate_memory": false}}
+    {"id": "workflow", "config": {"startup": true, "numerical_validation": false, "goal_episodes": false, "generate_memory": false}}
   ]
 }
 ```
 
 Patches replace a module's whole configuration; omitted fields receive that provider's defaults, not the previously selected profile's values. The `tool_runtime` and light Workflow options apply only to light compositions.
 
+Keep `"startup": true` in Workflow patches passed to `aka optimize`: the launch profile
+sets this field, while the standalone provider defaults it to false. Omitting it removes
+the required `startup` service and prevents the CLI from launching the campaign.
+
 | Provider | Options and defaults |
 | --- | --- |
 | `aka.light.agent.plugin` | `sandbox: none`, `capture: false`, `bwrap_executable: bwrap`, `read_only_paths: []`, `proc_mode: private`, `timeout_seconds: 28800` |
 | `aka.light.runtime.plugin` | `measurement_repetitions: 1` (or `3`), `pause_agent_during_requests: true`, `wiki: true`, `queue_timeout: 60`; omitted `request_timeout` preserves the controller's queue/execution deadline policy; `wiki_options` independently controls Wiki execution (above) |
 | `aka.light.wiki.plugin` | `root: ""` (the selected checkout's `gpu-wiki`); see [Wiki providers](#wiki-providers) |
-| `aka.light.workflow.plugin` | `numerical_validation: true`, `goal_episodes: false`, `generate_memory: false`, `output_limit_recovery_retries: 2`; optional `episode_timeout_seconds`, `search` and `source_tree` |
+| `aka.light.workflow.plugin` | `startup: false` in the standalone provider, set to `true` by CLI profiles; `numerical_validation: false`, `goal_episodes: false`, `generate_memory: false`, `output_limit_recovery_retries: 2`, `episode_timeout_seconds: 14400`; optional `search` and `source_tree` |
 | `aka.light.workspace.plugin` | `inherit_state: true`; carry custom Skills/tools across Episodes independently of Kernel promotion |
 | `aka.light.execution.plugin` | No options; endpoint/timeouts remain prepared Execution request values |
 | `aka.light.evaluation.plugin` | No options; constructs measurement plans and projects/aggregates results |
 | `aka.light.experiment.plugin` | No options; injects the selected Evaluation and opens Campaign-scoped stores |
 | `aka.light.acceptance.plugin` | No options; preserves the existing candidate correctness and ABBA policies |
-| `aka.light.workflow.journal_plugin` | `research_records: true`; jointly controls Direction and research Experiment writes |
+| `aka.light.workflow.journal_plugin` | `research_records: false`; jointly controls Direction and research Experiment writes |
 
-Capture can be switched without enabling isolation. Wiki disabling removes its mounted Skill and required-query prompt fragments as well as rejecting the endpoint. Disabling supplemental numerical planning does not disable ordinary evaluator correctness, six-case Atrex-Bench validation, full SOL workload coverage, production constraints, or ABBA acceptance. Three-repetition aggregation is opt-in; untimed correctness checks are not repeated three times.
+Capture can be switched without enabling isolation. Wiki disabling removes its mounted Skill and required-query prompt fragments as well as rejecting the endpoint. Supplemental numerical planning is disabled by default; set the Workflow option `numerical_validation: true` to enable it. Disabling supplemental numerical planning does not disable ordinary evaluator correctness, six-case Atrex-Bench validation, full SOL workload coverage, production constraints, or ABBA acceptance. Three-repetition aggregation is opt-in; untimed correctness checks are not repeated three times.
 
 ### Projected-proc compiler preflight
 
@@ -315,34 +313,27 @@ installs system packages nor launches an Agent/GPU job, and it does not certify
 Bubblewrap namespace permissions. Packages installed in a separate CI container
 are not evidence that this execution container has a working compiler.
 
-Sandbox deployments should use `tools/install_light_sandbox.sh`. Its
-`deployment.json` must contain non-empty `agate_client` and
-`atrex_bench_version` strings. The installer requires and installs the matching
-Agate SDK wheel from `deploy/wheels`, sets the remote evaluator pin, and passes
-both values to this preflight as exact version requirements. A missing wheel or
-pin, a different installed SDK version, or a version mismatch aborts installation
-before any campaign starts. This keeps the SDK available inside the minimal
-Bubblewrap filesystem without relying on a host-only `PYTHONPATH` directory.
-
 ### Agent active-time limit and blocking Runtime calls
 
-Optimization Episodes have **no active-time limit by default**. To impose one, configure
-`workflow.config.episode_timeout_seconds` with a finite positive number of seconds, for example:
+Light defaults to **14,400 seconds (4 hours) of Agent active time per optimization Episode**.
+The preceding Framework Bootstrap session has its own 28,800-second (8-hour)
+wall-clock budget. Configure `workflow.config.episode_timeout_seconds` with a
+finite positive number of seconds, for example:
 
 ```json
-{"api_version":1,"patches":[{"id":"workflow","config":{"episode_timeout_seconds":14400}}]}
+{"api_version":1,"patches":[{"id":"workflow","config":{"startup":true,"episode_timeout_seconds":14400}}]}
 ```
 
-Report-repair continuations and same-session output-limit continuations share that
-Episode budget when configured; they do not reset it. The budget is in memory,
-not a persisted allowance across controller restarts. Omitting the field disables the
-Episode-level limit. Separately,
+Report-repair continuations and fresh output-limit recovery sessions share that
+Episode budget within the running controller; they do not reset it. The budget
+is in memory, not a persisted allowance across controller restarts. Separately,
 `agent.config.timeout_seconds` sets the default per-invocation active-time ceiling
 (28,800 seconds); explicit auxiliary-session timeouts, including Framework
 Bootstrap, remain in force. An
-invocation uses the smaller of its ceiling and the remaining Episode budget when one is configured.
-To exceed the Agent provider's 8-hour per-invocation ceiling, increase the Agent option; this is
-independent of the optional Episode-wide limit.
+invocation uses the smaller of its ceiling and the remaining Episode budget. To
+allow an optimization invocation longer than 4 hours, increase the Workflow
+Episode budget; to exceed the Agent provider's 8-hour ceiling, increase both
+options.
 
 After receiving a complete authenticated GPU, Wiki, Journal or plugin request,
 the independent Supervisor HTTP handler uses `SIGSTOP` to suspend only the
@@ -368,38 +359,28 @@ active-time budget when running managed Light Episodes.
 
 ### Output-limit recovery and response accounting
 
-Light installs an invocation-local Claude `Stop` hook for ordinary root responses
-whose transcript ends with `stop_reason=max_tokens`. The hook injects concise
-continuation guidance through `additionalContext`, so Claude continues inside the
-**same CLI process, provider session, Episode and draft** without waiting for the
-outer invocation to return. Each transcript event is claimed once, and the hook
-uses the configured recovery allowance. It does not run for subagents or infer a
-limit from rendered text. Because some Claude versions can fire `Stop` just before
-flushing the last JSONL record, the hook briefly retries the bounded transcript
-read and otherwise fails open.
+Light ports Runtime's Claude `max_output_tokens` recovery into the Episode
+Workflow. A matching root-session API-error assistant event followed by a final
+error result can start a **new provider session in the same Episode/draft**.
+Child errors, quoted text, a `max_tokens` stop reason alone, and incomplete streams
+cannot trigger it. A valid terminal Report still wins before recovery. Other exit
+codes do not enter this output-limit recovery path.
 
-True terminal `max_output_tokens` API failures fire `StopFailure`, whose output
-Claude ignores. Light therefore retains its outer recovery for a matching
-root-session API-error assistant event followed by a final error result; that path
-resumes the same provider session after the CLI returns. A valid terminal Report
-still wins before recovery. Other exit codes do not enter either output-limit path.
-
-`output_limit_recovery_retries` defaults to **5**, accepts 0–10, and **0 disables**
+`output_limit_recovery_retries` defaults to **2**, accepts 0–10, and **0 disables**
 it. Its allowance is separate from ordinary same-session handoff repairs, including
-Goal Episodes. Continuation retains the native conversation, candidate source tree,
-`scratch/`, `skills/` and `tools/`; it does not rerun Bootstrap or increase the
-provider output limit. It does not reconstruct context from saved files or tool
-receipts. The added prompt states that the previous response exceeded the 32K
-output-token limit and asks the Agent to make one small change or probe at a time,
-record multiple ideas in a scratch checklist, and implement them sequentially.
+Goal Episodes. Recovery retains the candidate source tree, `scratch/`, `skills/`
+and `tools/`; it does not rerun Bootstrap or increase the provider output limit.
+The bounded continuation prompt includes saved filenames and recent tool receipts,
+not the previous thinking transcript. Unknown GPU outcomes must be reconciled
+before resubmission, and disabled Journal tools remain disabled.
 
 All invocations contribute to the same Episode's Token total and usage receipt.
 When a remaining campaign Token budget is supplied, it is checked before starting
 another invocation; an in-flight invocation can still cross that limit. This does
-not change the pooled-search scheduling policy. `attempt.json` records `output_limit_recoveries`;
+not change the pooled-search scheduling policy. The active-time budget above is
+shared by all these invocations. `attempt.json` records `output_limit_recoveries`;
 invocation telemetry records the provider session ID, purpose, failure kind and
-provider error code. A configured active-time limit is shared by all invocations; without one,
-only the provider invocation ceiling and other explicit budgets apply.
+provider error code. Exhaustion retains a specific `max_output_tokens` diagnosis.
 
 Claude billing totals still use **`result.usage`**, not `modelUsage` or an added
 sum of child transcripts. With capture enabled, native final response counters
@@ -425,13 +406,12 @@ An Agate call is not an Episode. Enable pooled search with a non-empty Workflow 
 {
   "api_version": 1,
   "patches": [{"id": "workflow", "config": {
+    "startup": true,
     "search": {
       "epochs": 10,
       "trajectories": 2,
       "episodes_per_trajectory": 2,
-      "max_parallel_episodes": 2,
-      "synchronization": "synchronous",
-      "role_specialization": false
+      "max_parallel_episodes": 2
     }
   }}]
 }
@@ -443,25 +423,6 @@ The concurrency limit bounds whole Episodes, not each Episode's GPU Shape batche
 An omitted or empty `search` retains the existing serial Workflow and defaults.
 Pooled search currently requires the native Atrex-Bench Eval/ABBA route; SOL/SSH
 configurations fail before Bootstrap rather than running unverifiable search Episodes.
-
-`synchronization` controls only the cross-trajectory barrier. Its default is
-`"synchronous"`, which preserves the strict Epoch behavior: all scheduled Episodes in
-the Epoch must become terminal before evidence is sealed and the next Epoch starts.
-`"asynchronous"` keeps each trajectory serial but removes that global admission barrier.
-A trajectory that finishes may immediately start its next Episode; each terminal Episode
-creates a cumulative immutable publication of all terminal trajectory evidence available
-at that point. Directions, Experiments, Gateway Records, Kernel source and filtered Git
-history from that publication become visible to peers, while drafts, live adaptive state
-and Conversations remain private. A running peer is never treated as terminal evidence.
-The asynchronous scheduler uses round-robin admission so a fast trajectory cannot starve
-an unstarted peer when `max_parallel_episodes < trajectories`.
-
-`role_specialization` controls only the role text injected into each trajectory's Episode Prompt.
-It defaults to `false`, so every trajectory receives the same general island-search instruction.
-Set it to `true` to inject the T1 exploitation, T2 major-redesign and T3 probing roles. This does
-not change scheduling, evidence sharing, lineage isolation, Git history or Session persistence.
-Checkpoints created before this switch existed retain their historical role-specialized behavior
-and must be resumed with `role_specialization: true`.
 
 ```mermaid
 flowchart LR
@@ -482,17 +443,11 @@ winners into an unmeasured Kernel. No winner is broadcast until every scheduled 
 has a durable terminal outcome. The Campaign workspace exposes the last completed Epoch's
 winner; a partial Epoch never replaces it.
 
-Each trajectory keeps its own Skills/tools inheritance, optional memory, Conversation history
-and recovery state. At a complete Epoch barrier, finalized Directions, Experiments, Gateway
-Records and every referenced Kernel source tree become read-only evidence for the other
-trajectories. Existing list/load/record-read/kernel-read tools expose that evidence on demand;
-origin coordinates remain private audit metadata. Shared records never populate another
-trajectory's task index, so measurement deduplication and physical-job recovery remain local.
-Conversations, tool-call history, drafts and live adaptive state are not shared. An
-imported Direction is immutable; continuing it requires a new local derived Direction, and
-an imported Experiment remains historical evidence rather than the current Episode's selected
-Experiment. The Runtime validates every Experiment-to-Record-to-Kernel reference before
-publishing the next Epoch.
+Each trajectory keeps its own Skills/tools inheritance, optional memory, Journal,
+Conversation history, measurement store and recovery state. Only Kernel bytes and their
+verified performance facts are broadcast; Skills/tools and research records are not merged.
+Measurement deduplication continues across Episodes **within that trajectory**. There is no
+cross-trajectory measurement deduplication/history sharing in this implementation. An
 Episode's full scheduling identity is `(Epoch, Trajectory, trajectory-local Episode)`;
 local Episode numbers alone are not Campaign-global identifiers. Kernel/Gateway/Journal
 IDs retain their existing uniqueness contracts. Agent evolution, competing Agent Branches,
@@ -502,12 +457,9 @@ Search budgets are explicit: `epochs × trajectories × episodes_per_trajectory`
 the serial `--max-iters` version budget. `--token-budget` is shared across trajectory Episode
 usage and stops new admission; already-running Episodes finish, so a parallel batch can
 overshoot it. It excludes Bootstrap/auxiliary usage as the existing Episode accounting does.
-In synchronous mode, `--max-stall` counts complete Epochs without a better retained Kernel.
-In asynchronous mode, it advances only when every trajectory has crossed the next common
-Epoch frontier, so a fast island cannot exhaust the stall limit alone. Target utilization is
-checked at the same mode-specific boundary. Both are disabled or altered by their existing
-goal-mode rules. Other Workflow switches keep their defaults; include them in the same
-whole-config patch when overriding them.
+`--max-stall` counts complete Epochs without a better retained Kernel (disabled for goal
+mode); target utilization is checked after a complete Epoch. Other Workflow switches keep
+their defaults; include them in the same whole-config patch when overriding them.
 
 The controller keeps `search/state.json`, per-Epoch summaries under `search/epochs/`,
 and private repositories under `search/trajectories/` beneath its existing private Campaign
@@ -517,12 +469,10 @@ sealed Git transaction. A coordinator lock prevents two controllers from schedul
 same search. Corrupt state, changed configuration or unrelated controller edits fail closed.
 An interrupt stops admission, revokes trajectory Runtime capabilities and cancels outage
 waits; active model turns keep their existing bounded process lifecycle before shutdown.
-Use a new workspace when switching between serial and pooled search, or between synchronous
-and asynchronous pooled search; neither checkpoints nor incomplete searches are silently
-migrated. Resume with the same composition/options. Checkpoints created before this switch
-existed are interpreted as synchronous for backward compatibility.
+Use a new workspace when switching between serial and pooled search; neither checkpoints
+nor incomplete searches are silently migrated. Resume with the same composition/options.
 
-Local validation covers search checks for scheduling/concurrency, shared budgets, Epoch
+Local validation covers 38 search checks: scheduling/concurrency, shared budgets, Epoch
 barriers, exact recovery, Git publication crash points and preservation of unrelated edits.
 A controlled subprocess harness also runs the real Episode engine, HTTP Report submission,
 Session capture and archival for two trajectories over two Epochs (four Episodes), checking
@@ -530,26 +480,19 @@ separate tool inheritance, scratch reset, historical Conversation visibility and
 without replay. No real model/GPU campaign or new Bubblewrap
 end-to-end run was performed for pooled search.
 
-### Unified and imported source-tree Kernels
+### Single-file and contracted source-tree Kernels
 
-Every fresh native Light task enters its optimization Episodes with one source-tree
-representation. The original one-file implementation becomes editable `kernel.py`, the required
-evaluator entry point. The Agent may keep the complete implementation there or add, modify, and
-remove files below `implementation/` and import them from `kernel.py`.
-The package marker `implementation/__init__.py` is always present and must remain; other
-implementation files are optional.
-The tree is created before V0 is committed or measured, so V0, Framework Baseline and every
-optimization Episode use exactly the same source identity. Native Kernel workspaces do not carry
-a source manifest: the directory layout is the contract.
-
-For a task that already has multiple files or needs a custom entry point, select the Workflow's
-optional imported source contract. Either
-snapshot a plain local directory (no Git required):
+The `candidate` module defaults to `source_tree`. Without import configuration,
+it freezes the initial implementation under editable `impl/model.py` and creates
+a fixed `kernel.py` adapter. Select `file_system=single_file` explicitly for the
+single-file layout or SOL/SSH. To import a package, configure the candidate module
+to snapshot a plain local directory (no Git required):
 
 ```json
 {
   "api_version": 1,
-  "patches": [{"id": "workflow", "config": {
+  "patches": [{"id": "candidate", "config": {
+    "file_system": "source_tree",
     "source_tree": {
       "manifest": "/absolute/path/to/task/source_manifest.json",
       "directory": "/absolute/path/to/source-directory"
@@ -561,29 +504,31 @@ snapshot a plain local directory (no Git required):
 Or use `"repository": "/absolute/path/to/git-checkout"` instead of `directory`
 to import an exact Git revision. These options are mutually exclusive.
 
-The import manifest selects the source snapshot and supplies the initial `kernel.py`:
+The manifest keeps Runtime's fixed-adapter and editable-root contract:
 
 ```json
 {
   "schema_version": 1,
   "name": "package-kernel",
-  "adapter": "kernel.py",
+  "adapter": "adapter.py",
   "source": {
     "name": "package",
     "archive_paths": ["LICENSE", "package"],
     "package_root": "."
-  }
+  },
+  "editable_roots": ["package/kernels"],
+  "runtime_requirements": []
 }
 ```
 
-`kernel.py` is resolved beside the manifest and copied as the initial editable
-root `kernel.py` entry point. Every selected source is installed below `implementation/`;
-the entry point must import it through that package. `source.archive_paths` selects files/directories relative
+`adapter.py` is resolved beside the manifest and copied unchanged as the fixed
+`kernel.py` entry point. `source.archive_paths` selects files/directories relative
 to the supplied directory or repository. In **directory mode**, the Supervisor
 captures the current working bytes, including uncommitted and untracked files in
 those paths; it does not run Git or modify the original directory. No
 `source.revision` is required. If an existing manifest contains one, it is not used
-in directory mode. Avoid concurrent edits
+in directory mode; the sealed contract records `source_revision: null` and a
+content-based `seed_digest`, not a misleading Git identity. Avoid concurrent edits
 while the initial snapshot is being captured; a file changing during its read is
 rejected.
 
@@ -591,54 +536,54 @@ In **repository mode**, add `"revision": "<full Git commit hash>"` under `source
 The Supervisor uses `git archive` at that revision, excluding uncommitted changes.
 Both modes save the complete initial snapshot atomically in the Supervisor-private
 `<scope>/initial-source/snapshot.json` **before** initializing/measuring V0. Failed
-Bootstrap retries reuse this snapshot even if the original directory, entry point or
+Bootstrap retries reuse this snapshot even if the original directory, adapter or
 manifest has since changed or disappeared. A corrupt saved snapshot fails closed;
 it never silently recaptures a different seed. Use a new Campaign to select a new
 seed. The controller may still use its own Git repository for candidate sealing;
 the supplied source directory does not need to be one.
 
-There is no `.atrex_source.json`. Runtime derives the boundary directly from the fixed layout:
-root `kernel.py` and `implementation/__init__.py` must remain present, while other
-`implementation/**` paths allow additions, modifications and deletions. Source validation
+The imported seed and immutable-file hashes are pinned in the controller's
+`.atrex_source.json`; the Agent copy cannot change the authority.
+Only declared directories allow additions, modifications and deletions. Other
+imported files, including the adapter, must remain byte-identical. Source validation
 rejects symlinks, special/binary files, new build artifacts and protected import
 shadowing. Limits: 4096 files, 16 MiB/file, 64 MiB total.
 
-The Agent sees editable `kernel.py` and optional Kernel/package sources alongside `skills/`,
-`tools/` and `scratch/`. `WORKSPACE.md` explains the source boundary. Submission and sealing
-validate the complete source tree and require the `kernel.py` entry point.
+The Agent sees the fixed adapter and package directories alongside `skills/`,
+`tools/` and `scratch/`. `WORKSPACE.md` explains the exact editable roots.
+Bubblewrap protects the policy and fixed files read-only; native mode is cooperative,
+but submission and sealing still validate the controller-owned contract.
 Light reserves its root-level workspace names (public inputs, `README.md`, tools,
 Skills, scratch and controller metadata); a manifest colliding with them is rejected
 explicitly. Put package documentation inside its imported package directory.
 
-The complete source snapshot, not only the entry point, determines the Kernel ID,
+The complete source snapshot, not only the adapter, determines the Kernel ID,
 measurement identity, report binding, sealed commit, promotion and Epoch broadcast.
 A rejected/pivoted source tree is not broadcast. Custom tools/Skills keep their
-independent inheritance policy. Framework Baseline receives the same tree as V0 and may keep its
-implementation in `kernel.py` or split it into any number of files below `implementation/`.
+independent inheritance policy. Explicitly imported source-tree tasks retain the pinned initial package
+as their framework baseline instead of asking a V1 Agent to rewrite the adapter.
 
-All Gateway operations use the public Agate SDK. Evaluate and ABBA use the native
-Eval kind for inline candidates and exact source archives, with persisted upload
-references and idempotency keys across recovery; there is no Eval-to-Dev fallback.
-Profile, Check and Disassemble mirror Runtime's tree support. When a typed API cannot
-represent a source tree, a trusted diagnostic driver runs as an SDK Dev job with the
-whole tree and evaluator-owned inputs; these results are not correctness/acceptance
-evidence. Ordinary Dev probes and supplemental numerical probes also receive the full
-candidate. Dev payloads above 120 KiB use SDK OSS upload with Runtime's digest-verified
-unpacker. Env discovery and Job submit/get/cancel use the same SDK authority and
-credentials from the Supervisor environment or operator config, never Agent files.
+Evaluate and ABBA upload exact source archives to native Agate Eval, using persisted
+upload references and idempotency keys across recovery. There is no Eval-to-Dev
+fallback. Profile, Check and Disassemble mirror Runtime's tree support: a trusted
+diagnostic driver runs in Dev with the whole tree and evaluator-owned inputs;
+these results are not correctness/acceptance evidence. Ordinary Dev probes and
+supplemental numerical probes also receive the full candidate. Tree diagnostic
+payloads above 4 MiB use OSS with Runtime's digest-verified unpacker. HTTP uses Supervisor
+credentials from the Agate environment or operator CLI config, never Agent files.
 
-Historical `kernel-read` writes a **directory** for every managed native Kernel. Use that directory
+Historical `kernel-read` writes a **directory** for a tree Kernel. Use that directory
 as `--baseline-path`; a repeated read is safe if its contents are still identical.
-`record-read` keeps the existing result format and Kernel binding. Changed files, removed files and fixed-file tampering
+Single-file reads continue to write a file. `record-read` keeps the existing result
+format and Kernel binding. Changed files, removed files and fixed-file tampering
 cannot reuse an unrelated measurement.
 
-Unified/generated trees and imported sources currently require native Atrex-Bench and
-`package_root: "."`,
+This option currently requires native Atrex-Bench and `package_root: "."`,
 matching Runtime's native Eval archive limitation. Tree diagnostics currently
-require NVIDIA NCU (auto/sass/ptx disassembly). SOL/SSH tree tasks are rejected, not silently
-degraded. Dependencies belong to the task/evaluator configuration rather than a Kernel workspace manifest.
+require NVIDIA NCU (auto/sass/ptx disassembly). SOL/SSH
+tree tasks and runtime-support uploads are rejected, not silently degraded.
 It composes with Epoch/Trajectory search; one Light Episode remains one Runtime
-Attempt. Use a new Campaign workspace when changing the initial source selection.
+Attempt. Use a new Campaign workspace when changing a source contract.
 
 48 source-tree checks cover fixed/editable boundaries, whole-tree IDs and records, native
 Eval/ABBA archive requests, diagnostic transport, source retrieval, report evidence,
@@ -655,7 +600,8 @@ on macOS. The Light sdist and wheel build successfully with the source/worker as
 
 ### Reusable workspace
 
-Managed Episodes expose writable `kernel.py`, optional writable `implementation/`, `skills/` and `tools/`, temporary `scratch/`,
+Managed Episodes expose the selected candidate layout (a fixed adapter plus editable roots,
+a native CUDA manifest tree, or one Python file), writable `skills/` and `tools/`, temporary `scratch/`,
 optional Supervisor-owned `memory/v*.json`, and public contracts/instructions. `WORKSPACE.md` states
 the selected inheritance policy. Each reusable directory has a writable README index; Agents
 must update it when adding, modifying or deleting custom contents. Store reusable methods in
@@ -693,7 +639,7 @@ Light does **not** generate `memory/vN.json` by default, including V0, the frame
 baseline and terminal Episodes. To enable summaries, pass a composition patch:
 
 ```json
-{"api_version":1,"patches":[{"id":"workflow","config":{"generate_memory":true}}]}
+{"api_version":1,"patches":[{"id":"workflow","config":{"startup":true,"generate_memory":true}}]}
 ```
 
 Enabled summaries retain performance, experience, Profile evidence and open directions.
@@ -760,23 +706,23 @@ only when useful; no full-history reread is required.
 ### Optional research recording
 
 Direction and research Experiment recording share one switch because Experiments belong to
-Directions. Both are enabled by default in `light` and `light-sandbox`. To disable them,
+Directions. Both are disabled by default in `light` and `light-sandbox`. To enable them,
 use this composition patch:
 
 ```json
 {
   "api_version": 1,
   "patches": [
-    {"id": "light_journal", "config": {"research_records": false}}
+    {"id": "light_journal", "config": {"research_records": true}}
   ]
 }
 ```
 
-Pass it with `aka optimize --profile light --patch /path/to/patch.json -- ...` (also supported by
-`light-sandbox`). Set it to `true` to enable them explicitly. The selected value is persisted in the private Episode
+Pass it with `aka optimize --repo-root /path/to/aka --profile light --patch /path/to/patch.json -- ...` (also supported by
+`light-sandbox`). Set it to `false` to disable them again. The selected value is persisted in the private Episode
 Journal; change it only at an Episode boundary or in a new workspace, not while resuming an existing
 Episode. Older Journals without the field retain enabled behavior; when resuming an older
-recording-disabled Episode, explicitly set `research_records: false` until that Episode finishes.
+recording-enabled Episode, explicitly set `research_records: true` until that Episode finishes.
 Existing records are not deleted or reinterpreted by the new default.
 
 With recording disabled, `update-direction` and `record-experiment` reject writes; no synthetic rows
@@ -930,9 +876,10 @@ fingerprint. GPU Wiki data remains in the explicitly selected checkout.
 
 Public profile names, module providers, Agent tool commands and persisted state
 filenames are unchanged. Pause at an Episode boundary before upgrading code;
-regenerate module/source locks for the new package identity. Private Python module
+retain the original package/resource identity for recorded continuations, or use a new
+workspace for a changed identity. Do not rewrite locks to bypass reconstruction checks. Private Python module
 paths are not compatibility APIs. Update direct integrations to the new owners,
-notably `aka.light.agent.proc_view` for projected-proc compilation preflight,
+notably `aka.light.agent.preflight` for projected-proc compilation preflight,
 `aka.light.evaluation.gateway` for the executor CLI and
 `aka.light.acceptance.audit_recovery` for operator repair. Historical
 `.atrex_long_horizon/`, `.atrex-supervisor-runtime/`, Record IDs and public
@@ -1013,9 +960,10 @@ measurement repetitions, request deadlines and Workflow options remain independe
 | --- | --- |
 | Failed Job with `error_class=infra`, including `logs_unavailable` or `exec_failed` | Persist the failed Job and submit a replacement; backoff 5, 10, 20, 40, 60 seconds, then 60 seconds. No fixed one-retry limit, but cancellation and the configured request deadline still apply. |
 | Collection/GET transport outage | Retry collection of the same accepted Job, without another submission. Permanent request/auth errors stop recovery. |
-| Environment discovery | Read-only SDK recovery on transport timeout, 408/429/5xx, malformed responses or explicit infrastructure errors. Backoff 5/10/20/40/60 seconds within the request deadline. Invalid URL and permanent auth/request errors fail immediately. Exhaustion returns infrastructure feedback, not a Kernel verdict. |
+| Environment discovery | Read-only GET/CLI recovery on transport timeout, 408/429/5xx, malformed responses or explicit infrastructure errors. Backoff 5/10/20/40/60 seconds within the request deadline. Invalid URL and permanent auth/request errors fail immediately. Exhaustion returns infrastructure feedback, not a Kernel verdict. |
 | Local transport/collection deadline | Return structured infrastructure/unavailable feedback and exit 75, without raw timeout argv/paths. Preserve known Job IDs for reconciliation. A terminal Job's `command_timeout` is classified by its explicit error class: `infra` is recoverable; Candidate/unknown errors do not become infrastructure merely because they mention timeout. |
-| SDK submit transport/5xx/408/429 or structured `infra`/`oss_unavailable` error | Replay an uncertain submission only with the same durable wire idempotency key. Known failed Job replacements get a different, deterministic key. Other permanent 4xx and invalid URLs are not retried. If no accepted ID can be confirmed before the deadline, preserve the uncertain checkpoint for reconciliation. |
+| Direct HTTP submit transport/5xx/408/429 or structured `infra`/`oss_unavailable` error | Replay with the same wire idempotency key, persisted before POST. Known failed Job replacements get a different, deterministic key. Other permanent 4xx and invalid URLs are not retried. |
+| Agate CLI submit outcome unknown | Preserve the uncertain checkpoint for reconciliation. The currently supported CLI has no general wire-idempotency flag, so unknown submissions cannot safely be replayed. Confirmed 429/503 or structured infrastructure rejection can retry; a submit timeout/408 or other 5xx without an accepted ID remains uncertain. |
 | Explicit device-unavailable error inside Eval results | Up to two replacement executions; preserve raw failures. Exhaustion is an infrastructure blocker, not a correctness failure or cacheable negative result. OOM, illegal memory access, numerical mismatches and arbitrary text are not inferred to be device outages. |
 | Device-unavailable ABBA batch | Up to ten replacements with a 60-second delay and durable budget. Keep completed sibling batches. Missing/invalid receipts or unknown execution outcomes do not grant permission to resubmit. |
 | Cancelled Job, unknown error or Candidate failure | No automatic replacement solely for that outcome. A cancelled/unknown result is not permanent negative evidence. A complete Candidate rejection remains reusable. |
@@ -1024,11 +972,12 @@ Record reads retain the saved canonical public result. New Evaluate results incl
 `diagnostics` (stage, opaque Shape, case/output identity, upstream error and numerical
 differences) and `performance_by_shape` (timing statistics and Kernel events).
 Feedback is retained through Shape aggregation, ABBA side projection and Record storage.
-Limits are 128 diagnostics, 8 KiB per message and 256 KiB total feedback; truncation is
-explicit. Gateway error objects remain available with credential/private-path redaction,
-plus actionable distinctions between source repair, infrastructure recovery and unknown
-outcome. Private input generators, seeds, values and whole request documents are not
-added to public feedback. Existing duplicate-request errors still identify the previous
+The projected diagnostic response is limited to 8 MiB of ASCII-escaped JSON, with
+explicit truncation metadata; optional performance detail has a separate budget. Complete
+record serialization is limited to 32 MiB. Gateway errors retain actionable repair/recovery
+guidance with credential/private-path and hidden-dimension redaction. Failing-case seeds
+are deliberately exposed as repair metadata; generators, input values and whole private
+request documents remain withheld. See [diagnostic limits](evaluator-outcomes/README.md#diagnostic-size-and-cache-contract). Existing duplicate-request errors still identify the previous
 Record; report-format errors still allow correction and resubmission.
 
 Previously sealed negative Eval/ABBA records with explicit device-unavailable evidence
@@ -1036,9 +985,12 @@ are no longer reusable; their raw evidence remains intact. Other stored results 
 remain valid. This does not migrate the standalone Runtime's entire controller or
 remove Light's configured HTTP/Session deadlines and CLI uncertainty protection.
 
-## Upstream synchronization and Light measurement policy
+## Light measurement policy
 
-On 2026-10-19 this integration branch merged upstream `main` at `7247206287ef2747342eccb89421fa4606368e2d` (multi-GPU source-policy support). Its relocated Workflow changes apply to both upstream and light implementations. Explicit distributed evaluator contracts accept 2–64 GPUs and must agree with `hardware.required_gpus`. Multi-GPU Agate skips production **source-policy** checks only; SSH and single-GPU retain them. Evaluator correctness, supplemental numerical checks and performance acceptance remain enabled according to the selected profile.
+Explicit distributed evaluator contracts accept 2–64 GPUs and must agree with
+`hardware.required_gpus`. Validated multi-GPU Agate campaigns skip production source-policy
+inspection and framework conversion; SSH and single-GPU retain review. Correctness and
+performance remain required, and supplemental numerical checks follow the selected configuration.
 
 Light promotion now matches Runtime: compare the candidate and incumbent's GeoMean latency from the same native Eval ABBA measurement. Improvement is `(incumbent_us - candidate_us) / incumbent_us * 100`, and must strictly exceed the configured threshold (floating-point roundoff at equality is not an improvement). `performance_score` remains diagnostic, not a promotion gate. The existing Triton-to-Gluon conversion tolerance remains separate. The upstream `workflow` composition retains its original score-based rule.
 
@@ -1050,7 +1002,7 @@ finite GeoMean/per-Shape latencies and full V0 Shape coverage. Historical reads
 retain their passing-status, Shape-coverage and Episode source-binding checks,
 and carry a valid reference score when present. The Legacy gates are unchanged.
 
-Light's shared defaults are defined in `aka.light.evaluation.policy`. Performance sampling matches Legacy: 20 timing iterations and 5 warmup iterations. One Runtime-owned `evaluation_step_timeout`, defaulting to 300 seconds, controls candidate initialization/correctness, one Shape Performance phase for V0 or a candidate, and one ABBA A/B run. With the default two measurements per side, the base allocation is `max(2 × 300, 4 × 300 + 30) = 1230` seconds. Clock locking remains enabled. Correctness preserves the candidate gate: full Evaluate, Framework Baseline and Episode validation use 5 cases (base plus 4 additional). Explicitly targeted bring-up smoke remains one case. Evaluate and ABBA use batches of up to five Shapes, with up to 16 batches in parallel. A request retains its base allocation once and adds only the sequential Performance work for each Shape after the first; it does not multiply candidate initialization, correctness, queueing, or cleanup. Ordinary Evaluate adds 300 seconds per extra Shape, while ABBA adds its four 300-second A/B runs per extra Shape. Light reduces the batch cardinality when necessary to remain within Agate's typed-job limit. Explicit operator overrides remain part of task identity. Changing the step timeout changes measurement identity, so records made under different timing policy are not reused.
+Light's shared defaults are defined in `aka.light.evaluation.policy`. Performance sampling matches Legacy: 20 timing iterations and 5 warmup iterations. Execution controls retain a 600-second candidate initialization/correctness limit and use a 300-second steady-state Performance limit. With the default two measurements per side, one A or B run receives the 300-second Performance limit and the enclosing allocation is 1230 seconds, including 30 seconds of scheduling overhead. If a request increases ABBA repeats without explicitly increasing the allocation, the implicit per-run limit is reduced to the equal share that fits; an explicit per-run limit is never silently reduced. Clock locking remains enabled. Correctness preserves the legacy candidate gate: full Evaluate and candidate correctness use 6 cases (base plus 5 additional). Full Bootstrap/V1 measurements use the same sampling defaults; explicitly targeted bring-up smoke remains one case. Evaluate and ABBA split into one Shape per batch, with up to 16 batches in parallel. Explicit operator/request overrides remain part of task identity. Changing these defaults changes measurement identity, so records made with the previous 100/10 sampling policy remain readable but are not reused for new default requests.
 
 ABBA submits native `Eval` requests with baseline source and `abba.repeats` counting complete A/B/B/A blocks. The public repeat count is per side, even 2–16; default 2 means one block. Agent exploration defaults to 6 correctness cases; the exact Supervisor retention request uses 1 case after the separate six-case candidate gate. Native SDK run order and all Shape evidence are checked before recording a verdict. Completed batches survive sibling failures and resume; the former Dev-driver fallback is removed. SOL/SSH comparisons without a native Atrex-Bench contract fail explicitly before submission; ordinary SOL Evaluate is unchanged.
 
@@ -1066,7 +1018,7 @@ the existing `--proc /proc` behavior; neither mode silently disables isolation.
 This is an explicit compatibility choice, not an automatic permission fallback:
 
 ```json
-{"api_version": 1, "patches": [{"id": "agent", "config": {"sandbox": "bwrap", "proc_mode": "projected"}}]}
+{"api_version": 1, "patches": [{"id": "agent", "config": {"sandbox": "bwrap", "capture": true, "proc_mode": "projected"}}]}
 ```
 
 The projected mode ports the standalone Runtime's container implementation:
@@ -1115,6 +1067,11 @@ checkpoint, whose registry and retained-state formats are different.
 Both the public module APIs and the actual source snapshots were integrated from fixed modular heads (`fd7e0466` Execution, `bb7660e1` Agent/Workflow). The newer, unmerged PR #113 redesign was inspected but not merged as part of updating `main`; its Evaluation/Experiment interfaces are not the contracts claimed here. This is an integration branch, not a claim that those upstream PRs are merged or their APIs cannot change. The pre-migration implementation is retained at `codex/aka-light-before-modularization`.
 
 ## Verification scope
+
+The following records describe checks performed for the referenced implementation changes.
+Their counts and local fixture paths are historical evidence, not a committed test suite or
+an assertion that this documentation update reran GPU/model campaigns. Current live source-layout
+evidence is collected in [native CUDA validation](native-cuda.md).
 
 Projected-proc compatibility was checked on 2026-10-19 in the existing restricted
 GDN/L20N Sandbox with Bubblewrap 0.4.0: the unchanged private-proc probe fails with
@@ -1168,12 +1125,6 @@ this is not a live optimization performance result. The existing regression suit
 reserved-client restoration while custom edits survive.
 
 Runtime-policy alignment was checked on 2026-10-19 with 33 targeted offline regressions: environment recovery, timeout classification, SDK request/CLI compatibility, native ABBA parsing and resume, exact measurement defaults, and latency-based promotion. The combined regression run contains 150 checks: 146 passed and four Linux-only checks were skipped on macOS. Request construction was checked against the installed Agate SDK 0.14.3 and native result parsing against Runtime. The framework/legacy/light wheels were rebuilt from sdists and installed into a fresh environment; profile, Gateway entrypoint, service/asset and controlled capture smoke checks passed. No live GPU or model task was submitted for this alignment.
-
-On 2026-10-28, the configured Agate release index and local CLI both reported
-`atrex-gateway-client` 0.14.22 as current. Light requires
-`atrex-gateway-client>=0.14.22,<0.15`; sandbox deployment additionally installs
-the exact wheel named by `deployment.json` and verifies that installed version
-before starting a campaign.
 
 Validation uses external temporary fixtures, not committed test modules. It covers module boot/dispose, independent capture selection, native session resume, revoked HTTP capabilities, report correction, Direction/Experiment evidence, sealed candidates surviving later edits, stable Kernel IDs, record reads and duplicate detection after reopening the store, per-Shape median aggregation, confirmed-rejection classification and unknown-submission recovery.
 

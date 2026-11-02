@@ -39,6 +39,10 @@ SUPPLEMENTAL_PENDING_PREFIX = "Supplemental validation is incomplete"
 DEFAULT_HANDOFF_RESUMES = 2
 DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES = 5
 DEFAULT_VERIFY_REPEATS = DEFAULT_ABBA_REPEATS
+# Upstream v0.4 still names this Campaign field ``verify_run_timeout``.
+# Keep the structural field while binding it to Light's one Runtime-owned
+# per-Shape evaluation budget.
+DEFAULT_VERIFY_RUN_TIMEOUT = DEFAULT_EVALUATION_STEP_TIMEOUT
 FRAMEWORK_BASELINE_FILE = "framework_baseline.json"
 FRAMEWORK_BASELINE_VERSION = (
     1  # the framework baseline always occupies v1, retries overwrite it

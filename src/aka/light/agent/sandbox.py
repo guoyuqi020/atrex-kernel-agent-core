@@ -15,13 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from aka.light.agent.home import (
-    HOST_HOME_ENV,
-    PREPARED_ENV,
-    SESSION_HOME_ROOT_ENV,
-    open_private_directory,
-    projected_backends,
-)
+from aka.light.agent.home import HOST_HOME_ENV, PREPARED_ENV, open_private_directory, projected_backends
 from aka.light.agent.installations import installation_mounts
 from aka.light.workspace.auxiliary import WORKSPACE_LAYOUTS, WORKSPACE_ROLE_ENV, AuxiliaryWorkspace
 from aka.light.agent.recovery_processes import HANDOFF_ID_ENV
@@ -269,12 +263,10 @@ def wrap_agent_command(
         if not SESSION_SHELL_GUARD.is_file():
             raise ValueError("selected Agent shell guard resource is unavailable")
         _mount(argv, SESSION_SHELL_GUARD.resolve(), SESSION_SHELL_GUARD)
-        from aka.light.agent.claude_tools import FOREGROUND_HOOKS_ENV
-        if environment.get(FOREGROUND_HOOKS_ENV) == "1":
-            from aka.light.agent import claude_tools, dependency_policy
-            for module in (claude_tools, dependency_policy):
-                hook_asset = Path(module.__file__).resolve()
-                _mount(argv, hook_asset, hook_asset)
+        if environment.get("ATREX_AKA_RUNTIME_URL"):
+            from aka.light.agent import claude_tools
+            hook = Path(claude_tools.__file__).resolve()
+            _mount(argv, hook, hook)
         if view:
             for name in view.inputs:
                 source = view.root / name
@@ -302,13 +294,13 @@ def wrap_agent_command(
             protected = ("tools", "skills")
             if managed and PROTECTED_PATHS_ENV in environment:
                 protected = json.loads(environment[PROTECTED_PATHS_ENV])
-                from aka.light.workspace.sources import source_name
+                from aka.light.workspace.sources import POLICY, SELECTION, source_name
                 if not isinstance(protected, list) or any(
                     not isinstance(name, str) or not name or name == "." or "\\" in name
                     or Path(name).is_absolute() or ".." in Path(name).parts
                     or not (name in {"tools/sandbox.py", "tools/plugin.py", "WORKSPACE.md"}
                             or len(Path(name).parts) == 2 and Path(name).parts[0] == "skills"
-                            or source_name(name))
+                            or name in {POLICY, SELECTION} or source_name(name))
                     for name in protected
                 ):
                     raise ValueError("Invalid managed asset protection list")
@@ -393,14 +385,7 @@ def wrap_agent_command(
         values = {
             key: value
             for key, value in environment.items()
-            if key not in {
-                HOST_HOME_ENV,
-                PREPARED_ENV,
-                SESSION_HOME_ROOT_ENV,
-                "PWD",
-                "OLDPWD",
-                "ATREX_EPISODE_PRIVATE_PATHS",
-            }
+            if key not in {HOST_HOME_ENV, PREPARED_ENV, "PWD", "OLDPWD", "ATREX_EPISODE_PRIVATE_PATHS"}
             and (
                 not key.startswith("GIT_")
                 or key

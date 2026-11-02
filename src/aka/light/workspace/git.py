@@ -247,52 +247,19 @@ class EpisodeWorktree:
         Never ask Git to reread an Agent-writable candidate or run commit hooks.
         The real Episode worktree is not mounted in the Agent namespace.
         """
-        from aka.light.workspace.files import publish
-        from aka.light.workspace.sources import unpack, commit_tree_candidate
-        if unpack(expected_source)[0] is not None:
-            return commit_tree_candidate(self, expected_source)
+        from aka.light.workspace.sources import Artifact, commit_candidate
 
-        head = git_head(self.path)
-        if git_text(self.path, "symbolic-ref", "--quiet", "--short", "HEAD") != self.branch:
-            raise RuntimeError("Supervisor candidate branch does not match the Episode")
-        if _git(self.path, "merge-base", "--is-ancestor", self.base_commit, head, check=False).returncode:
-            raise RuntimeError("candidate is not descended from the Episode baseline")
-        if any(marker.encode() in expected_source for marker in TIMELINE_PROBE_MARKERS):
-            raise ValueError("candidate kernel.py still contains timeline profiling probes")
-        if _git(self.path, "show", f"{self.base_commit}:kernel.py", binary=True).stdout == expected_source:
-            raise ValueError("candidate has no Kernel change; report pivot or select another")
+        artifact = Artifact(expected_source)
+        if any(
+            marker.encode() in data
+            for data in artifact.files.values()
+            for marker in TIMELINE_PROBE_MARKERS
+        ):
+            raise ValueError("Candidate source contains timeline profiling probes")
         violation = protected_violation(working_changes(self.path))
         if violation:
             raise RuntimeError(violation)
-        if any(path != "kernel.py" for path in changed_paths(self.path, self.base_commit, head)):
-            raise RuntimeError("candidate may change only kernel.py relative to its baseline")
-        if any(path != "kernel.py" for path in git_text(self.path, "diff", "--cached", "--name-only").splitlines()):
-            raise RuntimeError("Supervisor index contains unexpected staged files")
-        if _git(self.path, "show", f"{head}:kernel.py", binary=True).stdout != expected_source:
-            blob = subprocess.run(
-                ["git", "hash-object", "-w", "--stdin"], cwd=self.path,
-                input=expected_source, capture_output=True, check=True,
-            ).stdout.decode().strip()
-            with tempfile.TemporaryDirectory(prefix="aka-candidate-index-") as temporary:
-                environment = os.environ | {
-                    "GIT_INDEX_FILE": str(Path(temporary) / "index"),
-                    "GIT_AUTHOR_NAME": "AKA Supervisor", "GIT_COMMITTER_NAME": "AKA Supervisor",
-                    "GIT_AUTHOR_EMAIL": "supervisor@atrex.local", "GIT_COMMITTER_EMAIL": "supervisor@atrex.local",
-                }
-
-                def run(*args: str) -> str:
-                    return subprocess.run(["git", *args], cwd=self.path, env=environment,
-                                          capture_output=True, text=True, check=True).stdout.strip()
-
-                run("read-tree", head)
-                run("update-index", "--add", "--cacheinfo", f"100644,{blob},kernel.py")
-                tree = run("write-tree")
-                commit = run("-c", "commit.gpgSign=false", "commit-tree", tree,
-                             "-p", head, "-m", f"Episode {self.episode}: selected Kernel")
-                run("update-ref", "HEAD", commit, head)
-                head = commit
-        publish(self.path, "kernel.py", expected_source)
-        _git(self.path, "read-tree", head)
+        head = commit_candidate(self, expected_source)
         violation, _ = self.validate_candidate(head)
         if violation:
             raise RuntimeError(violation)

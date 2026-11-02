@@ -77,17 +77,9 @@ def _sha256(path: Path) -> str:
 
 
 def _capture_paths(workspace: Path) -> Iterable[Path]:
-    try:
-        from aka.light.workspace.sources import collect, policy_at
-        source_policy = policy_at(workspace)
-        source_paths = (
-            sorted(collect(workspace, source_policy, validate=False))
-            if source_policy is not None
-            else ["kernel.py"]
-        )
-    except (OSError, ValueError):
-        source_paths = ["kernel.py"]
-    for relative in (*source_paths, "solution.json", "memory/v1.json", ".atrex_versions/v1.json"):
+    from aka.light.workspace.sources import capture_paths
+    yield from capture_paths(workspace)
+    for relative in ("memory/v1.json", ".atrex_versions/v1.json"):
         yield workspace / relative
     yield from sorted((workspace / "plans").glob("v1_*.md"))
     for pattern in ("debug*.py", "probe*.py", "smoke*.py"):
@@ -272,71 +264,26 @@ def save_supervisor_recovery(
 
 
 def restore_latest_candidate(workspace: Path) -> list[str]:
-    """Restore editable Kernel sources/solution.json from the newest crash snapshot."""
+    """Restore the complete candidate from the newest crash snapshot."""
     workspace = workspace.resolve()
     value = load_progress(workspace)
     snapshot = value.get("latest_snapshot")
     if not isinstance(snapshot, dict) or not isinstance(snapshot.get("files"), list):
         return []
+    from aka.light.workspace.sources import restore_capture
+    root = (workspace / snapshot.get("root", "")).resolve()
+    if not root.is_relative_to(workspace):
+        return []
     try:
-        from aka.light.workspace.sources import collect, editable, policy_at
-        source_policy = policy_at(workspace)
-    except (OSError, ValueError):
-        source_policy = None
-    snapshot_root = workspace / str(snapshot.get("root") or "")
-    captured: set[str] = set()
-    for relative_snapshot in snapshot["files"]:
-        if not isinstance(relative_snapshot, str):
-            continue
-        try:
-            captured.add(
-                (workspace / relative_snapshot).resolve().relative_to(snapshot_root).as_posix()
-            )
-        except (OSError, ValueError):
-            continue
-    if source_policy is not None:
-        try:
-            current = collect(workspace, source_policy, validate=False)
-        except (OSError, ValueError):
-            current = {}
-        for name in current:
-            if editable(source_policy, name) and name not in captured:
-                try:
-                    (workspace / name).unlink()
-                except FileNotFoundError:
-                    pass
-    restored: list[str] = []
-    for relative_snapshot in snapshot["files"]:
-        if not isinstance(relative_snapshot, str):
-            continue
-        source = (workspace / relative_snapshot).resolve()
-        try:
-            source.relative_to(workspace)
-        except ValueError:
-            continue
-        if not source.is_file():
-            continue
-        try:
-            destination_relative = source.relative_to(snapshot_root)
-        except ValueError:
-            continue
-        destination_name = destination_relative.as_posix()
-        allowed = (
-            destination_name == "solution.json"
-            or (source_policy is None and destination_name == "kernel.py")
-            or (source_policy is not None and editable(source_policy, destination_name))
-        )
-        if not allowed:
-            continue
-        destination = workspace / destination_relative
-        _atomic_write_bytes(destination, source.read_bytes())
-        restored.append(destination_name)
-    return restored
+        return restore_capture(workspace, root)
+    except FileNotFoundError:
+        return []
+
 
 
 def candidate_sha256(workspace: Path) -> str:
+    from aka.light.workspace.sources import snapshot
     try:
-        from aka.light.workspace.sources import snapshot
         return hashlib.sha256(snapshot(workspace)).hexdigest()
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return ""

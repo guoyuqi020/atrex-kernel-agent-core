@@ -1016,7 +1016,7 @@ def test_agent_git_persists_work_and_installs_runtime_source_refs(tmp_path):
     repo.prepare()
     first = repo.head()
     assert first
-    (workspace / "implementation" / "helper.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (workspace / "impl" / "helper.py").write_text("VALUE = 2\n", encoding="utf-8")
     persisted = repo.persist()
     assert persisted != first
     runtime_commit = repo.install_runtime_ref(
@@ -1036,7 +1036,7 @@ def test_agent_git_persists_work_and_installs_runtime_source_refs(tmp_path):
         ["git", "log", "--all", "--format=%s"], cwd=restored,
         text=True, capture_output=True, check=True,
     ).stdout.count("Runtime: preserve Episode WIP checkpoint") == 1
-    assert (restored / "implementation" / "helper.py").read_text() == "VALUE = 2\n"
+    assert (restored / "impl" / "helper.py").read_text() == "VALUE = 2\n"
 
 
 def test_agent_git_restores_unmerged_branches_and_active_checkout(tmp_path):
@@ -1049,7 +1049,7 @@ def test_agent_git_restores_unmerged_branches_and_active_checkout(tmp_path):
         ["git", "switch", "-c", "experiment/ksplit4"], cwd=workspace, check=True,
         text=True, capture_output=True,
     )
-    (workspace / "implementation" / "ksplit.py").write_text(
+    (workspace / "impl" / "ksplit.py").write_text(
         "KSPLIT = 4\n", encoding="utf-8"
     )
     repo.persist()
@@ -1072,7 +1072,7 @@ def test_agent_git_restores_unmerged_branches_and_active_checkout(tmp_path):
         ["git", "show-ref", "--verify", "refs/heads/experiment/ksplit4"], cwd=restored,
         text=True, capture_output=True, check=True,
     ).returncode == 0
-    assert (restored / "implementation" / "ksplit.py").read_text() == "KSPLIT = 4\n"
+    assert (restored / "impl" / "ksplit.py").read_text() == "KSPLIT = 4\n"
 
 
 def test_epoch_git_exchange_filters_paths_and_preserves_peer_ref(tmp_path):
@@ -1080,7 +1080,7 @@ def test_epoch_git_exchange_filters_paths_and_preserves_peer_ref(tmp_path):
     _install(source_workspace, "def run():\n    return 1\n")
     source = AgentGit(source_workspace, tmp_path / "source.bundle")
     source.prepare()
-    (source_workspace / "implementation" / "peer.py").write_text("KSPLIT = 2\n", encoding="utf-8")
+    (source_workspace / "impl" / "peer.py").write_text("KSPLIT = 2\n", encoding="utf-8")
     (source_workspace / "scratch").mkdir()
     (source_workspace / "scratch" / "secret.txt").write_text("private\n", encoding="utf-8")
     source.persist()
@@ -1131,7 +1131,7 @@ def test_epoch_git_exchange_filters_paths_and_preserves_peer_ref(tmp_path):
         ["git", "ls-tree", "-r", "--name-only", "refs/atrex/shared/T2/e0001/head"],
         cwd=inspect, text=True, capture_output=True, check=True,
     ).stdout.splitlines()
-    assert tree == ["implementation/__init__.py", "implementation/peer.py", "kernel.py"]
+    assert tree == ["impl/__init__.py", "impl/peer.py", "kernel.py"]
     messages = subprocess.run(
         ["git", "log", "--format=%s", "refs/atrex/shared/T2/e0001/head"],
         cwd=inspect, text=True, capture_output=True, check=True,

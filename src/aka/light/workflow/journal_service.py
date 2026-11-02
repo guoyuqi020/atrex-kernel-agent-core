@@ -1542,7 +1542,7 @@ class SupervisorJournalService:
                     "The adopted Kernel is not available in this Campaign",
                     next_action=(
                         "Use kernel-read or a peer measurement's exact Kernel ID, materialize that "
-                        "source in kernel.py and implementation/, then retry adopt-kernel."
+                        "source in kernel.py and impl/, then retry adopt-kernel."
                     ),
                 ) from error
             from aka.light.workspace.sources import snapshot as source_snapshot
@@ -1555,7 +1555,7 @@ class SupervisorJournalService:
                     kernel_id=kernel_id,
                     next_action=(
                         "Checkout, cherry-pick, or restore the peer source into kernel.py and "
-                        "implementation/, verify git diff, then resubmit the same adoption request."
+                        "impl/, verify git diff, then resubmit the same adoption request."
                     ),
                 )
             self.research.adopt_kernel(

@@ -13,7 +13,6 @@ import secrets
 import threading
 import time
 import uuid
-from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +20,7 @@ from pathlib import Path
 from aka.light.agent.home import open_private_directory
 from aka.legacy.task.persistence import durable_write_json, durable_write_text
 from aka.light.agent.session_tail import read_regular_bytes
-from aka.light.workspace.sources import MAX_SNAPSHOT, unpack
+from aka.light.workspace.sources import MAX_SNAPSHOT, Artifact
 
 RECORD_ID = re.compile(r"gateway-[0-9a-f]{32}")
 KERNEL_ID = re.compile(r"kernel-[0-9a-f]{32}")
@@ -31,7 +30,6 @@ BATCH_ROOT_ENV = "ATREX_AKA_SHAPE_BATCH_ROOT"
 MAX_RECORD_BYTES = 32 * 1024 * 1024
 MAX_RECORD_HEADER_BYTES = 16 * 1024
 RECORD_HEADER_FIELDS = frozenset({"gateway_record_id", "operation", "created_at", "kernels"})
-OPTIONAL_RECORD_HEADER_FIELDS = frozenset({"agent_git"})
 
 
 def digest(value: object) -> str:
@@ -87,7 +85,7 @@ def read_record_header(path: Path) -> dict:
             raise ValueError("Gateway record header is malformed")
         # Refuse to decode large payload fields if required metadata is absent
         # or misplaced. The listing must not turn into a full-record read.
-        if key not in RECORD_HEADER_FIELDS and key not in OPTIONAL_RECORD_HEADER_FIELDS and key != "cacheable":
+        if key not in RECORD_HEADER_FIELDS and key != "cacheable":
             raise ValueError("Gateway record listing header is incomplete")
         value, index = decoder.raw_decode(text, whitespace(index + 1))
         if key in RECORD_HEADER_FIELDS:
@@ -265,16 +263,8 @@ class MeasurementStore:
             raise ValueError("Gateway record result integrity check failed")
         for side, identity in record["kernels"].items():
             source = self.read_kernel(identity["kernel_id"])
-            filename = "kernel.py" if side == "candidate" else record["request"]["options"]["baseline_path"]
-            policy, files = unpack(source)
-            expected = record["request"]["options"].get("source_snapshots", {}).get(side) if policy else record["request"]["inputs"][filename]
-            if (source_identity(source) != identity or hashlib.sha256(source).hexdigest() != expected):
-                raise ValueError("Gateway record refers to a different Kernel")
-            if policy:
-                prefix = "" if side == "candidate" else filename + "/"
-                if any(record["request"]["inputs"].get(prefix + name) != hashlib.sha256(data).hexdigest()
-                       for name, data in files.items()):
-                    raise ValueError("Gateway record omits or changes tree source evidence")
+            if source_identity(source) != identity or not Artifact(source).verify_measurement_inputs(record["request"], side):
+                raise ValueError("Gateway record omits or changes candidate source evidence")
         return record
 
     def record_ids(self) -> list[str]:
@@ -296,17 +286,11 @@ class MeasurementStore:
                 values.append(record_id)
         return sorted(values)
 
-    def import_record(self, source: MeasurementStore, record_id: str) -> dict:
-        """Import one immutable Record and its complete Kernel source closure.
-
-        Task indexes are intentionally not copied.  Imported evidence is readable,
-        but it never turns another trajectory's measurement into a local duplicate
-        cache hit or resumable physical job.
-        """
+    def import_record(self, source: "MeasurementStore", record_id: str) -> dict:
+        """Import immutable evidence without importing its task/cache identity."""
         record = source.read(record_id)
         for identity in record["kernels"].values():
-            kernel_id = identity["kernel_id"]
-            kernel_source = source.read_kernel(kernel_id)
+            kernel_source = source.read_kernel(identity["kernel_id"])
             if self.kernel(kernel_source) != identity:
                 raise ValueError("Imported Kernel identity differs from the Gateway Record")
         destination = self.root / "records" / record_id / "record.json"
@@ -329,6 +313,13 @@ class MeasurementStore:
                 record = self.read(record_id)
                 if record.get("task_digest") != task_digest or record.get("cacheable") is not True:
                     return None
+                if record["operation"] in {"evaluate", "same_allocation_abba"}:
+                    from aka.light.evaluation.public_result import cacheable_evaluation
+                    if not cacheable_evaluation(record["response"], record["request"]):
+                        # Older Dev-backed evaluators cached allocation success
+                        # even when no evaluation receipt existed. Keep the old
+                        # record intact, but do not use it as a permanent verdict.
+                        return None
                 from aka.light.evaluation.evaluation_failures import embedded_device_failure
                 negative = False
                 for line in record["response"].get("stdout", "").splitlines():
@@ -373,16 +364,17 @@ class MeasurementStore:
             raise TaskRunning(active.deadline, active.request_id)
 
     @contextmanager
-    def reserve(
-        self,
-        request: dict,
-        kernels: dict,
-        *,
-        deadline: float | None = None,
-        request_id: str = "",
-        reuse_cached: Callable[[dict], bool] | None = None,
-    ):
+    def reserve(self, request: dict, kernels: dict, *, deadline: float | None = None, request_id: str = ""):
         key = digest(request)
+        # Gateway calls may deliberately have no local deadline while the
+        # Runtime owns durable remote retries.  JSON has no portable infinity
+        # value, and waiting callers must see that as an unknown completion
+        # time rather than a fabricated finite budget.
+        reservation_deadline = (
+            deadline
+            if type(deadline) in (int, float) and math.isfinite(deadline)
+            else None
+        )
         with open_private_directory(self.root / "tasks") as directory:
             descriptor = os.open(key + ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=directory)
         acquired = False
@@ -395,7 +387,7 @@ class MeasurementStore:
             # Publish only the current owner's supervisory deadline, outside
             # task identity. Waiting callers must not reset it with their own.
             os.ftruncate(descriptor, 0)
-            os.write(descriptor, json.dumps({"deadline": deadline, "request_id": request_id},
+            os.write(descriptor, json.dumps({"deadline": reservation_deadline, "request_id": request_id},
                                             allow_nan=False).encode())
             marker = self.root / "tasks" / (key + ".json")
             try:
@@ -405,15 +397,14 @@ class MeasurementStore:
             record_id = state.get("gateway_record_id")
             if isinstance(record_id, str) and RECORD_ID.fullmatch(record_id):
                 cached = self._cached(record_id, key)
-                if cached is not None and (
-                    reuse_cached is None or reuse_cached(cached)
-                ):
+                if cached is not None:
                     raise DuplicateTask(record_id)
             # Resume an interrupted request's physical jobs/checkpoints only
             # when its exact request identity remains intact.
             directory = self.root / "records" / str(record_id)
             resumable = False
-            if isinstance(record_id, str) and RECORD_ID.fullmatch(record_id) and state.get("status") == "running":
+            if (isinstance(record_id, str) and RECORD_ID.fullmatch(record_id)
+                    and state.get("status") in {"running", "validation_pending"}):
                 try:
                     resumable = read_json(directory / "request.json") == request
                 except (FileNotFoundError, ValueError):
@@ -424,7 +415,7 @@ class MeasurementStore:
                 private_write(directory / "request.json", request)
             private_write(marker, {"status": "running", "gateway_record_id": record_id})
             with self._active_lock:
-                self._active_tasks[key] = TaskRunning(deadline, request_id)
+                self._active_tasks[key] = TaskRunning(reservation_deadline, request_id)
             yield MeasurementTask(self, key, record_id, directory, request, kernels, marker)
         finally:
             try:
@@ -473,15 +464,22 @@ class MeasurementTask:
         self.store, self.key, self.record_id = store, key, record_id
         self.directory, self.request, self.kernels, self.marker = directory, request, kernels, marker
 
-    def finish(self, response: dict, *, cacheable: bool, pending: bool = False,
-               agent_git: dict | None = None) -> dict:
+    def finish(self, response: dict, *, cacheable: bool, pending: bool = False) -> dict:
+        from aka.light.evaluation.public_result import seal_response
+        response = seal_response(response, self.request, record_id=self.record_id, kernels=self.kernels)
+        if self.request["operation"] in {"evaluate", "same_allocation_abba"}:
+            from aka.light.evaluation.public_result import cacheable_evaluation
+            cacheable = cacheable and cacheable_evaluation(response, self.request)
         record = {"schema_version": 1, "gateway_record_id": self.record_id,
                   "task_digest": self.key, "request": self.request, "kernels": self.kernels,
                   "operation": self.request["operation"], "response": response,
                   "result_digest": digest(response), "cacheable": cacheable,
                   "created_at": datetime.now(timezone.utc).isoformat()}
-        if agent_git is not None:
-            record["agent_git"] = agent_git
+        # Match private_write's actual encoding, including envelope and escaping.
+        # Refuse before publication: reserve() can recover this running task's
+        # existing Jobs instead of leaving an unreadable validation_pending record.
+        if len(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()) + 1 > MAX_RECORD_BYTES:
+            raise EvidenceUnavailable("Measurement record exceeds its size limit; existing job evidence retained")
         private_write(self.directory / "record.json", record)
         # Keep a reference even if post-write validation encounters transient IO.
         private_write(self.marker, {"status": "validation_pending", "gateway_record_id": self.record_id})

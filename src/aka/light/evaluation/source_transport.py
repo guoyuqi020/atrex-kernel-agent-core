@@ -5,7 +5,6 @@ uploaded wire request before POST so an uncertain submission reuses that same
 reservation and idempotency key on recovery.
 """
 from __future__ import annotations
-import gzip
 import hashlib
 import http.client
 import io
@@ -14,15 +13,12 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
-import tarfile
 import tempfile
 import time
 import urllib.parse
 import zipfile
 
-from aka.light.workspace.sources import (
-    entrypoint, snapshot, unpack, relative, requires_archive,
-)
+from aka.light.workspace.sources import archive_bytes
 
 ARCHIVES = "__atrex_eval_archives"
 DIAGNOSTIC = "__atrex_source_diagnostic"
@@ -43,42 +39,19 @@ class SourceUploadError(RuntimeError):
 
 
 def attach(request, workspace, *, side="candidate", source=None):
-    policy, files = unpack(source if source is not None else snapshot(workspace))
-    # Legacy raw kernel.py snapshots retain the native inline transport. Every
-    # managed adapter tree carries its implementation and therefore uses the
-    # exact source-archive contract.
-    if not requires_archive(policy, files):
-        return request
-    if policy["package_root"] != ".":
-        raise ValueError("Native Eval archives require package_root='.'; no Dev fallback")
-    archive = f"archives/{side}.tar.gz"
-    request.setdefault(ARCHIVES, {})[archive] = {k: v.decode() for k, v in files.items()}
-    descriptor = {"archive": archive, "entry_point": entrypoint(policy)}
+    from aka.light.workspace.sources import Artifact, read
+    artifact = Artifact(source) if source is not None else read(workspace)
+    packaged = artifact.execution_source(f"archives/{side}.tar.gz")
+    if packaged.archives:
+        request.setdefault(ARCHIVES, {}).update(packaged.archives)
     if side == "candidate":
-        request["candidate"] = descriptor
+        request["candidate"] = packaged.candidate
     else:
-        request["abba"]["baseline"] = descriptor
-    requirements = list(request.get("requirements", []))
-    for item in policy["runtime_requirements"]:
-        spec = item["distribution"] + item.get("version", "")
-        if spec not in requirements:
-            requirements.append(spec)
+        request["abba"]["baseline"] = packaged.candidate
+    requirements = list(dict.fromkeys([*request.get("requirements", []), *packaged.requirements]))
     if requirements:
         request["requirements"] = requirements
     return request
-
-
-def archive_bytes(files):
-    output = io.BytesIO()
-    with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as gz:
-        with tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tar:
-            for name, text in sorted(files.items()):
-                relative(name)
-                data = text.encode()
-                member = tarfile.TarInfo(name)
-                member.size, member.mode = len(data), 0o644
-                tar.addfile(member, io.BytesIO(data))
-    return output.getvalue()
 
 
 def _dev_archive(request):
@@ -124,12 +97,12 @@ def uploaded_request(request, wire_key, *, json_call, upload, kind="eval"):
             pass
         else:
             if saved["logical"] != logical:
-                raise ValueError("Persisted Gateway upload belongs to a different source request")
+                raise ValueError("Persisted Eval upload belongs to a different source request")
             return saved["wire"]
     if large_dev:
         packed, wire = _dev_archive(request)
     else:
-        if kind != "eval" or request.get("oss_files"):
+        if kind not in {"eval", "profile"} or request.get("oss_files"):
             raise ValueError("Native Eval archives cannot mix existing upload references or Dev tasks")
         packed = {name: archive_bytes(files) for name, files in sorted(request[ARCHIVES].items())}
         wire = {k: v for k, v in request.items() if k != ARCHIVES}
@@ -176,24 +149,21 @@ def upload_bytes(url, data):
 
 
 def _agate_configuration(environment=None):
-    """Read the same bounded operator configuration as the Agate CLI.
-
-    Source collection belongs to Light, but endpoint selection, authentication,
-    upload and job lifecycle belong to the published SDK.  Keep secrets only in
-    the SDK auth provider; they never enter a request, checkpoint or child argv.
-    """
+    """Read bounded Agate configuration with CLI-compatible precedence."""
     from aka.light.agent.session_tail import read_regular_bytes
+
     environment = os.environ if environment is None else environment
     configured_home = environment.get("HOME")
     home = Path(configured_home) if configured_home else Path.home()
     try:
-        value = json.loads(read_regular_bytes(
-            home / ".atrex/config.json", limit=64 * 1024
-        ))
+        value = json.loads(
+            read_regular_bytes(home / ".atrex/config.json", limit=64 * 1024)
+        )
     except FileNotFoundError:
         return {}
     except (OSError, ValueError, UnicodeError) as error:
         from aka.light.runtime.request_errors import GatewayConfigurationError
+
         raise GatewayConfigurationError(
             "Supervisor Agate config is unreadable or invalid.",
             next_action=(
@@ -203,7 +173,10 @@ def _agate_configuration(environment=None):
         ) from error
     if not isinstance(value, dict):
         from aka.light.runtime.request_errors import GatewayConfigurationError
-        raise GatewayConfigurationError("Supervisor Agate config must be a JSON object.")
+
+        raise GatewayConfigurationError(
+            "Supervisor Agate config must be a JSON object."
+        )
     return value
 
 
@@ -214,12 +187,13 @@ def _load_sdk_client(
     authority_url=None,
     authority_profile=None,
 ):
-    """Construct the public Agate SDK client using CLI-compatible precedence."""
+    """Construct the public Agate SDK client without exposing credentials."""
     try:
         from atrex_gateway_client import AkSkAuth, Client, NoAuth, TokenAuth
         from atrex_gateway_client.errors import GatewayError, TransportError
     except ModuleNotFoundError as error:
         from aka.light.runtime.request_errors import GatewayConfigurationError
+
         raise GatewayConfigurationError(
             "atrex-gateway-client>=0.14.22 is required for Gateway operations.",
             next_action=(
@@ -247,14 +221,18 @@ def _load_sdk_client(
         or parts.password
     ):
         from aka.light.runtime.request_errors import GatewayConfigurationError
+
         raise GatewayConfigurationError("Agate base URL must be an HTTP(S) origin.")
 
     token = environment.get("AGATE_TOKEN") or config.get("token")
     access_key = environment.get("AGATE_AK") or config.get("ak")
     secret_key = environment.get("AGATE_SK") or config.get("sk")
-    if any(value is not None and not isinstance(value, str)
-           for value in (token, access_key, secret_key)):
+    if any(
+        value is not None and not isinstance(value, str)
+        for value in (token, access_key, secret_key)
+    ):
         from aka.light.runtime.request_errors import GatewayConfigurationError
+
         raise GatewayConfigurationError("Agate credential fields must be strings.")
     if token:
         auth = TokenAuth(token)
@@ -262,6 +240,7 @@ def _load_sdk_client(
         auth = AkSkAuth(access_key, secret_key)
     elif access_key or secret_key:
         from aka.light.runtime.request_errors import GatewayConfigurationError
+
         raise GatewayConfigurationError(
             "Agate access key and secret key must be configured together."
         )
@@ -271,8 +250,7 @@ def _load_sdk_client(
     class LightAgateClient(Client):
         @staticmethod
         def _overload_delay(error, attempt=0):
-            # Light owns bounded, durable retry state.  Surface overload instead
-            # of sleeping inside an unobservable SDK submission call.
+            # Runtime owns visible durable retries; do not sleep inside the SDK.
             return None
 
     client = LightAgateClient(
@@ -291,7 +269,7 @@ def validate_gateway_sdk(
     authority_url=None,
     authority_profile=None,
 ):
-    """Fail before staging when a Gateway request cannot construct its SDK client."""
+    """Fail before staging when the configured SDK client is unavailable."""
     _load_sdk_client(
         args,
         environment,
@@ -300,13 +278,10 @@ def validate_gateway_sdk(
     )
 
 
-# Compatibility for integrations importing the narrower name from the first
-# SDK-only Eval release.
 validate_eval_sdk = validate_gateway_sdk
 
 
 def _sdk_upload(client, url, data):
-    """Give the SDK a private regular file without exposing its signed URL."""
     path = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -317,14 +292,10 @@ def _sdk_upload(client, url, data):
         client.upload_file(url, path)
     finally:
         if path is not None:
-            try:
-                Path(path).unlink()
-            except FileNotFoundError:
-                pass
+            Path(path).unlink(missing_ok=True)
 
 
 def _sdk_uploaded_request(client, request, wire_key, *, kind="eval"):
-    """Prepare source archives through SDK methods and retain the exact wire."""
     def reserve(method, path, body, timeout):
         if method != "POST" or path != "/v1/uploads":
             raise ValueError("Unexpected Agate SDK upload reservation request")
@@ -336,12 +307,11 @@ def _sdk_uploaded_request(client, request, wire_key, *, kind="eval"):
             or not isinstance(targets[0], str)
         ):
             raise ValueError("Agate SDK upload requires exactly one target hardware")
-        num_gpus = spec.get("num_gpus", 1)
         return client.prepare_uploads(
             targets[0],
             body["files"],
             kind=body["kind"],
-            num_gpus=num_gpus,
+            num_gpus=spec.get("num_gpus", 1),
             placement=request.get("placement"),
         )
 
@@ -355,7 +325,6 @@ def _sdk_uploaded_request(client, request, wire_key, *, kind="eval"):
 
 
 def _sdk_error_process(error, *, stage):
-    """Preserve the SDK's safe structured error without leaking credentials."""
     payload = getattr(error, "payload", None)
     if not isinstance(payload, dict):
         payload = {
@@ -385,12 +354,7 @@ def run_sdk_job(
     identity_extra=None,
     eval_semantics=False,
 ):
-    """Submit and collect one Gateway job through the published SDK.
-
-    Light retains durable idempotency, retry classification and recovery state;
-    the SDK owns endpoint/authentication resolution, uploads, submission, polling
-    and cancellation for every public Gateway job kind.
-    """
+    """Submit and collect one public Gateway job through the Agate SDK."""
     from aka.light.execution.gateway_jobs import (
         AcceptedJobMissing,
         SubmissionRejected,
@@ -430,13 +394,15 @@ def run_sdk_job(
                 process, 503 if retryable else status
             ) from None
         except (OSError, ValueError) as error:
-            process = subprocess.CompletedProcess(
-                ["agate-sdk", "upload"],
-                1,
-                "",
-                f"source preparation failed: {error}",
-            )
-            raise SubmissionRejected(process, 400) from None
+            raise SubmissionRejected(
+                subprocess.CompletedProcess(
+                    ["agate-sdk", "upload"],
+                    1,
+                    "",
+                    f"source preparation failed: {error}",
+                ),
+                400,
+            ) from None
 
         try:
             accepted = client.submit_job(sdk_kind, wire)
@@ -447,19 +413,19 @@ def run_sdk_job(
         except GatewayError as error:
             process = _sdk_error_process(error, stage="submit")
             status = getattr(error, "status", None)
-            # A complete 4xx/429/503 response proves no new job was accepted.
-            # Other 5xx responses can come from a proxy after dispatch.
             if isinstance(status, int) and (status < 500 or status == 503):
                 raise SubmissionRejected(process, status) from None
             raise SubmissionUncertain(process) from None
         job_id = accepted.get("job_id") if isinstance(accepted, dict) else None
         if not isinstance(job_id, str) or not job_id:
-            raise SubmissionUncertain(subprocess.CompletedProcess(
-                ["agate-sdk", "submit"],
-                75,
-                "",
-                "Agate SDK returned no confirmed job ID",
-            ))
+            raise SubmissionUncertain(
+                subprocess.CompletedProcess(
+                    ["agate-sdk", "submit"],
+                    75,
+                    "",
+                    "Agate SDK returned no confirmed job ID",
+                )
+            )
         return subprocess.CompletedProcess(
             ["agate-sdk", "submit"], 0, json.dumps(accepted), ""
         )
@@ -566,18 +532,21 @@ def run_eval_sdk(
         eval_semantics=True,
     )
 
+
 def diagnostic_request(request, workspace, kind, *, timeout=600):
-    policy, files = unpack(snapshot(workspace))
-    if not requires_archive(policy, files):
-        return request
+    from aka.light.workspace.sources import read
+    artifact = read(workspace)
+    route = artifact.layout.diagnostic_route(kind)
+    if route in {"single", "typed"}:
+        return attach(request, workspace, source=artifact.snapshot)
+    files = artifact.files
     if request.get("profiler", "ncu") != "ncu" or request.get("fmt") == "isa":
         raise ValueError("Source-tree diagnostics currently support NVIDIA NCU and auto/sass/ptx")
     reference = request.get("reference", request.get("diagnostic_reference"))
     parameters = {key: request[key] for key in ("profiler", "level", "counters", "kernel_regex", "kernel_name",
                   "source", "launch_skip", "launch_count", "top_kernels", "arch", "sanitize", "fmt") if key in request}
     timeout = min(10800, timeout + 30)
-    diagnostic = {"operation": kind, "entrypoint": entrypoint(policy), "package_root": policy["package_root"],
-                  "runtime_requirements": policy["runtime_requirements"], "requirements": request.get("requirements", []),
+    diagnostic = {"operation": kind, **artifact.diagnostic_source(), "requirements": request.get("requirements", []),
                   "shapes": reference["shapes"], "parameters": parameters, "lock_clocks": True,
                   "timeout_s": max(1, timeout - 30)}
     from aka.legacy.evaluation.resources import ncu_profile_script
@@ -593,7 +562,7 @@ def diagnostic_request(request, workspace, kind, *, timeout=600):
 
 
 def run(gateway, args, request, kind, queue_wait_grace, *, identity_extra=None):
-    """Run any typed or source-tree operation through the published SDK."""
+    """Run typed and source-tree operations through one SDK lifecycle."""
     diagnostic = request.get(DIAGNOSTIC)
     if kind == "run" and diagnostic is None:
         return run_eval_sdk(

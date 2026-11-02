@@ -6,7 +6,6 @@ facts rather than model-reported ones.
 from __future__ import annotations
 
 
-import hashlib
 import json
 import math
 import re
@@ -17,7 +16,9 @@ from typing import Optional
 # Re-export shared facts/fields for existing callers; policy stays local.
 from aka.legacy.task.candidate_workspace.state import (
     git_head,
+    v0_baseline_commit,
     read_framework_baseline,
+    resolve_framework_baseline_commit as _legacy_resolve_framework_baseline_commit,
     _normalize_commit_hash,
 )
 from aka.legacy.task.git import git_path_blob, git_worktree_blob
@@ -88,78 +89,23 @@ def speedup_vs_reference(
 
 
 # ── git is the SINGLE source of truth for a "committed win" ───────────────────
-# Every managed Kernel is a source tree whose kernel.py entry point is required and editable.
-# Win/stall facts therefore compare canonical source snapshots.
+# A real win changes the complete candidate source. A metadata-only record leaves source
+# identical to its parent. Everything (stall counter, target-met, convert incumbent) keys off
+# this git fact, NOT off the LLM-filled git_commit_hash / quality_gate in memory (which can drift
+# from what actually got committed). One primitive, reused everywhere: commit_changed_kernel().
 
 
 def git_kernel_blob(workspace: Path) -> str:
-    """Committed evaluator-entry blob for a managed Kernel source tree."""
-    from aka.light.workspace.sources import entrypoint, policy_at
-    return git_path_blob(workspace, "HEAD", entrypoint(policy_at(workspace, committed=True)))
+    """Committed candidate identity, stable across metadata-only commits."""
+    from aka.light.workspace.sources import revision_identity
+    return revision_identity(workspace)
 
 
-def v0_baseline_commit(workspace: Path) -> str:
-    """Commit that introduced this Campaign's evaluator entry point."""
-    from aka.light.workspace.sources import ENTRYPOINT
-    path = ENTRYPOINT
-    result = subprocess.run(
-        ["git", "rev-list", "--reverse", "HEAD", "--", path],
-        cwd=str(workspace), capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return ""
-    commits = result.stdout.split()
-    return commits[0] if commits else ""
-
-
-def resolve_framework_baseline_commit(workspace: Path) -> tuple[str, int]:
-    """Verify a framework pin against its recorded source-tree entry point."""
-    marker = read_framework_baseline(workspace)
-    if marker is None:
-        return "", 0
-    commit = _normalize_commit_hash(marker.get("commit"))
-    if not commit:
-        raise RuntimeError("framework_baseline.json has no usable commit hash")
-    exists = subprocess.run(
-        ["git", "rev-parse", "--verify", f"{commit}^{{commit}}"], cwd=str(workspace),
-        capture_output=True, text=True,
-    )
-    ancestry = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", commit, "HEAD"], cwd=str(workspace),
-        capture_output=True, text=True,
-    )
-    if exists.returncode != 0 or ancestry.returncode != 0:
-        raise RuntimeError(f"framework_baseline.json points at unusable commit {commit[:12]}")
-    source_entry = marker.get("source_entry", "kernel.py")
-    source_blob = marker.get("source_blob", marker.get("kernel_blob"))
-    if not isinstance(source_entry, str) or not source_entry or not isinstance(source_blob, str):
-        raise RuntimeError("framework_baseline.json has no usable source identity")
-    blob = subprocess.run(
-        ["git", "rev-parse", f"{commit}:{source_entry}"], cwd=str(workspace),
-        capture_output=True, text=True,
-    )
-    if blob.returncode != 0 or blob.stdout.strip() != source_blob:
-        raise RuntimeError(
-            f"framework_baseline.json source blob does not match commit {commit[:12]}"
-        )
-    source_digest = marker.get("source_digest")
-    if source_digest is not None:
-        try:
-            from aka.light.workspace.sources import from_git
-            actual_digest = hashlib.sha256(from_git(workspace, commit)).hexdigest()
-        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-            raise RuntimeError(
-                f"framework_baseline.json cannot read source at {commit[:12]}"
-            ) from exc
-        if source_digest != actual_digest:
-            raise RuntimeError(
-                f"framework_baseline.json source digest does not match commit {commit[:12]}"
-            )
-    version_text = str(marker.get("version") or "")
-    match = re.fullmatch(r"v(\d+)", version_text)
-    if match is None:
-        raise RuntimeError(f"framework_baseline.json has an unusable version {version_text!r}")
-    return commit, int(match.group(1))
+def commit_changed_kernel(workspace: Path, commit: str) -> bool:
+    """Count changes to the complete candidate through its file system."""
+    from aka.light.workspace.sources import revision_changed
+    commit = _normalize_commit_hash(commit)
+    return bool(commit) and revision_changed(workspace, commit)
 
 
 def head_kernel_is_initial_baseline(workspace: Path) -> bool:
@@ -167,8 +113,8 @@ def head_kernel_is_initial_baseline(workspace: Path) -> bool:
 
     Production V0 is intentionally allowed to be a PyTorch reference wrapper.
     Later failed-policy/dead-end records may advance ``memory/vN.json`` and Git
-    metadata without changing Kernel source. Resume must recognize that state
-    by whole-tree provenance, not by assuming ``latest_version > 0`` means an
+    metadata without changing ``kernel.py``.  Resume must recognize that state
+    by kernel provenance, not by assuming ``latest_version > 0`` means an
     optimized kernel was accepted.
 
     Once the framework-baseline stage lands v1 this returns False, because the
@@ -178,28 +124,10 @@ def head_kernel_is_initial_baseline(workspace: Path) -> bool:
     baseline_commit = v0_baseline_commit(workspace)
     if not baseline_commit:
         return False
-    try:
-        from aka.light.workspace.sources import from_git
-        baseline = from_git(workspace, baseline_commit)
-        current = from_git(workspace, "HEAD")
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
-        return False
-    return baseline == current
+    from aka.light.workspace.sources import revision_identity
+    baseline_identity = revision_identity(workspace, baseline_commit)
+    return bool(baseline_identity and baseline_identity == git_kernel_blob(workspace))
 
-
-def commit_changed_source(workspace: Path, commit: str) -> bool:
-    """Whether a commit changes the canonical Kernel source, not metadata."""
-    parent = subprocess.run(
-        ["git", "rev-parse", f"{commit}^"], cwd=str(workspace),
-        capture_output=True, text=True,
-    )
-    if parent.returncode != 0:
-        return True
-    try:
-        from aka.light.workspace.sources import from_git
-        return from_git(workspace, commit) != from_git(workspace, parent.stdout.strip())
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
-        return False
 
 
 def read_stall(workspace: Path) -> Optional[int]:
@@ -227,7 +155,7 @@ def write_stall(workspace: Path, stall: int) -> None:
 def reconstruct_stall(workspace: Path) -> int:
     """Best-effort rebuild of the live stall counter from git when no persisted state exists yet
     (e.g. a workspace from before state was tracked). Counts trailing commits from HEAD that did
-    NOT change Kernel source; a source-changing win stops the count. read_stall() is authoritative —
+    NOT change kernel.py; a win (kernel.py change) stops the count. read_stall() is authoritative —
     this only bootstraps it, so it does not attempt to replay convert-issued resets."""
     try:
         r = subprocess.run(["git", "rev-list", "HEAD"], cwd=str(workspace),
@@ -238,7 +166,7 @@ def reconstruct_stall(workspace: Path) -> int:
         return 0
     trailing = 0
     for h in r.stdout.split():
-        if commit_changed_source(workspace, h):   # a win -> stop counting
+        if commit_changed_kernel(workspace, h):   # a win -> stop counting
             break
         trailing += 1
     return trailing
@@ -276,3 +204,21 @@ def best_validated_latency_us(workspace: Path, *, from_version: Optional[int] = 
         if isinstance(latency, (int, float)):
             best = float(latency) if best is None else min(best, float(latency))
     return best
+
+
+def resolve_framework_baseline_commit(workspace: Path) -> tuple[str, int]:
+    marker = read_framework_baseline(workspace)
+    if not marker or not marker.get("source_sha256"):
+        return _legacy_resolve_framework_baseline_commit(workspace)
+    from aka.light.workspace.sources import from_git
+    import hashlib
+    commit = _normalize_commit_hash(marker.get("commit"))
+    if not commit or subprocess.run(["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+                                    cwd=workspace, capture_output=True).returncode:
+        raise RuntimeError("Framework baseline source commit is not an ancestor of HEAD")
+    if hashlib.sha256(from_git(workspace, commit)).hexdigest() != marker["source_sha256"]:
+        raise RuntimeError("Framework baseline source digest does not match its commit")
+    version = re.fullmatch(r"v(\d+)", str(marker.get("version", "")))
+    if version is None:
+        raise RuntimeError("Invalid framework baseline version")
+    return commit, int(version[1])

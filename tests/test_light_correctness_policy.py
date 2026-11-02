@@ -370,14 +370,14 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 return_value=[],
             ),
             patch.object(Campaign, "_v0_baseline_commit", return_value="v0"),
-            patch(
-                "aka.light.workspace.sources.snapshot", return_value=b"source-tree"
-            ),
-            patch("aka.light.workspace.sources.from_git", return_value=b"source-tree"),
-            patch(
-                "aka.light.workspace.sources.unpack",
-                return_value=(None, {"kernel.py": b"implementation"}),
-            ),
+            patch("aka.light.workspace.sources.revision_contains_reference",
+                  return_value=reference_blob == implementation_blob),
+            patch("aka.light.workspace.sources.layout_at",
+                  return_value=SimpleNamespace(replaceable_baseline=True)),
+            patch("aka.light.workspace.sources.read",
+                  return_value=SimpleNamespace(snapshot=b"source-tree")),
+            patch("aka.light.workspace.sources.from_revision",
+                  return_value=SimpleNamespace(snapshot=b"source-tree")),
             patch(
                 "aka.light.workflow.bootstrap.git_path_blob",
                 side_effect=committed_blob,
@@ -585,6 +585,9 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             "mode": "full",
             "lock_clocks": True,
             "env_vars": {},
+            "__atrex_eval_archives": {
+                "candidate": {"kernel.py": "class Model: pass\n"}
+            },
         }
         timeout_job = subprocess.CompletedProcess(
             ["agate-sdk", "get"],

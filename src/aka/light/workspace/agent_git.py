@@ -184,7 +184,10 @@ class AgentGit:
         return value if result.returncode == 0 and value else None
 
     def checkpoint(self, message: str) -> str | None:
-        paths = ["kernel.py", "implementation", ".gitignore"]
+        from aka.light.workspace.sources import commit_paths
+
+        paths = commit_paths(self.workspace, normalize=self.head() is not None)
+        paths.append(".gitignore")
         _run(self.workspace, "add", "--", *paths)
         staged = _run(self.workspace, "diff", "--cached", "--quiet", check=False)
         if staged.returncode == 1 or self.head() is None:
@@ -194,11 +197,14 @@ class AgentGit:
         return self.head()
 
     def capture(self) -> dict[str, Any]:
+        from aka.light.workspace.sources import commit_paths
+
         head = self.head()
+        paths = commit_paths(self.workspace, normalize=False)
         status = _run(
             self.workspace,
             "status", "--porcelain=v1", "--untracked-files=no", "--",
-            "kernel.py", "implementation",
+            *paths,
             check=False,
         )
         clean = status.returncode == 0 and not status.stdout.strip()

@@ -74,10 +74,6 @@ class NumericalCancellation:
         self.check()
         if self.parent is not None and self.parent.deadline is not None:
             remaining = self.parent.deadline - time.monotonic()
-            # An unlimited Episode is represented by an infinite deadline.
-            # Keep the nested request's own timeout instead of converting the
-            # sentinel to int, which raises OverflowError while accepting an
-            # otherwise valid attempt report.
             if math.isfinite(remaining):
                 return max(1, min(seconds, int(remaining)))
         return seconds
@@ -122,6 +118,9 @@ def validate_candidate(
             private = Path(campaign.private_reference_dir) if campaign.private_reference_dir else None
             for name in ("input.py", "reference.py", "shapes.json", "metadata.json", "agent_problem.json", "public_shapes.json",
                          "solution.json", "config.json", "definition.json", "workload.jsonl"):
+                from aka.light.workspace.sources import layout_at
+                if layout_at(frozen).owns(name):
+                    continue
                 if private is not None and name != "solution.json" and (private / name).is_file():
                     data = read_input(private, name)
                 else:
@@ -138,7 +137,7 @@ def validate_candidate(
                 if (frozen / "workload.jsonl").is_file():
                     durable_write_json(state_root / "numerical_feedback.json", {
                         "status": "advisory", "reason": "supplemental input ABI unsupported for SOL",
-                        "kernel_sha256": hashlib.sha256(read_input(frozen, "kernel.py")).hexdigest(),
+                        "kernel_sha256": hashlib.sha256(source_snapshot(frozen)).hexdigest(),
                     })
                     return ""
                 return f"{SUPPLEMENTAL_PENDING_PREFIX}: trusted input.py/reference.py/shapes.json unavailable"
@@ -164,6 +163,9 @@ def _sources(campaign, workspace):
     from aka.light.workflow.session_io import _production_review_candidate_paths
 
     files = {"instructions.md": PROMPT, "driver.py": DRIVER, "numerical_inputs.py": PROBE_ALGORITHMS, "transport.py": HARNESS}
+    from aka.light.workspace.sources import layout_at
+    if layout_at(workspace).typed_only:
+        files["typed_transport.py"] = Path(__file__).resolve().with_name("typed_numerical.py")
     for source in _production_review_candidate_paths(workspace):
         files["candidate/" + source.relative_to(workspace).as_posix()] = source
     # Metadata/configuration are part of the pinned public input contract and
@@ -311,6 +313,10 @@ def _run_probes(campaign, workspace, suite, shapes_path, digest, directory, *, c
         raise ValueError("retained probe world_size differs from the trusted contract")
     shapes = json.loads(shapes_path.read_text())
     schedule = validation_schedule(suite, shapes, digest, "thorough")
+    from aka.light.workspace.sources import layout_at
+    if layout_at(workspace).typed_only:
+        from aka.light.acceptance.typed_numerical import run
+        return run(campaign, workspace, suite, shapes, schedule, directory, cancel=cancel)
     results = []
     for index, plan in enumerate(schedule):
         cancel.check()
@@ -334,7 +340,7 @@ def _run_probes(campaign, workspace, suite, shapes_path, digest, directory, *, c
             probe = Path(temporary)
             from aka.light.workspace.sources import install, snapshot as source_snapshot
             install(probe, source_snapshot(workspace))
-            for name in ("kernel.py", "solution.json", "input.py", "reference.py", "shapes.json",
+            for name in ("solution.json", "input.py", "reference.py", "shapes.json",
                          "metadata.json", "agent_problem.json", "config.json", "definition.json", "workload.jsonl"):
                 if (workspace / name).is_file():
                     publish(probe, name, read_input(workspace, name))
@@ -568,7 +574,7 @@ def supplemental_feedback(campaign, workspace, *, state_root, standard_correctne
     elif status == "needs_repair":
         if flow == "framework_baseline":
             next_step = (
-                "Repair the editable Kernel implementation, rerun the bounded V1 smoke command, then stop. "
+                "Repair the candidate sources, rerun the bounded V1 smoke command, then stop. "
                 "Do not submit episode-report. "
             )
         elif experiments_enabled:

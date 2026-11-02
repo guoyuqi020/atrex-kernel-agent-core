@@ -15,10 +15,10 @@
 
 """Run optimizer GPU work through a gateway or an OpenSSH GPU host.
 
-In gateway mode, native Atrex-Bench correctness/performance commands use the
-public Agate SDK for both inline and source-tree candidates; Profile, Check,
-Disassemble, Dev and Env use the same SDK authority and job lifecycle. Failed typed evaluations recover explicitly
-classified infrastructure failures and never switch to ``dev``. ``dev`` remains the
+In gateway mode, native Atrex-Bench correctness/performance commands use
+``agate eval --backend atrex`` and profiling commands use ``profile``. Failed
+typed evaluations recover explicitly classified infrastructure failures and never
+switch to ``dev``. ``dev`` remains the
 compatibility escape hatch for workloads those typed interfaces cannot represent
 (for example SOL-ExecBench, source-correlated custom profiling, or a community
 gateway that explicitly returns ``kind_not_supported``). OpenSSH mode executes
@@ -41,11 +41,11 @@ the corresponding flags.  A
 localhost gateway uses the same transport as a remote worker, for example
 ``ATREX_SANDBOX_GPU=local`` plus
 ``ATREX_SANDBOX_URL=http://127.0.0.1:8000``.  Authentication and any remaining
-URL resolution use the SDK with the same AGATE_* and ~/.atrex/config.json
-precedence as the CLI. Source trees and large Dev inputs are packed once, reserved
-through the SDK upload API, transferred through OSS, integrity-checked, and extracted
-by the evaluator or Runtime bootstrap. Only explicit SSH and presigned OSS artifact
-downloads use a non-SDK transport.
+URL resolution stay agate's responsibility (AGATE_* or ~/.atrex/config.json).
+With a standard agate gateway profile, synchronized remote files are packed once
+on the worker, transferred through OSS, integrity-checked, and extracted locally.
+Custom endpoints selected by URL, ``AGATE_URL``, or agate config retain inline
+transport because gateways do not currently advertise OSS capability.
 
 ``ATREX_SANDBOX_SSH`` selects a standard OpenSSH target (including aliases from
 ``~/.ssh/config``). ``ATREX_SANDBOX_SSH_INIT`` optionally activates the remote
@@ -89,12 +89,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from threading import Lock
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 from aka.contracts.evaluation import (  # noqa: E402
     DEFAULT_ABBA_REPEATS,
+    DEFAULT_ABBA_RUN_TIMEOUT,
     DEFAULT_EVALUATION_STEP_TIMEOUT,
     derived_evaluation_timeout,
     typed_gateway_job_timeout,
@@ -143,7 +144,6 @@ from aka.light.execution.gateway_jobs import (  # noqa: E402
     SubmissionUncertain,
     bundle_digest,
     command_identity,
-    configured_max_infra_retries,
     eval_retry_kind,
     execute_job,
     job_from_process,
@@ -158,9 +158,9 @@ from aka.light.execution.gateway_jobs import (  # noqa: E402
 from aka.light.evaluation.shapes import (
     request_shape_ids as _request_shape_ids,
     batch_shape_ids as batch_shape_ids,
+    shape_batch_request as _shape_batch_request,
     effective_shape_batch_size,
     shape_request_timeout,
-    shape_batch_request as _shape_batch_request,
 )
 
 from aka.light.evaluation.result_conversion import (
@@ -240,6 +240,7 @@ OUTPUT_END = "__ATREX_SANDBOX_OUTPUT_END__"
 DEFAULT_COMMAND_TIMEOUT = derived_evaluation_timeout()
 DEFAULT_EVAL_SHAPE_BATCH_SIZE = SHAPE_BATCH_SIZE
 DEFAULT_EVAL_BATCH_WORKERS = BATCH_WORKERS
+FP4_MAX_REL_L2 = 0.2
 MAX_DEV_JOB_TIMEOUT = 600
 MAX_HTTP_REQUEST_TIMEOUT = 600
 RECOVERY_GET_TIMEOUT = 30
@@ -407,68 +408,94 @@ def _append_typed_dependency_options(
         command += ["--deps-mode", deps_mode]
 
 def _run_environment_query(args: argparse.Namespace) -> int:
-    """Retry SDK discovery within a deadline; never classify it as a Kernel failure."""
+    """Retry read-only discovery within a deadline; never classify it as a Kernel failure."""
     if args.ssh:
         raise SystemExit("sandbox: --kind env requires an Agate Gateway endpoint")
-    from aka.light.evaluation.source_transport import _load_sdk_client, _sdk_error_process
-
-    client, _url, GatewayError, TransportError = _load_sdk_client(args)
+    executable = find_agate()
+    url = _resolved_gateway_url(
+        executable,
+        url=args.url,
+        profile=args.gateway_profile,
+    )
+    if url:
+        path = "/v1/env"
+        if args.env_gpu:
+            encoded = urllib.parse.quote(args.env_gpu, safe="")
+            path = f"/v1/env/{encoded}"
+            if args.env_capabilities:
+                path += "/capabilities"
+        if args.env_force:
+            path += "?force=true"
+    else:
+        if executable is None:
+            raise SystemExit("sandbox: agate not found and no explicit --url was provided")
+        command = [executable, "env"]
+        if args.gateway_profile:
+            command += ["--profile", args.gateway_profile]
+        if args.env_gpu:
+            command.append(args.env_gpu)
+        if args.env_capabilities:
+            command += ["--frameworks", "--limits"]
+        if args.env_force:
+            command.append("--force")
+        command.append("--json")
     deadline = time.monotonic() + args.timeout
     failures = 0
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise EvidenceUnavailable(
-                "Environment discovery timed out; no GPU job was submitted"
-            )
+            raise EvidenceUnavailable("Environment discovery timed out; no GPU job was submitted")
         retry_after = 0.0
         try:
-            if args.env_gpu:
-                value = (
-                    client.get_capabilities(args.env_gpu, force=args.env_force)
-                    if args.env_capabilities
-                    else client.get_env(args.env_gpu, force=args.env_force)
-                )
+            if url:
+                value = _gateway_json(url, "GET", path, None, min(remaining, 120 if args.env_force else 30))
+                completed = subprocess.CompletedProcess([], 0, json.dumps(value), "")
             else:
-                value = {"env": client.list_env(force=args.env_force)}
-            if not isinstance(value, dict):
-                raise GatewayResponseError(
-                    "Environment service returned a non-object response"
+                completed = subprocess.run(
+                    command, capture_output=True, text=True, check=False,
+                    timeout=min(remaining, 180 if args.env_force else 60),
                 )
+                if completed.returncode:
+                    rejection = submission_rejection(completed)
+                    if request_is_infrastructure(completed) or (rejection and (
+                            rejection.retryable or rejection.status is not None and rejection.status >= 500)):
+                        raise GatewayResponseError("Environment service unavailable")
+                    # A received CLI HTTP 5xx is safe to retry for this GET, even
+                    # though that same response cannot authorize replay of a POST.
+                    if re.search(r"(?m)^agate: \[5\d{2}\]", completed.stderr or ""):
+                        raise GatewayResponseError("Environment service unavailable")
+                    if not emit_gateway_error(completed, "env"):
+                        print(GATEWAY_ERROR_PREFIX + json.dumps(gateway_error_result({
+                            "operation": "env", "error": completed.stderr or completed.stdout,
+                        })))
+                    return completed.returncode
+                try:
+                    value = json.loads(completed.stdout)
+                except ValueError as exc:
+                    raise GatewayResponseError("Environment service returned malformed JSON") from exc
+            if request_is_infrastructure(completed):
+                raise GatewayResponseError("Environment service unavailable")
+            if not isinstance(value, dict):
+                raise GatewayResponseError("Environment service returned a non-object response")
             break
-        except GatewayError as error:
-            status = getattr(error, "status", None)
-            process = _sdk_error_process(error, stage="env")
-            if (
-                isinstance(status, int)
-                and status < 500
-                and status not in {408, 429}
-                and not request_is_infrastructure(process)
-            ):
-                if not emit_gateway_error(process, "env"):
-                    print(
-                        GATEWAY_ERROR_PREFIX
-                        + json.dumps(
-                            gateway_error_result(
-                                {"operation": "env", "error": process.stdout}
-                            )
-                        )
-                    )
+        except InvalidURL:
+            raise GatewayConfigurationError("Invalid Gateway URL.", next_action=(
+                "Ask the operator to correct the Supervisor Gateway endpoint and restart the Session; "
+                "do not change Agent arguments or bypass the Runtime."
+            )) from None
+        except GatewayHTTPError as exc:
+            if exc.status < 500 and exc.status not in {408, 429} and not request_is_infrastructure(
+                    subprocess.CompletedProcess([], 1, exc.detail, "")):
+                print(GATEWAY_ERROR_PREFIX + json.dumps(gateway_http_error_result(exc.status, exc.detail, "env")))
                 return 1
-            retry_after = getattr(error, "retry_after_s", None) or 0.0
-        except (TransportError, OSError, GatewayResponseError):
-            pass
+            retry_after = exc.retry_after_s or 0.0
+        except (OSError, subprocess.TimeoutExpired, GatewayResponseError):
+            pass  # Do not leak credential-bearing transport exception text.
         failures += 1
         delay = max(retry_delay(failures), retry_after)
         if deadline - time.monotonic() <= delay:
-            raise EvidenceUnavailable(
-                "Environment discovery retry deadline reached; no GPU job was submitted"
-            )
-        print(
-            f"[sandbox] Environment service unavailable; retrying in {delay:g}s",
-            file=sys.stderr,
-            flush=True,
-        )
+            raise EvidenceUnavailable("Environment discovery retry deadline reached; no GPU job was submitted")
+        print(f"[sandbox] Environment service unavailable; retrying in {delay:g}s", file=sys.stderr, flush=True)
         time.sleep(delay)
     print(ENV_RESULT_PREFIX + json.dumps(value, ensure_ascii=False))
     return 0
@@ -673,34 +700,8 @@ def _make_input_bundle(
 
 def _declared_candidate_sources(workspace: Path) -> set[str]:
     """Return the complete contracted tree or legacy solution sources."""
-    from aka.light.workspace.sources import policy_at, collect
-    policy = policy_at(workspace)
-    if policy is not None:
-        return set(collect(workspace, policy))
-    selected: set[str] = set()
-    solution_path = workspace / "solution.json"
-    if solution_path.is_file():
-        try:
-            solution = json.loads(solution_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"invalid workspace solution.json: {exc}") from exc
-        sources = solution.get("sources", []) if isinstance(solution, dict) else []
-        if not isinstance(sources, list):
-            raise RuntimeError(
-                "workspace solution.json sources must be a list of paths"
-            )
-        for source in sources:
-            if isinstance(source, str):
-                source_path = source
-            elif isinstance(source, dict) and isinstance(source.get("path"), str):
-                source_path = source["path"]
-            else:
-                raise RuntimeError(
-                    "workspace solution.json source entries must be paths or path objects"
-                )
-            selected.add(_safe_relative(source_path))
-
-    return selected
+    from aka.light.workspace.sources import declared_paths
+    return declared_paths(workspace)
 
 
 def _evaluation_input_paths(
@@ -762,10 +763,6 @@ def _referenced_workspace_inputs(workspace: Path, parts: list[str]) -> set[str]:
         # custom code string must be declared explicitly with --input.
         if index > 0 and parts[index - 1] in {"-c", "--command"}:
             continue
-        # Preserve automatic discovery for conventional ``--option=path``
-        # arguments without treating the option name as part of the path. In
-        # particular, arbitrary inline values such as NCU's comma-separated
-        # metrics list are ordinary argv and must not become filesystem names.
         candidate = (
             token.partition("=")[2]
             if token.startswith("--") and "=" in token
@@ -782,9 +779,8 @@ def _referenced_workspace_inputs(workspace: Path, parts: list[str]) -> set[str]:
             elif source.is_dir():
                 selected.update(_expand_workspace_input(workspace, normalized))
         except OSError:
-            # Automatic argv discovery is best-effort. Tokens can be long
-            # inline JSON, metric lists, binary-ish data, or otherwise invalid
-            # as local filenames. Explicit --input paths remain strict.
+            # Command-line values such as long profiler metric lists are not
+            # workspace paths. Automatic discovery is deliberately best-effort.
             continue
     return selected
 
@@ -945,9 +941,8 @@ def public_dev_output(command: list[str]) -> bool:
 def evaluation_policy(command: list[str], mode: str | None = None) -> dict[str, Any]:
     """Resolve Atrex-Bench correctness policy before execution and task hashing.
 
-    Every Agent-visible Evaluate checks the same Runtime-owned five cases.  The
-    caller may select Shapes or omit timing, but cannot weaken correctness by
-    changing the number of generated cases.
+    Every Agent-visible Evaluate checks the same Runtime-owned cases. Shape
+    selection may narrow performance coverage, but must not weaken correctness.
     """
     seed_values = _option_values(command, "--multi-seed")
     if seed_values:
@@ -1008,13 +1003,24 @@ def _workspace_num_gpus(workspace: Path) -> int:
     return _distributed_evaluation_world_size(metadata)
 
 
+def _fp4_correctness_max_rel_l2(
+    metadata: dict[str, Any] | None,
+    operator: object = None,
+) -> float | None:
+    return (
+        FP4_MAX_REL_L2
+        if _metadata_has_fp4_dtype(metadata) or _is_fp4_dtype(operator)
+        else None
+    )
+
+
 def _is_generalized_workspace(workspace: Path) -> bool:
-    """Return whether this workspace uses private exact-case handling."""
+    """Return whether this workspace uses a generalized public task contract."""
     return (workspace / AGENT_PROBLEM_FILENAME).is_file()
 
 
 def private_reference_dir(workspace: Path, *, environment: Mapping[str, str] | None = None) -> Path | None:
-    """Resolve private evaluator inputs only for a generalized workspace."""
+    """Resolve private evaluator inputs only for a generalized production workspace."""
     if not _is_generalized_workspace(workspace):
         return None
     raw = (os.environ if environment is None else environment).get(PRIVATE_REFERENCE_ENV, "")
@@ -1116,11 +1122,11 @@ def _typed_workspace_limitation(
     workspace: Path, command: list[str], kind: str
 ) -> str | None:
     """Explain why the typed run/profile source contract cannot represent a workspace."""
-    from aka.light.workspace.sources import entrypoint, policy_at
-    source_policy = policy_at(workspace)
-    source_tree = source_policy is not None
-    candidate_entry = entrypoint(source_policy)
-    required = (candidate_entry, "reference.py", "input.py")
+    from aka.light.workspace.sources import typed_limitation
+    limitation = typed_limitation(workspace)
+    if limitation:
+        return limitation
+    required = ("reference.py", "input.py")
     missing = [name for name in required if not (workspace / name).is_file()]
     if missing:
         return "missing " + ", ".join(missing)
@@ -1138,45 +1144,6 @@ def _typed_workspace_limitation(
             "SOL-ExecBench workload.jsonl is not supported by the Atrex-Bench typed API"
         )
 
-    solution = read_json_object(workspace / "solution.json")
-    if solution is not None:
-        sources = solution.get("sources")
-        if isinstance(sources, list):
-            source_paths = {
-                str(item.get("path"))
-                for item in sources
-                if isinstance(item, dict) and item.get("path")
-            }
-            if source_paths - {"kernel.py"} and not source_tree:
-                return "solution.json declares auxiliary candidate sources"
-
-    try:
-        tree = ast.parse((workspace / candidate_entry).read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, SyntaxError):
-        tree = None
-    if tree is not None:
-        imported_roots: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported_roots.update(
-                    alias.name.split(".", 1)[0] for alias in node.names
-                )
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported_roots.add(node.module.split(".", 1)[0])
-        local_imports = sorted(
-            root
-            for root in imported_roots
-            if root not in {"input", "reference", "kernel"}
-            and (
-                (workspace / f"{root}.py").is_file()
-                or (workspace / root / "__init__.py").is_file()
-            )
-        )
-        if local_imports and not source_tree:
-            return "candidate imports local auxiliary modules: " + ", ".join(
-                local_imports
-            )
-
     # These test-harness controls do not exist in the typed request contract.
     # Preserve their exact semantics through dev instead of silently dropping them.
     unsupported_options = (
@@ -1184,9 +1151,6 @@ def _typed_workspace_limitation(
         "--workspace",
         "--candidate-timeout-s",
         "--perf-timeout-s",
-        "--atol",
-        "--rtol",
-        "--correctness-max-rel-l2",
     )
     for option in unsupported_options:
         if _option_value(command, option) is not None:
@@ -1194,6 +1158,15 @@ def _typed_workspace_limitation(
     warmup = _option_value(command, "--warmup")
     if warmup is not None and str(warmup) != str(WARMUP_ITERS):
         return "non-default --warmup is not supported by the typed API"
+    for option, default in (("--atol", 1e-2), ("--rtol", 0.05)):
+        value = _option_value(command, option)
+        if value is not None:
+            try:
+                matches_default = float(value) == default
+            except (TypeError, ValueError):
+                matches_default = False
+            if not matches_default:
+                return f"non-default {option} is not exposed by agate eval"
     return None
 
 
@@ -1266,9 +1239,6 @@ def build_typed_request(
     evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT,
 ) -> dict[str, Any]:
     """Build a Gateway typed request without importing the agate package."""
-    from aka.light.workspace.sources import entrypoint, policy_at
-    candidate_entry = entrypoint(policy_at(workspace))
-    candidate_source = (workspace / candidate_entry).read_text(encoding="utf-8")
     dependency_specs = list(requirements)
     if len(dependency_specs) > 128:
         raise ValueError("at most 128 --requirement values are allowed")
@@ -1333,10 +1303,8 @@ def build_typed_request(
                 raise ValueError("each --shapes-path record must be a JSON object")
         shapes = custom_shape_value
         custom_shapes = True
-    solution = read_json_object(workspace / "solution.json") or {}
-    languages = solution.get("languages")
-    if not isinstance(languages, list):
-        languages = []
+    from aka.light.workspace.sources import language_hints
+    languages = language_hints(workspace)
     # Agate's native Eval contract accepts the optional language hint, while
     # the native Profile contract currently rejects it as an extra field.
     # Keep the shared hardware selector in both requests and add languages only
@@ -1357,7 +1325,7 @@ def build_typed_request(
             raise ValueError(f"shape {selected_shape_id!r} init_kwargs must be an object or null")
         request: dict[str, Any] = {
             "spec": {"target_hardware": [hardware]},
-            "candidate": candidate_source,
+            "candidate": None,
             "env_vars": _parse_env_items(env_items),
             "init_kwargs": dict(init_value or {}),
             # Local Gateway uses this evaluator-owned input to perform a real
@@ -1399,6 +1367,7 @@ def build_typed_request(
         # gateway must honor the adapter's targeted-smoke contract instead of
         # silently expanding a one-shape request back to the complete workload.
         requested_shape_ids = list(dict.fromkeys(requested_shape_ids))
+        shapes = {shape_id: shapes[shape_id] for shape_id in requested_shape_ids}
     try:
         policy = evaluation_policy(command, evaluation_mode) if kind == "run" else None
         correctness_cases = policy["num_correctness_cases"] if policy else CORRECTNESS_CASES
@@ -1425,6 +1394,15 @@ def build_typed_request(
         ):
             value = read_json_object(_evaluator_input_path(workspace, filename, required=False))
             if value is not None:
+                if requested_shape_ids and isinstance(value.get("shapes"), dict):
+                    value = dict(value)
+                    value["shapes"] = {
+                        shape_id: value["shapes"][shape_id]
+                        for shape_id in requested_shape_ids
+                        if shape_id in value["shapes"]
+                    }
+                    if filename == "metadata.json" and "num_shapes" in value:
+                        value["num_shapes"] = len(requested_shape_ids)
                 reference[field] = value
 
     num_gpus = _distributed_evaluation_world_size(reference.get("metadata"))
@@ -1433,7 +1411,7 @@ def build_typed_request(
     request: dict[str, Any] = {
         "name": f"{workspace.name}_{kind}",
         "spec": spec,
-        "candidate": candidate_source,
+        "candidate": None,
         "reference": reference,
         "options": {
             "num_correctness_cases": correctness_cases,
@@ -1446,8 +1424,6 @@ def build_typed_request(
         request["mode"] = policy["mode"]
         request["lock_clocks"] = True
         request["runner_overrides"] = runner_overrides(evaluation_step_timeout)
-        if requested_shape_ids:
-            request["runner_overrides"]["shape_ids"] = requested_shape_ids
         if dependency_specs:
             request["requirements"] = dependency_specs
         if deps_mode is not None:
@@ -1513,6 +1489,7 @@ def _make_atrex_bench_runtime_bundle(
     run_eval = runtime_root / "scripts" / "run_eval.py"
     package = runtime_root / "src" / "atrex_bench"
     utils_module = package / "utils.py"
+    sdk_module = package / "sdk.py"
     if (
         not package.is_dir()
         or not run_eval.is_file()
@@ -1528,13 +1505,16 @@ def _make_atrex_bench_runtime_bundle(
     # rather than emitting links to paths unavailable on the remote worker.
     with tarfile.open(fileobj=archive, mode="w:gz", dereference=True) as tf:
         if evaluator_only:
-            # Keep every package-root module. Public Atrex-Bench releases use
-            # root modules such as ``shards``, ``ray_data`` and
-            # ``_process_guard`` from the CLI/eval package. A hand-maintained
-            # allowlist can import in the checkout yet fail after unpacking.
-            evaluator_files = sorted(
-                path for path in package.glob("*.py") if path.is_file()
-            )
+            evaluator_files = [package / "__init__.py", utils_module]
+            # Newer Atrex-Bench releases re-export the Python evaluation API
+            # from ``atrex_bench.__init__``.  Keep the file optional so the
+            # evaluator-only bundle remains compatible with older releases
+            # that predate sdk.py.
+            if sdk_module.is_file():
+                evaluator_files.append(sdk_module)
+            shape_contracts = package / "shape_contracts.py"
+            if shape_contracts.is_file():
+                evaluator_files.append(shape_contracts)
             evaluator_files.extend(_walk_files(package / "eval"))
             # Newer Atrex-Bench releases moved the CLI implementations into
             # ``atrex_bench.cli`` and kept ``scripts/run_eval.py`` as a thin
@@ -1940,8 +1920,7 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
             os.environ.get("ATREX_SANDBOX_TIMEOUT", str(DEFAULT_COMMAND_TIMEOUT))
         ),
         help=(
-            "Positive base remote execution timeout in seconds; multi-Shape "
-            "Eval requests add only repeated performance measurement time "
+            "Positive remote command execution timeout in seconds "
             f"(default: {DEFAULT_COMMAND_TIMEOUT}; queue wait is budgeted separately)."
         ),
     )
@@ -1953,24 +1932,17 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
                 "ATREX_EVAL_SHAPE_BATCH_SIZE", str(DEFAULT_EVAL_SHAPE_BATCH_SIZE)
             )
         ),
-        help=(
-            "Maximum Atrex-Bench shapes per concurrent eval job "
-            f"(default: {DEFAULT_EVAL_SHAPE_BATCH_SIZE})."
-        ),
+        help="Maximum Atrex-Bench shapes per concurrent eval job (default: 4).",
     )
     parser.add_argument(
         "--evaluation-step-timeout",
         type=int,
-        default=int(
-            os.environ.get(
-                "ATREX_EVALUATION_STEP_TIMEOUT",
-                str(DEFAULT_EVALUATION_STEP_TIMEOUT),
-            )
-        ),
+        default=int(os.environ.get(
+            "ATREX_EVALUATION_STEP_TIMEOUT", str(DEFAULT_EVALUATION_STEP_TIMEOUT)
+        )),
         help=(
-            "Unified seconds limit for candidate initialization/correctness, "
-            "one Shape Performance phase, and one ABBA A/B run "
-            f"(default: {DEFAULT_EVALUATION_STEP_TIMEOUT})."
+            "Runtime-owned seconds limit for candidate initialization/correctness, "
+            "one Shape performance phase, and one ABBA A/B run."
         ),
     )
     parser.add_argument(
@@ -2078,6 +2050,10 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument("--version", default=None,
                         help="Evaluation version label, e.g. v3 (--kind run, no explicit command).")
     parser.add_argument(
+            "--multi-seed", type=int, default=None,
+            help="Additional correctness seeds (Atrex-Bench default: 5, targeted Shape smoke: 0); shorthand --kind run only.",
+        )
+    parser.add_argument(
             "--shape-id", action="append", default=[],
             help="Opaque evaluation Shape id (--kind run, no explicit command; repeatable; default: all).",
         )
@@ -2100,6 +2076,13 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
             default=DEFAULT_ABBA_REPEATS,
             metavar="N",
             help="Measurements per side, even 2..16 (default: 2 = one native A/B/B/A block).",
+        )
+    parser.add_argument(
+            "--comparison-run-timeout", type=int, default=None,
+            help=(
+                "Seconds per ABBA run; must fit the allocation timeout. "
+                f"Default: {DEFAULT_ABBA_RUN_TIMEOUT}, matching Performance timeout."
+            ),
         )
     parser.add_argument(
             "--input-path",
@@ -2937,9 +2920,35 @@ def run_direct_job(
     max_device_retries: int = 2,
     device_retry_delay: float | None = None,
     identity_extra: dict[str, Any] | None = None,
+    result_adapter: Callable[[dict], dict] | None = None,
+    retry_classifier: Callable[[dict], str | None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Submit and wait for any public gateway job kind through HTTP."""
+    """Submit and wait through the durable Gateway job lifecycle.
+
+    result_adapter transforms each collected job before its terminal checkpoint
+    is written. A truthy adapted error sets returncode=1 even for succeeded jobs.
+    Recovery reuses that adapted envelope for retry and cacheability decisions;
+    it does not reapply the adapter to an already sealed terminal checkpoint.
+
+    retry_classifier replaces the default eval_retry_kind for eval requests.
+    A caller that wants native eval retries must delegate unrecognized outcomes
+    to eval_retry_kind itself; returning None deliberately forbids a retry.
+    Existing idempotency and retry budgets apply to either classifier.
+    """
     eval_request = kind == "eval"
+
+    def completed(job):
+        # A trusted harness may interpret a successful Dev process as a failed
+        # evaluation. Adapt before checkpointing so recovery and caching see
+        # the same outcome. Ordinary jobs retain their native envelope.
+        if result_adapter is not None:
+            job = result_adapter(job)
+        return subprocess.CompletedProcess(
+            args=["direct-gateway", kind, job["job_id"]],
+            returncode=0 if (job.get("status") == "succeeded"
+                             and (result_adapter is None or not job.get("error"))) else 1,
+            stdout=json.dumps(job), stderr="",
+        )
 
     def submit(wire_key):
         from aka.light.evaluation.source_transport import uploaded_request, upload_bytes, SourceUploadError
@@ -3015,12 +3024,7 @@ def run_direct_job(
                     raise EvidenceUnavailable(
                         "Saved Gateway Job could not be read by the recovery probe"
                     ) from error
-                return subprocess.CompletedProcess(
-                    args=["direct-gateway", kind, job_id],
-                    returncode=0 if job.get("status") == "succeeded" else 1,
-                    stdout=json.dumps(job),
-                    stderr="",
-                )
+                return completed(job)
             finally:
                 _forget_agate_job(job_id)
         deadline = time.monotonic() + remaining
@@ -3028,11 +3032,7 @@ def run_direct_job(
         try:
             while True:
                 if job.get("status") in ("succeeded", "failed", "cancelled", "canceled"):
-                    return subprocess.CompletedProcess(
-                        args=["direct-gateway", kind, job_id],
-                        returncode=0 if job.get("status") == "succeeded" else 1,
-                        stdout=json.dumps(job), stderr="",
-                    )
+                    return completed(job)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise EvidenceUnavailable("Gateway collection deadline reached; the accepted Job is saved for reconciliation")
@@ -3067,22 +3067,13 @@ def run_direct_job(
                 "kind": kind, "payload": payload_identity(payload)}
     if identity_extra:
         identity["execution_context"] = identity_extra
-    from aka.light.execution.gateway_jobs import configured_max_deadline_retries
-    process = execute_job(identity, submit, poll,
-                          wait_budget=timeout + queue_wait_grace,
-                          retry_classifier=eval_retry_kind if eval_request else None,
-                          max_infra_retries=configured_max_infra_retries(max_infra_retries),
-                          max_deadline_retries=configured_max_deadline_retries(
-                              terminal_evaluation=eval_request,
-                          ),
-                          idempotent_submission=True,
-                          max_device_retries=max_device_retries if eval_request else None,
-                          device_retry_delay=device_retry_delay)
-    from aka.light.execution.gateway_jobs import annotate_deadline_timeout
-    request_timeout = payload.get("timeout_s")
-    if request_timeout is None and isinstance(payload.get("options"), dict):
-        request_timeout = payload["options"].get("timeout_s")
-    return annotate_deadline_timeout(process, request_timeout)
+    return execute_job(identity, submit, poll,
+                       wait_budget=timeout + queue_wait_grace,
+                       retry_classifier=retry_classifier or (eval_retry_kind if eval_request else None),
+                       max_infra_retries=max_infra_retries,
+                       idempotent_submission=True,
+                       max_device_retries=max_device_retries if eval_request else None,
+                       device_retry_delay=device_retry_delay)
 
 
 def _run_direct_gateway(
@@ -3393,15 +3384,11 @@ def run_agate_with_cancel_retry(
     identity = dict(request_identity) if request_identity is not None else {"command": command_identity(agate)}
     if isinstance(identity.get("request"), dict):
         identity["request"] = payload_identity(identity["request"])
-    from aka.light.execution.gateway_jobs import configured_max_deadline_retries
     return execute_job(identity | {"url_fingerprint": private_value_fingerprint(url),
                                    "profile": gateway_profile},
                        submit, poll, wait_budget=wait_budget,
                        retry_classifier=eval_retry_kind if eval_request else None,
-                       max_infra_retries=configured_max_infra_retries(max_infra_retries),
-                       max_deadline_retries=configured_max_deadline_retries(
-                           terminal_evaluation=eval_request,
-                       ),
+                       max_infra_retries=max_infra_retries,
                        max_device_retries=max_device_retries if eval_request else None,
                        device_retry_delay=device_retry_delay)
 
@@ -3530,6 +3517,12 @@ def build_typed_agate_command(
             baseline_path = request_sidecar_dir / "baseline.py"
             baseline_path.write_text(request["abba"]["baseline"], encoding="utf-8")
             command += ["--baseline", str(baseline_path), "--abba-repeats", str(request["abba"]["repeats"])]
+    correctness_max_rel_l2 = options.get("correctness_max_rel_l2")
+    if kind == "run" and correctness_max_rel_l2 is not None:
+        command += [
+            "--set",
+            f"correctness_max_rel_l2={json.dumps(correctness_max_rel_l2)}",
+        ]
     for key, value in request["env_vars"].items():
         command += ["--env-var", f"{key}={value}"]
     if kind == "profile":
@@ -3559,6 +3552,25 @@ def _typed_fallback_allowed(detail: object) -> bool:
     return any(reason in text for reason in TYPED_FALLBACK_REASONS)
 
 
+def _shape_batch_reference(
+    reference: dict[str, Any], destination: Path
+) -> None:
+    destination.mkdir()
+    for filename, field in (
+        ("reference.py", "reference_py"),
+        ("input.py", "input_py"),
+        ("shapes.json", "shapes"),
+        ("metadata.json", "metadata"),
+        ("roofline.json", "roofline"),
+    ):
+        value = reference.get(field)
+        if value is not None:
+            (destination / filename).write_text(
+                value if isinstance(value, str) else json.dumps(value),
+                encoding="utf-8",
+            )
+
+
 def _mask_generalized_result(
     workspace: Path, result: dict[str, Any]
 ) -> dict[str, Any]:
@@ -3567,13 +3579,6 @@ def _mask_generalized_result(
     if not _is_generalized_workspace(workspace):
         return result
     masked = dict(result)
-    try:
-        public = read_json_object(workspace / "public_shapes.json") or {}
-        public_ids = list((public.get("shapes") or {}).keys())
-    except (OSError, ValueError, TypeError):
-        public_ids = []
-    masked["shape_visibility"] = "partial"
-    masked["public_shape_ids"] = public_ids
     if result.get("failures"):
         if result.get("diagnostics"):
             masked["failures"] = ["Evaluation failed. See diagnostics for Agate's original failure reasons."]
@@ -3801,7 +3806,7 @@ def _record_profile_job(
 
 def _top_level_evaluation_options(args: argparse.Namespace) -> list[str]:
     return [option for option, value in (
-        ("--version", args.version),
+        ("--version", args.version), ("--multi-seed", args.multi_seed),
         ("--shape-id", args.shape_id or None), ("--timed-runs", args.timed_runs),
     ) if value is not None]
 
@@ -3813,6 +3818,8 @@ def validate_evaluation_options(args: argparse.Namespace) -> None:
             raise ValueError("--profile-shape-id requires --kind profile; use --shape-id for --kind run")
         if not args.profile_shape_id.strip():
             raise ValueError("--profile-shape-id must be a non-empty opaque ID from a saved evaluation")
+    if getattr(args, "comparison_run_timeout", None) is not None and not args.baseline_path:
+        raise ValueError("--comparison-run-timeout requires --baseline-path")
     options = _top_level_evaluation_options(args)
     if not options:
         return
@@ -3825,7 +3832,7 @@ def validate_evaluation_options(args: argparse.Namespace) -> None:
             f"Top-level {names} cannot be combined with an explicit command. "
             "Omit the command to use the evaluator shorthand, or move these options "
             "after test_kernel.py in the explicit command, e.g. "
-            "--kind run -- python3 test_kernel.py --timed-runs 100. "
+            "--kind run -- python3 test_kernel.py --multi-seed 3. "
             "Do not specify evaluator controls in both places."
         )
 
@@ -3848,10 +3855,10 @@ def _run_typed_gateway(
     sync_paths: list[str],
     queue_wait_grace: int,
 ) -> int | None:
-    """Run SDK Eval or typed Profile; a failed Eval never falls back to Dev."""
+    """Run agate eval/profile; a failed typed Eval never falls back to Dev."""
     generalized = _is_generalized_workspace(workspace)
-    from aka.light.workspace.sources import policy_at
-    source_tree = policy_at(workspace) is not None
+    from aka.light.workspace.sources import layout_at
+    source_tree = layout_at(workspace).archived
     compatible_fallback = not source_tree and not _requires_typed_request(
         args, private_profile_shape=(kind == "profile" and generalized and _is_profile_command(command_parts)),
     )
@@ -3875,7 +3882,9 @@ def _run_typed_gateway(
             evaluation_input_path=args.evaluation_input_path,
             evaluation_shapes_path=args.evaluation_shapes_path, evaluation_mode=args.evaluation_mode,
             evaluation_step_timeout=getattr(
-                args, "evaluation_step_timeout", DEFAULT_EVALUATION_STEP_TIMEOUT
+                args,
+                "evaluation_step_timeout",
+                DEFAULT_EVALUATION_STEP_TIMEOUT,
             ),
         )
     except (OSError, UnicodeDecodeError, ValueError) as exc:
@@ -3888,33 +3897,22 @@ def _run_typed_gateway(
         return None
 
     expected_shape_ids = _request_shape_ids(request)
-    if kind == "run":
-        performance_timeout = int(
-            request.get("runner_overrides", {}).get(
-                "perf_timeout_s", PERFORMANCE_TIMEOUT
-            )
-        )
-        requested_batch_size = getattr(
-            args, "shape_batch_size", DEFAULT_EVAL_SHAPE_BATCH_SIZE
-        )
-        actual_batch_size = effective_shape_batch_size(
-            args.timeout,
-            requested_batch_size,
-            queue_wait_grace,
-            performance_timeout=performance_timeout,
-        )
-        shape_batches = batch_shape_ids(expected_shape_ids, actual_batch_size)
-        batch_timeouts = [
-            shape_request_timeout(
+    performance_timeout = int(
+        request.get("runner_overrides", {}).get("perf_timeout_s", PERFORMANCE_TIMEOUT)
+    )
+    shape_batches = (
+        batch_shape_ids(
+            expected_shape_ids,
+            effective_shape_batch_size(
                 args.timeout,
-                len(shape_ids),
+                getattr(args, "shape_batch_size", DEFAULT_EVAL_SHAPE_BATCH_SIZE),
+                queue_wait_grace,
                 performance_timeout=performance_timeout,
-            )
-            for shape_ids in shape_batches
-        ]
-    else:
-        shape_batches = [expected_shape_ids]
-        batch_timeouts = [args.timeout]
+            ),
+        )
+        if kind == "run"
+        else [expected_shape_ids]
+    )
     batched = len(shape_batches) > 1
 
     if args.dry_run:
@@ -3935,7 +3933,6 @@ def _run_typed_gateway(
                         else len(request["reference"]["shapes"])
                     ),
                     "shape_batch_count": len(shape_batches),
-                    "shape_batch_timeouts_s": batch_timeouts,
                     "mode": request.get("mode"),
                     "options": request["options"],
                     "sync": sync_paths,
@@ -3945,9 +3942,6 @@ def _run_typed_gateway(
         )
         return 0
 
-    # Every native typed operation uses the published SDK.  Source-tree
-    # diagnostics are represented as a Runtime-owned Dev request but retain the
-    # same durable SDK submission and polling lifecycle.
     eval_store = None
     record_eval_store = None
     if kind == "run":
@@ -3975,108 +3969,112 @@ def _run_typed_gateway(
             record_eval_store.retain_terminal_job(identity, retained)
 
     try:
-        def run_batch(shape_ids: list[str]) -> subprocess.CompletedProcess[str]:
-            batch_timeout = (
-                shape_request_timeout(
-                    args.timeout,
-                    len(shape_ids),
-                    performance_timeout=performance_timeout,
+        with tempfile.TemporaryDirectory(prefix="atrex-shape-batches-") as temp_dir:
+            batch_root = Path(temp_dir)
+
+            def run_batch(
+                item: tuple[int, list[str]],
+            ) -> subprocess.CompletedProcess[str]:
+                batch_index, shape_ids = item
+                batch_timeout = (
+                    shape_request_timeout(
+                        args.timeout,
+                        len(shape_ids),
+                        performance_timeout=performance_timeout,
+                    )
+                    if kind == "run"
+                    else args.timeout
                 )
-                if kind == "run"
-                else args.timeout
-            )
-            batch_request = (
-                _shape_batch_request(request, shape_ids, timeout_s=batch_timeout)
-                if kind == "run"
-                else request
-            )
-            batch_args = copy.copy(args)
-            batch_args.timeout = batch_timeout
-            batch_identity = (
-                {
-                    "transport": "agate_native_eval",
-                    "request": payload_identity(batch_request),
-                    "shape_ids": shape_ids,
-                }
-                if eval_store is not None
-                else None
-            )
-            if eval_store is not None and batch_identity is not None and (
-                saved := eval_store.load(batch_identity)
-            ) is not None:
-                retain_eval_batch(batch_identity, saved)
-                return subprocess.CompletedProcess(
-                    [],
-                    saved["returncode"],
-                    saved["stdout"],
-                    saved["stderr"],
+                batch_request = (
+                    _shape_batch_request(request, shape_ids, timeout_s=batch_timeout)
+                    if kind == "run"
+                    else request
                 )
-            from aka.light.evaluation.source_transport import run as run_tree
-            from aka.light.evaluation.evaluation_failures import (
-                embedded_candidate_wall_clock_timeouts,
-            )
-            import sys
-            process = None
-            for attempt in range(2):
-                retry_context = (
-                    {"eval_wall_clock_retry": attempt} if attempt else None
+                batch_args = copy.copy(args)
+                batch_args.timeout = batch_timeout
+                batch_identity = (
+                    {
+                        "transport": "agate_native_eval",
+                        "request": payload_identity(batch_request),
+                        "shape_ids": shape_ids,
+                    }
+                    if eval_store is not None
+                    else None
                 )
-                kwargs = (
-                    {"identity_extra": retry_context}
-                    if retry_context is not None
-                    else {}
+                if eval_store is not None and batch_identity is not None and (
+                    saved := eval_store.load(batch_identity)
+                ) is not None:
+                    retain_eval_batch(batch_identity, saved)
+                    return subprocess.CompletedProcess(
+                        [],
+                        saved["returncode"],
+                        saved["stdout"],
+                        saved["stderr"],
+                    )
+                from aka.light.evaluation.evaluation_failures import (
+                    embedded_candidate_wall_clock_timeouts,
                 )
-                process = run_tree(
-                    sys.modules[__name__],
-                    batch_args,
-                    batch_request,
-                    kind,
-                    queue_wait_grace,
-                    **kwargs,
-                )
-                job = parse_job_response(process.stdout or "")
-                timeouts = embedded_candidate_wall_clock_timeouts(job)
-                if not timeouts or attempt:
-                    break
+                from aka.light.evaluation.source_transport import run as run_tree
+                import sys
+
+                process = None
+                for attempt in range(2):
+                    retry_context = {"eval_wall_clock_retry": attempt} if attempt else None
+                    process = run_tree(
+                        sys.modules[__name__],
+                        batch_args,
+                        batch_request,
+                        kind,
+                        queue_wait_grace,
+                        **(
+                            {"identity_extra": retry_context}
+                            if retry_context is not None
+                            else {}
+                        ),
+                    )
+                    job = parse_job_response(process.stdout or "")
+                    if kind != "run" or not embedded_candidate_wall_clock_timeouts(job) or attempt:
+                        break
+                    print(
+                        "[sandbox] Eval candidate exceeded its wall-clock limit; "
+                        "retrying the complete Shape batch once.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                assert process is not None
+                if eval_store is not None and batch_identity is not None:
+                    job = parse_job_response(process.stdout or "")
+                    if job is not None:
+                        try:
+                            saved = eval_store.save(
+                                batch_identity,
+                                job,
+                                stdout=process.stdout,
+                                stderr=process.stderr or "",
+                                returncode=process.returncode,
+                            )
+                        except ValueError:
+                            # Queued, running, incomplete and infrastructure
+                            # outcomes remain only physical-job checkpoints.
+                            pass
+                        else:
+                            retain_eval_batch(batch_identity, saved)
+                return process
+
+            batch_items = list(enumerate(shape_batches))
+            if batched:
                 print(
-                    "[sandbox] Eval candidate exceeded its wall-clock limit; "
-                    "retrying the complete Shape batch once.",
+                    f"[sandbox] running {len(shape_batches)} shape batches "
+                    f"with {min(DEFAULT_EVAL_BATCH_WORKERS, len(shape_batches))} workers",
                     file=sys.stderr,
                     flush=True,
                 )
-            assert process is not None
-            if eval_store is not None and batch_identity is not None:
-                job = parse_job_response(process.stdout or "")
-                if job is not None:
-                    try:
-                        saved = eval_store.save(
-                            batch_identity,
-                            job,
-                            stdout=process.stdout,
-                            stderr=process.stderr or "",
-                            returncode=process.returncode,
-                        )
-                    except ValueError:
-                        # Queued, running, incomplete and infrastructure
-                        # outcomes remain only physical-job checkpoints.
-                        pass
-                    else:
-                        retain_eval_batch(batch_identity, saved)
-            return process
-
-        if batched:
-            print(
-                f"[sandbox] running {len(shape_batches)} shape batches "
-                f"with {min(DEFAULT_EVAL_BATCH_WORKERS, len(shape_batches))} workers",
-                file=sys.stderr,
-                flush=True,
-            )
-            with ThreadPoolExecutor(
-                max_workers=min(DEFAULT_EVAL_BATCH_WORKERS, len(shape_batches))
-            ) as executor:
-                processes = list(executor.map(run_batch, shape_batches))
-        else:
-            processes = [run_batch(shape_batches[0])]
+                with ThreadPoolExecutor(
+                    max_workers=min(DEFAULT_EVAL_BATCH_WORKERS, len(shape_batches))
+                ) as executor:
+                    processes = list(executor.map(run_batch, batch_items))
+            else:
+                processes = [run_batch(batch_items[0])]
     except GatewayHTTPError as exc:
         if kind != "run" and _typed_fallback_allowed(exc) and compatible_fallback:
             print(
@@ -4093,6 +4091,11 @@ def _run_typed_gateway(
             print("sandbox: Gateway submission outcome may be unknown; inspect the private checkpoint before resubmitting.", file=sys.stderr)
             return ENVIRONMENT_TEMPFAIL
         return 1
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            "sandbox: agate not found and no explicit --url was provided; "
+            "install atrex-gateway-client first"
+        ) from exc
 
     jobs: list[dict[str, Any]] = []
     for proc in processes:
@@ -4288,7 +4291,7 @@ def _main(argv: list[str] | None = None) -> int:
             ) from exc
     if args.command in ([], ["--"]) and args.kind == "run":
         args.command = ["python3", "test_kernel.py", "--no-memory"]
-        for option, value in (("--version", args.version),
+        for option, value in (("--version", args.version), ("--multi-seed", args.multi_seed),
                               ("--timed-runs", args.timed_runs)):
             if value is not None:
                 args.command += [option, str(value)]
@@ -4418,6 +4421,9 @@ def _main(argv: list[str] | None = None) -> int:
         private_profile_shape = (
             gateway_kind == "profile" and profile_command and _is_generalized_workspace(workspace)
         )
+        from aka.light.workspace.sources import layout_at
+        if layout_at(workspace).typed_only:
+            raise SystemExit(f"sandbox: candidate requires the typed Agate {gateway_kind} route ({typed_limitation}); no Dev fallback was submitted")
         if _requires_typed_request(args, private_profile_shape=private_profile_shape):
             raise SystemExit(
                 f"sandbox: explicit typed {gateway_kind} options cannot be honored "
@@ -4507,22 +4513,39 @@ def _main(argv: list[str] | None = None) -> int:
         )
         if command_environment:
             command = shlex.join(["env", *command_environment]) + " " + command
-    # The SDK exposes uploads on every supported Gateway authority, so Dev no
-    # longer needs CLI profile introspection to decide whether OSS is available.
+    agate_executable = None if args.ssh else find_agate()
+    direct_http = bool(args.url and agate_executable is None)
+    standard_oss_gateway = bool(
+        agate_executable
+        and _uses_standard_oss_gateway(
+            agate_executable,
+            url=args.url,
+            profile=args.gateway_profile,
+        )
+    )
     oss_workspace = bool(
-        not args.ssh and bundle_bytes > OSS_WORKSPACE_THRESHOLD_BYTES
+        standard_oss_gateway and bundle_bytes > OSS_WORKSPACE_THRESHOLD_BYTES
     )
     workspace_transport = (
-        "ssh" if args.ssh else ("oss" if oss_workspace else "sdk-inline")
+        "ssh"
+        if args.ssh
+        else ("oss" if oss_workspace else ("http" if direct_http else "inline"))
     )
     if not sync_paths:
         output_transport = "none"
     elif args.ssh:
         output_transport = "ssh"
-    elif not args.inline_output:
+    # Custom gateways do not advertise OSS capability yet, so both input and
+    # output stay inline unless agate resolves to one of its standard profiles.
+    elif standard_oss_gateway and not args.inline_output:
         output_transport = "oss"
     else:
         output_transport = "inline"
+    if direct_http and bundle_bytes > 20 * 1024 * 1024:
+        raise SystemExit(
+            f"sandbox: packaged payload is {bundle_bytes / (1024 * 1024):.1f} MiB, "
+            "above the 20 MiB direct gateway request limit"
+        )
     print(
         f"[sandbox] sandbox_kind=dev hardware={args.hardware} files={file_count} "
         f"payload={bundle_bytes / 1024:.1f} KiB "
@@ -4616,17 +4639,68 @@ def _main(argv: list[str] | None = None) -> int:
             dev_intent = "custom_harness"
         else:
             dev_intent = "other"
+        agate = [
+            agate_executable or "agate",
+            "dev",
+            "--intent",
+            dev_intent,
+            "--note",
+            f"tools/sandbox.py {args.kind} compatibility path",
+        ]
+        if args.url:
+            agate += ["--url", args.url]
+        elif args.gateway_profile:
+            agate += ["--profile", args.gateway_profile]
+        agate += ["--gpu", args.hardware]
+        if num_gpus > 1:
+            agate += ["--num-gpus", str(num_gpus)]
+        agate += [
+            "--dev-timeout",
+            str(args.timeout),
+            "--http-timeout",
+            str(MAX_HTTP_REQUEST_TIMEOUT),
+            "--wait-timeout",
+            str(args.timeout + queue_wait_grace),
+            "--job-timeout",
+            str(_dev_gateway_job_timeout(args.timeout)),
+        ]
+        if oss_workspace:
+            agate += ["--oss-file", f"__atrex_workspace.tar.gz.b64={bundle_path}"]
+        elif workspace_part_paths:
+            for index, part_path in enumerate(workspace_part_paths):
+                agate += [
+                    "--file",
+                    f"__atrex_workspace.tar.gz.b64.part{index:03d}={part_path}",
+                ]
+        else:
+            agate += ["--file", f"__atrex_workspace.tar.gz.b64={bundle_path}"]
+        agate += [
+            "--file",
+            f"__atrex_command.sh={command_path}",
+            "--file",
+            f"__atrex_collect.py={collector_path}",
+            "--file",
+            f"__atrex_outputs.json={outputs_path}",
+        ]
+        for index, part_path in enumerate(runtime_part_paths):
+            agate += [
+                "--file",
+                f"__atrex_bench_runtime.tar.gz.b64.part{index:03d}={part_path}",
+            ]
         for item in gateway_environment:
             if "=" not in item or item.startswith("="):
-                raise SystemExit(
-                    f"sandbox: invalid --env {item!r}; expected KEY=VALUE"
-                )
-        if args.keep_pod and not args.ssh:
-            raise SystemExit(
-                "sandbox: --keep-pod is unsupported because Gateway Dev jobs require recycle"
-            )
+                raise SystemExit(f"sandbox: invalid --env {item!r}; expected KEY=VALUE")
+            agate += ["--env-var", item]
+        if args.keep_pod:
+            agate.append("--no-recycle")
+        if output_transport == "oss":
+            agate += ["--oss-output", OSS_OUTPUT_ARCHIVE]
+        agate.append("bash __atrex_runner.sh")
+
+        # The runner is uploaded separately after the command has been assembled.
         runner_path = temp / "runner.sh"
         runner_path.write_text(_runner_source(), encoding="utf-8")
+        agate[-1:-1] = ["--file", f"__atrex_runner.sh={runner_path}"]
 
         if args.ssh:
             upload_dir = temp / "ssh-upload"
@@ -4720,63 +4794,69 @@ def _main(argv: list[str] | None = None) -> int:
                 stdout=json.dumps(job),
                 stderr="",
             )
-        else:
-            from aka.light.evaluation.source_transport import run_sdk_job
-
-            sdk_files = {
-                "__atrex_command.sh": command_path,
-                "__atrex_collect.py": collector_path,
-                "__atrex_outputs.json": outputs_path,
-                "__atrex_runner.sh": runner_path,
-            }
-            if workspace_part_paths:
-                sdk_files.update({
-                    f"__atrex_workspace.tar.gz.b64.part{index:03d}": path
-                    for index, path in enumerate(workspace_part_paths)
-                })
-            else:
-                sdk_files["__atrex_workspace.tar.gz.b64"] = bundle_path
-            sdk_files.update({
-                f"__atrex_bench_runtime.tar.gz.b64.part{index:03d}": path
-                for index, path in enumerate(runtime_part_paths)
-            })
-            try:
-                env_vars = _parse_env_items(gateway_environment)
-            except ValueError as exc:
-                raise SystemExit(f"sandbox: {exc}") from exc
-            spec: dict[str, Any] = {"target_hardware": [args.hardware]}
-            if num_gpus > 1:
-                spec["num_gpus"] = num_gpus
-            dev_request: dict[str, Any] = {
-                "spec": spec,
-                "command": "bash __atrex_runner.sh",
-                "timeout_s": _dev_gateway_job_timeout(args.timeout),
-                "env_vars": env_vars,
-                "files": {
-                    name: path.read_text(encoding="utf-8")
-                    for name, path in sdk_files.items()
-                },
-                "recycle": True,
-                "dev_intent": dev_intent,
-                "dev_note": f"tools/sandbox.py {args.kind} compatibility path",
-            }
-            if output_transport == "oss":
-                dev_request["oss_outputs"] = [{"path": OSS_OUTPUT_ARCHIVE}]
-            proc = run_sdk_job(
-                sys.modules[__name__],
-                args,
-                dev_request,
-                "dev",
-                queue_wait_grace,
-                identity_extra={
-                    "requested_kind": args.kind,
-                    "inputs": bundle_digest(base64.b64decode(bundle)),
-                    "evaluator": (
-                        bundle_digest(base64.b64decode(runtime_bundle))
-                        if runtime_bundle else None
-                    ),
-                },
+        elif direct_http:
+            print(
+                "[sandbox] agate CLI not found; using direct gateway HTTP API",
+                file=sys.stderr,
             )
+            try:
+                direct_files = {
+                    "__atrex_command.sh": command_path,
+                    "__atrex_collect.py": collector_path,
+                    "__atrex_outputs.json": outputs_path,
+                    "__atrex_runner.sh": runner_path,
+                }
+                if workspace_part_paths:
+                    direct_files.update(
+                        {
+                            f"__atrex_workspace.tar.gz.b64.part{index:03d}": path
+                            for index, path in enumerate(workspace_part_paths)
+                        }
+                    )
+                else:
+                    direct_files["__atrex_workspace.tar.gz.b64"] = bundle_path
+                direct_files.update(
+                    {
+                        f"__atrex_bench_runtime.tar.gz.b64.part{index:03d}": path
+                        for index, path in enumerate(runtime_part_paths)
+                    }
+                )
+                proc = _run_direct_gateway(
+                    url=args.url,
+                    hardware=args.hardware,
+                    timeout=args.timeout,
+                    queue_wait_grace=queue_wait_grace,
+                    env_items=gateway_environment,
+                    files=direct_files,
+                    command="bash __atrex_runner.sh",
+                    num_gpus=num_gpus,
+                )
+            except (EvidenceUnavailable, TimeoutError, subprocess.TimeoutExpired):
+                raise
+            except (OSError, RuntimeError) as exc:
+                raise SystemExit(
+                    f"sandbox: direct gateway request failed: {exc}"
+                ) from exc
+        else:
+            try:
+                proc = run_agate_with_cancel_retry(
+                    agate=agate,
+                    executable=agate_executable or "agate",
+                    url=args.url,
+                    gateway_profile=args.gateway_profile,
+                    command_timeout=_dev_gateway_job_timeout(args.timeout),
+                    wait_budget=args.timeout + queue_wait_grace,
+                    request_identity={"kind": "dev", "command": command, "hardware": args.hardware,
+                                      "timeout": args.timeout,
+                                      "env_names": sorted(item.split("=", 1)[0] for item in gateway_environment),
+                                      "inputs": bundle_digest(base64.b64decode(bundle)),
+                                      "evaluator": bundle_digest(base64.b64decode(runtime_bundle)) if runtime_bundle else None},
+                )
+            except FileNotFoundError as exc:
+                raise SystemExit(
+                    "sandbox: agate not found and no explicit --url was provided; "
+                    "install atrex-gateway-client first"
+                ) from exc
 
     hide_evaluator_details = evaluator_command and _is_generalized_workspace(workspace)
     if proc.stderr and not hide_evaluator_details:
@@ -4875,6 +4955,8 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
                    ["python3", "test_kernel.py", "--no-memory"])
         if args.version is not None:
             command += ["--version", str(args.version)]
+        if args.multi_seed is not None:
+            command += ["--multi-seed", str(args.multi_seed)]
         if args.timed_runs is not None:
             command += ["--timed-runs", str(args.timed_runs)]
         for shape in args.shape_id or []:
@@ -4887,28 +4969,11 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
     evaluator = kind == "run" or bool(baseline_path) or _is_numerical_probe_command(command)
     selected = set(_evaluation_input_paths(workspace, command) if evaluator else
                    _command_input_paths(workspace, command, args.input))
-    from aka.light.workspace.sources import (
-        collect, entrypoint, policy_at, snapshot as source_snapshot,
-    )
-    source_policy = policy_at(workspace)
-    selected.add(entrypoint(source_policy))
-    source_snapshots = {}
-    if source_policy is not None:
-        selected.update(collect(workspace, source_policy))
-        source_snapshots["candidate"] = hashlib.sha256(source_snapshot(workspace)).hexdigest()
+    from aka.light.workspace.sources import measurement_paths
+    candidate_paths, source_snapshots = measurement_paths(workspace, baseline_path)
+    selected.update(candidate_paths)
     for value in args.input or []:
         selected.update(_expand_workspace_input(workspace, value))
-    if baseline_path:
-        if (workspace / baseline_path).is_dir():
-            baseline_policy = policy_at(workspace / baseline_path)
-            if source_policy is None or baseline_policy != source_policy:
-                raise ValueError("ABBA tree baseline must carry the same task-owned source contract")
-            selected.update(baseline_path + "/" + name for name in collect(workspace / baseline_path, baseline_policy))
-            source_snapshots["baseline"] = hashlib.sha256(source_snapshot(workspace / baseline_path)).hexdigest()
-        else:
-            if source_policy is not None:
-                raise ValueError("Tree comparison requires --baseline-path to name a complete tree directory")
-            selected.add(baseline_path)
     for value in (args.evaluation_input_path, args.evaluation_shapes_path):
         if value:
             selected.add(_safe_relative(value))
@@ -5002,9 +5067,8 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
         options.pop("comparison_run_timeout", None)
     if baseline_path and baseline_path not in files and "baseline" not in source_snapshots:
         raise ValueError("--baseline-path must name an existing regular workspace file")
-    candidate_entry = entrypoint(source_policy)
-    if candidate_entry not in files and operation != "dev":
-        raise ValueError(f"Measurement requires an existing {candidate_entry}")
+    if "kernel.py" not in files and "candidate" not in source_snapshots and operation != "dev":
+        raise ValueError("Measurement requires an existing kernel.py or a sealed candidate snapshot")
     gateway_environment = {name: environment[name] for name in (
         "AGATE_URL", "ATREX_SANDBOX_PROFILE", *PROFILE_ENVIRONMENT_KEYS,
     ) if name in environment}
@@ -5025,7 +5089,7 @@ def _sandbox_telemetry_category(arguments: list[str]) -> str:
     if names & {"profile_nvidia.sh", "profile_kernel.sh"}:
         return "profile"
     if "test_kernel.py" in names:
-        return "correctness" if "--correctness-only" in arguments else "benchmark"
+        return "correctness" if "--multi-seed" in arguments else "benchmark"
     return "dev"
 
 

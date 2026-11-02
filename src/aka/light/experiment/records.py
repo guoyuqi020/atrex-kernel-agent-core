@@ -4,6 +4,7 @@ from aka.light.evaluation.policy import CORRECTNESS_CASES
 
 import json
 import logging
+import re
 import subprocess
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from aka.light.workspace.files import MAX_FILE_BYTES, publish, relative_path
 from aka.light.agent.session_tail import read_regular_bytes
 
 from aka.light.evaluation.provider import PREFIXES, result_from_response
-from aka.light.evaluation.public_result import seal_response
+from aka.light.evaluation.public_result import cacheable_evaluation, seal_response
 from aka.light.runtime.request_errors import AgentRequestError, RuntimeStateError, error_response, field_error
 from aka.light.experiment.identifiers import GATEWAY_RECORD_ID_RE, KERNEL_RECORD_ID_RE
 QUERY_KINDS = {"record-read", "kernel-read", "kernel-records", "kernel-pareto-frontier"}
@@ -74,52 +75,28 @@ def query(store, args, workspace: Path) -> dict:
         if len(path.parts) < 2 or path.parts[0] != "scratch":
             raise ValueError("--output-path must name a file (or tree directory) inside scratch/")
         source = _read_record(store.read_kernel, args.kernel_id, field="kernel_id", pattern=KERNEL_RECORD_ID_RE)
-        from aka.light.workspace.sources import unpack, install
-        policy, files = unpack(source)
-        if policy is None:
-            publish(workspace, str(path), source)
-        else:
-            destination = workspace / path
-            if destination.exists():
-                from aka.light.workspace.sources import snapshot
-                try:
-                    # The saved Kernel already carries its complete source-tree
-                    # contract.  Pass it explicitly: an existing scratch path
-                    # may be incomplete and therefore cannot reliably
-                    # rediscover tree mode from implementation/__init__.py.
-                    existing = snapshot(destination, policy=policy)
-                except (OSError, ValueError) as error:
-                    raise field_error(
-                        "output_path",
-                        "Kernel-read output path already exists but is not a complete source tree.",
-                        code="output_path_conflict",
-                        next_action=(
-                            "Remove or rename the stale destination inside scratch/, then rerun "
-                            "the same kernel-read command. For an ad-hoc read, an unused scratch/ "
-                            "directory also works. Do not edit the current Kernel to repair this."
-                        ),
-                    ) from error
-                if existing != source:
-                    raise field_error(
-                        "output_path",
-                        "Kernel-read output path already contains a different source tree.",
-                        code="output_path_conflict",
-                        next_action=(
-                            "Choose an unused directory inside scratch/, or remove the stale "
-                            "destination before rerunning the same kernel-read command. Do not "
-                            "overwrite or edit the current Kernel."
-                        ),
-                    )
-            else:
-                install(destination, source)
+        from aka.light.workspace.sources import Artifact
+        try:
+            exported = Artifact(source).export(workspace / path)
+        except (OSError, UnicodeError, ValueError) as exc:
+            from aka.light.runtime.request_errors import field_error
+            raise field_error(
+                "output_path",
+                "Kernel-read output path already exists but is not a complete source tree.",
+                code="output_path_conflict",
+                next_action=(
+                    "Remove or rename the stale destination, or choose a new empty path inside "
+                    "scratch/, then retry kernel-read."
+                ),
+            ) from exc
         result = {"ok": True, "kernel_id": args.kernel_id, "file": str(path), "bytes": len(source)}
-        if policy is not None:
-            result.update(source_kind="tree", directory=str(path), file_count=len(files))
+        if exported:
+            result.update(exported, directory=str(path))
     return {"exit_code": 0, "stdout": json.dumps(result) + "\n", "stderr": ""}
 
 
 def correctness_identity(request: dict) -> dict | None:
-    """A narrow equivalence: full/untimed five-case evaluation of the same inputs.
+    """A narrow equivalence: full/untimed six-case evaluation of the same inputs.
 
     Only mode, performance repetitions and timing iterations may differ. All
     evaluator bytes, input/source hashes, tolerances, dependencies, target and
@@ -222,40 +199,19 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
         # Let the HTTP boundary attach the effective CLI contract and redaction.
         raise AgentRequestError(str(error)) from error
     operation = request["operation"]
-    from aka.light.workspace.sources import ENTRYPOINT, from_inputs
-    kernels = (
-        {"candidate": store.kernel(from_inputs(inputs))}
-        if ENTRYPOINT in inputs else {}
-    )
-    baseline_path = request["options"]["baseline_path"]
-    if baseline_path:
-        kernels["baseline"] = store.kernel(
-            from_inputs(inputs, prefix=baseline_path + "/")
-            if baseline_path + "/" + ENTRYPOINT in inputs else inputs[baseline_path])
+    from aka.light.workspace.sources import measurement_artifacts
+    kernels = {side: store.kernel(artifact.snapshot)
+               for side, artifact in measurement_artifacts(request, inputs).items()}
     if reuse_correctness and reuse_completed and "candidate" in kernels:
         response = reuse_correctness_result(store, request, kernels["candidate"]["kernel_id"])
         if response is not None:
             return response
-    def reuse_cached(record: dict) -> bool:
-        if not effects.terminal_validation or operation != "same_allocation_abba":
-            return True
-        sample = evaluation.result(record["response"], operation)
-        from aka.light.evaluation.native_abba import is_terminal_abba_timeout
-        return not is_terminal_abba_timeout(sample)
-
     try:
-        with store.reserve(
-            request,
-            kernels,
-            deadline=effects.deadline,
-            request_id=effects.request_id,
-            reuse_cached=reuse_cached,
-        ) as task:
+        with store.reserve(request, kernels, deadline=effects.deadline, request_id=effects.request_id) as task:
             for name, source in inputs.items():
                 private_write_bytes(task.directory / "inputs" / name, source)
             repetitions = plan.repetitions
             samples, responses, cacheable, pending = [], [], True, False
-            terminal_validation_timeout = False
             # The identity carries only a keyed fingerprint of launcher values.
             # Retain evidence, but never cache a result measured with custom
             # environment or SSH initialization as an interchangeable task.
@@ -328,17 +284,13 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
                         truncated=response.get("truncated") is True,
                     )
                     if terminal_abba_timeout:
-                        # Agent-requested ABBA returns the exhausted two-attempt
-                        # result as evidence. Terminal promotion keeps the
-                        # candidate and retries the authoritative gate instead.
-                        terminal_validation_timeout = effects.terminal_validation
-                        cacheable = not terminal_validation_timeout
-                    else:
-                        cacheable = (
-                            cacheable
-                            and sample is not None
-                            and isinstance(sample.get("correct"), bool)
-                        )
+                        # The native ABBA executor has already submitted one
+                        # fresh retry.  Two terminal wall-clock failures are a
+                        # complete negative promotion result, not uncertain
+                        # infrastructure that the Supervisor should retry forever.
+                        cacheable = True
+                if operation in {"evaluate", "same_allocation_abba"}:
+                    cacheable = cacheable and cacheable_evaluation(response, request)
                 if sample is not None:
                     samples.append(sample)
                 if process.returncode != 0 or sample is None or not cacheable:
@@ -370,12 +322,9 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
                              "status": "succeeded" if response["exit_code"] == 0 else "failed"}))
             response = dict(response, stdout="\n".join(lines) + "\n")
             response = seal_response(response, request, record_id=task.record_id, kernels=kernels)
-            task.finish(
-                response,
-                cacheable=cacheable and not custom_launcher,
-                pending=pending,
-                agent_git=effects.agent_git,
-            )
+            if operation in {"evaluate", "same_allocation_abba"}:
+                cacheable = cacheable and cacheable_evaluation(response, request)
+            task.finish(response, cacheable=cacheable and not custom_launcher, pending=pending)
             # A source rejection is definitive and repairable, not missing GPU
             # evidence. Require private checkpoints too; a Dev-printed marker
             # alone must not authorize an acceptance classification.
@@ -394,11 +343,6 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
                     for state in states
                 ):
                     raise InfrastructureUnavailable("Recorded GPU validation infrastructure failure")
-                if terminal_validation_timeout:
-                    raise InfrastructureUnavailable(
-                        "Terminal ABBA exceeded its per-run wall-clock limit twice; "
-                        "the candidate is preserved and the authoritative gate will retry"
-                    )
                 raise InfrastructureUnavailable(
                     "Acceptance measurement is incomplete or uncertain; inspect its private Gateway Record"
                 )
@@ -436,11 +380,31 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
                     error.bind_record(task.record_id)
                     raise
                 except Exception as error:
+                    message = str(error)
+                    code = "output_synchronization_failed"
+                    details = {}
+                    if "exceeds per-file size limit" in message:
+                        code = "output_synchronization_limit_exceeded"
+                        match = re.search(
+                            r"file '([^']+)' exceeds per-file size limit of (\d+) bytes; "
+                            r"(\d+) bytes remain",
+                            message,
+                        )
+                        if match:
+                            details = {
+                                "output_path": match.group(1),
+                                "limit_type": "per_file_bytes",
+                                "limit_bytes": int(match.group(2)),
+                                "remaining_sync_budget_bytes": int(match.group(3)),
+                            }
+                    elif "exceeds cumulative size limit" in message:
+                        code = "output_synchronization_limit_exceeded"
                     raise ResultPublicationError(
                         f"GPU operation completed and was recorded, but requested output synchronization failed: {error}",
-                        code="output_synchronization_failed",
+                        code=code,
                         phase="output_synchronization",
                         gateway_record_id=task.record_id,
+                        **details,
                     ) from error
             return response
     except DuplicateTask as error:

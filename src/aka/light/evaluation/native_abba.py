@@ -1,7 +1,6 @@
 """Native Agate Eval ABBA: exact A/B/B/A evidence, no Dev driver fallback."""
 from __future__ import annotations
 
-import copy
 import json
 import math
 import os
@@ -9,20 +8,13 @@ import re
 import statistics
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT
-
 from aka.legacy.evaluation.abba import verification_schedule
 from aka.light.evaluation.result_conversion import compile_failures
-from aka.light.evaluation.shapes import (
-    batch_shape_ids,
-    effective_shape_batch_size,
-    request_shape_ids,
-    shape_request_timeout,
-    shape_batch_request,
-)
+from aka.legacy.evaluation.shapes import batch_shape_ids, shape_batch_request
 from aka.light.evaluation.evaluation_feedback import evaluation_feedback
 from aka.light.evaluation.policy import BATCH_WORKERS, validate_abba_repeats
 from aka.light.evaluation.public_result import correctness_summary
@@ -344,16 +336,10 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
     validate_comparison(args)
     if args.ssh or (workspace / "workload.jsonl").exists():
         raise ValueError("Native Eval ABBA requires an Agate Atrex-Bench input/Shape contract; SOL/SSH Dev fallback is disabled")
-    from aka.light.workspace.sources import (
-        entrypoint, snapshot as source_snapshot, unpack, policy_at,
-    )
-    source_policy = policy_at(workspace)
-    tree = source_policy is not None
-    baseline_source = source_snapshot(workspace / args.baseline_path) if tree else None
-    baseline = (unpack(baseline_source)[1][entrypoint(source_policy)].decode() if tree else
-                gateway.read_workspace_override(workspace, args.baseline_path, field="baseline-path", max_bytes=16 * 1024 * 1024))
+    from aka.light.workspace.sources import read_path
+    baseline = read_path(workspace / args.baseline_path)
     command = ["python3", "test_kernel.py"]
-    for flag, value in (("--timed-runs", args.timed_runs),):
+    for flag, value in (("--multi-seed", args.multi_seed), ("--timed-runs", args.timed_runs)):
         if value is not None:
             command += [flag, str(value)]
     limitation = gateway._typed_workspace_limitation(workspace, command, "run")
@@ -362,26 +348,24 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
     request = gateway.build_typed_request(
         workspace, args.hardware, args.timeout, args.env, command, "run", evaluation_mode="full",
         requirements=args.requirement or (), deps_mode=args.deps_mode,
-        evaluation_step_timeout=getattr(
-            args, "evaluation_step_timeout", DEFAULT_EVALUATION_STEP_TIMEOUT
-        ),
     )
-    if not baseline.strip() or not request["candidate"]:
-        raise ValueError("Native ABBA requires two non-empty Kernel sources")
-    request["abba"] = {"baseline": baseline, "repeats": args.comparison_repeats // 2}
-    if tree:
-        from .source_transport import attach
-        attach(request, workspace, side="baseline", source=baseline_source)
-    run_timeout = comparison_run_timeout(args)
-    request["runner_overrides"]["perf_timeout_s"] = run_timeout
-    batch_performance_timeout = 2 * args.comparison_repeats * run_timeout
-    shapes = request_shape_ids(request)
+    request["abba"] = {"baseline": None, "repeats": args.comparison_repeats // 2}
+    from .source_transport import attach, ARCHIVES
+    attach(request, workspace, side="baseline", source=baseline.snapshot)
+    if not request["abba"]["baseline"] or not request["candidate"]:
+        raise ValueError("Native ABBA requires two non-empty candidate sources")
+    request["runner_overrides"]["perf_timeout_s"] = comparison_run_timeout(args)
+    shapes = sorted(request["reference"]["shapes"], key=gateway.shape_id_sort_key)
     if not shapes:
         raise ValueError("Native ABBA requires at least one Shape")
     if args.dry_run:
         print(json.dumps({"kind": "same_allocation_abba", "transport": "agate_native_eval_abba",
                           "shape_count": len(shapes), "comparison_repeats": args.comparison_repeats}))
         return 0
+    executable = gateway.find_agate()
+    url = args.url
+    if not executable and not url:
+        raise ValueError("Native ABBA requires a resolvable Agate Gateway URL; no Dev fallback was submitted")
     schedule = verification_schedule(args.comparison_repeats)
     # Recorded acceptance retries create a fresh Gateway Record after an
     # incomplete result.  Its per-record JOB_ROOT_ENV changes, so checkpoints
@@ -412,14 +396,7 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
             record_store.retain_terminal_job(identity, retained)
 
     def run_batch(ids):
-        batch_timeout = shape_request_timeout(
-            args.timeout,
-            len(ids),
-            performance_timeout=batch_performance_timeout,
-        )
-        batch = shape_batch_request(request, ids, timeout_s=batch_timeout)
-        batch_args = copy.copy(args)
-        batch_args.timeout = batch_timeout
+        batch = shape_batch_request(request, ids)
         identity = {"transport": "agate_native_eval_abba", "request": payload_identity(batch),
                     "schedule": schedule, "shape_ids": ids}
         if store and (saved := store.load(identity)) is not None:
@@ -430,13 +407,68 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
             retry_identity = (
                 {"abba_wall_clock_retry": attempt} if attempt else None
             )
-            from .source_transport import run as run_tree
-            return run_tree(
-                gateway,
-                batch_args,
-                batch,
-                "run",
-                queue_wait_grace,
+            if ARCHIVES in batch:
+                from .source_transport import run as run_tree
+                return run_tree(
+                    gateway,
+                    args,
+                    batch,
+                    "run",
+                    queue_wait_grace,
+                    identity_extra=retry_identity,
+                )
+            if executable:
+                # Use native eval CLI flags, retaining configured profile credentials.
+                # This never uploads/runs a Dev harness. --abba-repeats counts blocks.
+                with tempfile.TemporaryDirectory(prefix="aka-native-abba-") as directory:
+                    sidecars = Path(directory)
+                    reference = sidecars / "reference"
+                    reference.mkdir()
+                    for field, filename in (
+                        ("reference_py", "reference.py"),
+                        ("input_py", "input.py"),
+                        ("shapes", "shapes.json"),
+                        ("metadata", "metadata.json"),
+                        ("roofline", "roofline.json"),
+                    ):
+                        if field in batch["reference"]:
+                            content = batch["reference"][field]
+                            (reference / filename).write_text(
+                                content if isinstance(content, str) else json.dumps(content),
+                                encoding="utf-8",
+                            )
+                    command = gateway.build_typed_agate_command(
+                        executable,
+                        args,
+                        workspace,
+                        "run",
+                        batch,
+                        queue_wait_grace,
+                        reference_dir=reference,
+                        request_sidecar_dir=sidecars,
+                    )
+                    request_identity = {"kind": "eval", "request": batch}
+                    if retry_identity:
+                        request_identity.update(retry_identity)
+                    return gateway.run_agate_with_cancel_retry(
+                        agate=command,
+                        executable=executable,
+                        url=url,
+                        gateway_profile=args.gateway_profile,
+                        command_timeout=args.timeout,
+                        wait_budget=args.timeout + queue_wait_grace,
+                        request_identity=request_identity,
+                        max_device_retries=10,
+                        device_retry_delay=60,
+                    )
+            return gateway.run_direct_job(
+                url=url,
+                kind="eval",
+                payload=batch,
+                timeout=args.timeout,
+                queue_wait_grace=queue_wait_grace,
+                max_device_retries=10,
+                device_retry_delay=60,
                 identity_extra=retry_identity,
             )
 
@@ -487,13 +519,7 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
                 retain_in_record(identity, saved)
             return payload, None
 
-    batch_size = effective_shape_batch_size(
-        args.timeout,
-        args.shape_batch_size,
-        queue_wait_grace,
-        performance_timeout=batch_performance_timeout,
-    )
-    batches = batch_shape_ids(shapes, batch_size)
+    batches = batch_shape_ids(shapes, args.shape_batch_size)
     with ThreadPoolExecutor(max_workers=min(BATCH_WORKERS, len(batches))) as pool:
         results = list(pool.map(run_batch, batches))
     failures = [process for _, process in results if process is not None]

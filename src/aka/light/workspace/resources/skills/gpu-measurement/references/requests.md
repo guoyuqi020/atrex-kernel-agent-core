@@ -31,7 +31,7 @@ shell timeout or `&`, and use the backend's wait/output facility if it backgroun
 Do not change the measured source or launch unrelated work while waiting.
 `--no-sync` disables output-file synchronization; it does **not** make execution asynchronous.
 The session Prompt states whether Runtime request suspension is enabled. When enabled, waits
-pause the Agent/subagents and do not consume any configured Agent active-time budget; when disabled, they
+pause the Agent/subagents and do not consume the Agent active-time budget; when disabled, they
 remain active time. Every request remains subject to its own deadline. A quiet CLI is not a failure.
 
 Save JSON stdout and stderr separately if needed:
@@ -59,6 +59,8 @@ python3 tools/sandbox.py --kind run --no-sync
 python3 tools/sandbox.py --kind run --no-sync -- python3 test_kernel.py --version v2 --no-memory
 # Atrex-Bench only: correctness-only diagnostic, not a full Evaluate.
 python3 tools/sandbox.py --kind run --mode correctness_only --no-sync
+# Atrex-Bench only: reduced-seed diagnostic, insufficient for final acceptance.
+python3 tools/sandbox.py --kind run --mode correctness_only --multi-seed 0 --no-sync
 # Generic AB/BA example; use the injected acceptance command for reuse.
 python3 tools/sandbox.py --kind run --baseline-path scratch/incumbent.py --comparison-repeats 2 --no-sync
 # Atrex-Bench Typed NCU/rocprof profile; IDs name opaque cases, not exact private shapes.
@@ -73,9 +75,10 @@ python3 tools/sandbox.py --kind disassemble --format ptx --no-sync
 python3 tools/sandbox.py --kind env
 ```
 
-Runtime owns the timeout for candidate initialization/correctness, one Shape
-Performance phase, and each ABBA A/B run. Agents cannot override it. Acceptance can
-reuse only an exact matching request, including baseline bytes, path and repeats.
+For ABBA, optional `--comparison-run-timeout SECONDS` controls each run and must fit the
+configured allocation's complete schedule. Without that option, each run uses the smaller of
+the 300-second Performance timeout and its equal share of the configured allocation. Acceptance can
+reuse only an exact matching request, including baseline bytes, path, repeats and run timeout.
 The injected acceptance block supplies the exact command for the current
 configuration, including Shape batch size, and a `kernel-read` command for the committed
 incumbent. Use that block instead of this generic example when seeking acceptance reuse.
@@ -91,18 +94,20 @@ incumbent; `performance_score` is diagnostic. The returned `improvement_pct` is
 This is not the latency-reduction percentage used by the Supervisor's promotion threshold.
 Do not loop requests to reproduce the sampling policy.
 
-Atrex-Bench Evaluate always uses the Runtime-owned base case plus four additional correctness
-cases per selected Shape. Full mode keeps its normal performance measurement; the additional
-cases do not add timing runs. `--mode correctness_only` uses the same five cases without timing.
-Selecting one or more `--shape-id` values narrows only the Shape set, not correctness coverage.
-The Agent cannot change the case count. Check, Profile and Dev probes do not use this Evaluate
-case policy. Native ABBA also uses the same five cases.
+Atrex-Bench Evaluate defaults to the base case plus five additional correctness cases per Shape.
+Full mode keeps its normal performance measurement; extra cases do not add timing runs.
+`--mode correctness_only` uses the same six cases without timing. An explicit `--shape-id` smoke
+defaults to one case, and `--multi-seed N` can override the case count for diagnostics. Check,
+Profile and Dev probes do not gain this seed expansion. Agent ABBA defaults to six cases;
+Supervisor retention ABBA explicitly uses `--multi-seed 0` after the six-case candidate gate. For legacy explicit
+`test_kernel.py --version v2 --multi-seed N` commands, positive N still implies correctness-only
+unless `--mode full` is supplied; an implicit default never disables performance measurement.
 
-For Atrex-Bench `candidate_ready`, the Supervisor reuses a successful full or correctness-only five-case result
+For Atrex-Bench `candidate_ready`, the Supervisor reuses a successful full or correctness-only six-case result
 when the frozen source, complete Shape contract, evaluator, tolerances, target and environment
-match. Otherwise it runs the missing five-case check without timing. You do not need a separate
-robustness request after a matching full Evaluate. Custom inputs, Shape subsets and old records
-without the resolved case policy cannot satisfy this check. A passing full Evaluate
+match. Otherwise it runs the missing six-case check without timing. You do not need a separate
+robustness request after a matching full Evaluate. Custom inputs, Shape subsets, fewer seeds and
+old records without the resolved seed policy cannot satisfy this check. A passing full Evaluate
 for the exact selected source remains required. With research recording disabled, cite its
 `gateway_record_id` directly in the report's `gateway_record_ids`; do not invent an Experiment.
 With research recording enabled, the selected Experiment must cite that evidence instead.
@@ -110,25 +115,25 @@ Follow the installed `skills/runtime-records/references/journal.md` for the curr
 Baseline sessions follow their bounded instructions.
 
 For SOL-ExecBench `candidate_ready`, the Supervisor runs or reuses the official full-workload
-evaluation of the frozen candidate and matching workload/configuration. The Atrex-Bench five-case
+evaluation of the frozen candidate and matching workload/configuration. The Atrex-Bench six-case
 policy and correctness-only mode do not apply to SOL.
 
 For Atrex-Bench evaluator controls, choose one spelling:
 
 ```bash
 # Shorthand: no explicit command.
-python3 tools/sandbox.py --kind run --timed-runs 100 --no-sync
+python3 tools/sandbox.py --kind run --multi-seed 3 --timed-runs 100 --no-sync
 # Explicit command: evaluator controls belong after test_kernel.py.
-python3 tools/sandbox.py --kind run --no-sync -- python3 test_kernel.py --timed-runs 100 --no-memory
+python3 tools/sandbox.py --kind run --no-sync -- python3 test_kernel.py --multi-seed 3 --timed-runs 100 --no-memory
 ```
 
-Top-level `--version`, `--shape-id` and `--timed-runs` require
+Top-level `--version`, `--multi-seed`, `--shape-id` and `--timed-runs` require
 `--kind run` without an explicit command. Mixing these top-level controls with a
 command is rejected before execution; they are not merged or silently ignored.
 Explicit shorthand controls require a compatible typed evaluation route and
 cannot silently fall back to Dev. Once a Typed Evaluate starts, admission,
-transport or evaluator failure also cannot change it into a Dev job. ABBA still accepts `--version`
-and `--timed-runs` without a command; Shape/input overrides remain unsupported.
+transport or evaluator failure also cannot change it into a Dev job. ABBA still accepts `--version` and
+`--timed-runs` and `--multi-seed` without a command; Shape/input overrides remain unsupported.
 ABBA uses native Eval only; it never runs a Dev driver. Native ABBA requires an Atrex-Bench
 input/Shape contract and an Agate endpoint; SOL/SSH comparison is unsupported. Repeats must
 be even, 2–16 measurements per side; 2 means one A/B/B/A block.
@@ -174,7 +179,7 @@ returned by the Runtime; these queries do not submit GPU jobs:
 
 ```bash
 python3 tools/sandbox.py --kind record-read --record-id gateway-0123456789abcdef0123456789abcdef
-python3 tools/sandbox.py --kind kernel-read --kernel-id kernel-0123456789abcdef0123456789abcdef --output-path scratch/previous-kernel
+python3 tools/sandbox.py --kind kernel-read --kernel-id kernel-0123456789abcdef0123456789abcdef --output-path scratch/previous.py
 python3 tools/sandbox.py --kind kernel-records --kernel-id kernel-0123456789abcdef0123456789abcdef
 python3 tools/sandbox.py --kind kernel-pareto-frontier
 ```

@@ -147,7 +147,7 @@ adoption:
 python3 tools/sandbox.py --kind adopt-kernel --request-file scratch/adopt.json
 ```
 
-Runtime rejects the request unless the current `kernel.py` and `implementation/` bytes exactly match
+Runtime rejects the request unless the current `kernel.py` and `impl/` bytes exactly match
 the cited Kernel Artifact. Adoption does not assert correctness, performance, or promotion; evaluate
 it normally.
 

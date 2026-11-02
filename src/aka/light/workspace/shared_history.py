@@ -83,7 +83,7 @@ def export_epoch(
         ref,
         "--",
         "kernel.py",
-        "implementation",
+        "impl",
         check=False,
     )
     if process.returncode != 0:

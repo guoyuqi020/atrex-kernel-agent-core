@@ -23,15 +23,13 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from aka.contracts.evaluation import (
-    DEFAULT_EVALUATION_STEP_TIMEOUT,
-    derived_evaluation_timeout,
-)
+from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT, derived_evaluation_timeout
 
 from aka.light.evaluation.gateway import (
     EPISODE_EVALUATIONS_PATH,
     build_parser,
     configured_queue_wait_grace,
+    find_agate,
     validate_evaluation_options,
 )
 from aka.light.workspace.files import (
@@ -46,12 +44,7 @@ from aka.light.workspace.files import (
 from aka.light.experiment.store import ABBA_BATCH_ROOT_ENV, BATCH_ROOT_ENV, JOB_ROOT_ENV, TaskRunning
 from aka.light.experiment.records import QUERY_KINDS, task_conflict_response
 from aka.light.workflow.journal_service import SupervisorJournalService, load_journal, journal_lock
-from aka.light.runtime.request_errors import (
-    AgentRequestError,
-    RuntimeStateError,
-    error_response,
-    field_error,
-)
+from aka.light.runtime.request_errors import AgentRequestError, RuntimeStateError, error_response
 from aka.light.runtime.request_feedback import augment_error
 from aka.light.runtime.plugin_output import (
     MAX_OUTPUT_BYTES,
@@ -63,11 +56,11 @@ from aka.light.workflow.constants import ATREX_BENCH_HARNESS, PROFILE_DRIVER, SO
 from aka.light.workspace.episode import EpisodeWorkspace
 from aka.light.acceptance.provider import CandidateValidation
 from aka.light.runtime.errors import (
-    RequestValidationError, RequestDispatchTimeout, GatewayExecutionUnavailable,
-    ResultPublicationError, SessionRevokedError,
+    RequestValidationError, RequestDispatchTimeout, GatewayExecutionUnavailable, SessionRevokedError,
+    ResultPublicationError,
 )
-from aka.light.runtime.paths import supervisor_campaign_root
 from aka.light.execution.retry import InfrastructureUnavailable
+from aka.light.runtime.paths import supervisor_campaign_root
 from aka.light.wiki.config import WikiConfig
 from aka.light.wiki.service import WikiService
 
@@ -159,10 +152,11 @@ def validate_gateway_transport(
     url,
     profile,
 ) -> None:
-    """Validate only the transport required by the selected operation."""
+    """Validate the SDK transport before staging or reserving a GPU task."""
     if ssh:
         return
     from aka.light.evaluation.source_transport import validate_gateway_sdk
+
     validate_gateway_sdk(
         parsed,
         environment,
@@ -257,13 +251,8 @@ class RuntimeConfig:
             raise TypeError("Runtime workspace_policy must be text")
         if type(self.pause_agent_during_requests) is not bool:
             raise TypeError("Runtime pause_agent_during_requests must be a boolean")
-        if (
-            type(self.evaluation_step_timeout) is not int
-            or self.evaluation_step_timeout <= 0
-        ):
-            raise ValueError(
-                "Runtime evaluation_step_timeout must be a positive integer"
-            )
+        if type(self.evaluation_step_timeout) is not int or self.evaluation_step_timeout <= 0:
+            raise ValueError("Runtime evaluation_step_timeout must be a positive integer")
         for name in ("request_timeout", "queue_timeout"):
             value = getattr(self, name)
             if name == "request_timeout" and value is None:
@@ -332,8 +321,6 @@ class _Handler(BaseHTTPRequestHandler):
             result = augment_error(
                 result, route=self.path, request=getattr(self, "decoded_request", None),
                 research_records=owner.journal_factory.research_records,
-                directions_enabled=owner.journal_factory.directions_enabled,
-                experiments_enabled=owner.journal_factory.experiments_enabled,
                 supervisor_git=binding.service.supervisor_git if binding else True,
                 parser=build_parser() if self.path == "/v1/gateway/execute" and status == 400 else None,
                 catalog=owner.plugins.catalog() if self.path == "/v1/plugins/execute" and status == 400 else (),
@@ -372,9 +359,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         owner = self.server.owner
         self.request_id = uuid.uuid4().hex
-        # Gateway jobs own bounded remote execution and polling windows. Keep
-        # the local request alive across any number of explicit Agate
-        # job-deadline replacements; Session revocation still terminates it.
+        # Gateway jobs own their remote deadlines/retry policy. Keeping the
+        # local HTTP request alive prevents the Agent from escaping a still
+        # running Runtime call and starting unrelated work.
         deadline = (
             float("inf")
             if self.path == "/v1/gateway/execute"
@@ -408,9 +395,6 @@ class _Handler(BaseHTTPRequestHandler):
                     self.path == "/v1/journal/execute"
                     and request.get("operation") == "episode_report"
                 ):
-                    # Candidate acceptance owns an authoritative terminal Eval.
-                    # It must remain alive while the Runtime retries confirmed
-                    # infrastructure failures for the same frozen candidate.
                     deadline = float("inf")
             # Suspension is optional. When enabled, stop only this Session's
             # Provider tree; the handler/executor remains outside that tree.
@@ -463,12 +447,8 @@ class _Handler(BaseHTTPRequestHandler):
         except RuntimeStateError as error:
             self.reply(503, error.response)
         except InfrastructureUnavailable as error:
-            # This is a confirmed incomplete infrastructure operation, not an
-            # unknown handler outcome.  In particular, candidate acceptance may
-            # already have a resumable private Gateway Record.  Return a stable
-            # infra classification so the Agent preserves its source/report and
-            # retries the identical request after backoff instead of seeing a
-            # generic outcome_unknown connection failure.
+            # The operation is known to be incomplete due to infrastructure;
+            # it is not an unknown handler outcome or a Kernel verdict.
             self.reply(
                 503,
                 failure(
@@ -551,10 +531,6 @@ class _Handler(BaseHTTPRequestHandler):
                     "command": "python3 tools/sandbox.py --kind record-read --record-id " + record_id,
                     "instruction": "Read the completed measurement result; this does not rerun the GPU job.",
                 })
-            logging.getLogger(__name__).warning(
-                "Supervisor Runtime request %s completed but result publication failed during %s: %s",
-                self.request_id, error.phase, error,
-            )
             issue_path = error.details.get("output_path", "$")
             self.reply(503, failure(
                 str(error),
@@ -704,7 +680,12 @@ class SupervisorRuntime:
         return load_journal(self.episode_journal_path(episode))
 
     def research_board(self, *, trajectory: int = 1) -> dict:
-        from aka.light.workflow.journal_service import research_projection, shared_research_queue
+        """Reconcile durable Episode journals into the Campaign research board."""
+        from aka.light.workflow.journal_service import (
+            research_projection,
+            shared_research_queue,
+        )
+
         for path in sorted((self.journals_root / "episodes").glob("e*/journal.json")):
             try:
                 projection = research_projection(path, self.journals_root)
@@ -763,11 +744,15 @@ class SupervisorRuntime:
                 view = (self.workspace_provider.open_draft if self.workspace_provider else EpisodeWorkspace)(workspace, evidence / "agent",
                                         is_ppu=hardware_vendor(self.config.hardware) == "ppu",
                                         research_records=self.journal_factory.research_records,
-                                        research_modules=self.journal_factory.tool_modules,
+                                        research_modules=getattr(
+                                            self.journal_factory,
+                                            "research_modules",
+                                            ("directions", "experiments"),
+                                        ),
                                         plugin_registry=self.plugins,
-                                        workspace_policy=self.config.workspace_policy,
                                         adaptive_root=(self.audit_root or self.root) / "adaptive-state",
-                                        episode=episode, history=history)
+                                        episode=episode, history=history,
+                                        workspace_policy=self.config.workspace_policy)
                 agent_workspace = view.prepare()
                 trajectory = (
                     origin.get("trajectory", 1) if isinstance(origin, Mapping) else 1
@@ -776,12 +761,15 @@ class SupervisorRuntime:
                 board = self.research.board(trajectory=trajectory)
                 incumbent = board.get("incumbent")
                 incumbent_id = (
-                    incumbent.get("kernel_id") if isinstance(incumbent, Mapping) else None
+                    incumbent.get("kernel_id")
+                    if isinstance(incumbent, Mapping)
+                    else None
                 )
                 lineage = board.get("lineages", {}).get(f"T{trajectory}", {})
                 lineage_id = (
                     lineage.get("lineage_best_kernel_id")
-                    if isinstance(lineage, Mapping) else None
+                    if isinstance(lineage, Mapping)
+                    else None
                 )
                 for ref, kernel_id, label in (
                     ("refs/tags/atrex/incumbent", incumbent_id, "official incumbent"),
@@ -932,7 +920,8 @@ class SupervisorRuntime:
                 deadline = min(deadline, parent.deadline)
             with self.request_lock(capability, deadline, "acceptance"):
                 return self.execute(capability, "/v1/gateway/execute", {"argv": argv}, reuse_completed=True,
-                                    execution_timeout=execution_timeout, reference_snapshot=reference_snapshot,
+                                    execution_timeout=execution_timeout,
+                                    reference_snapshot=reference_snapshot,
                                     terminal_validation=terminal_validation)
         finally:
             self.revoke(token)
@@ -987,34 +976,20 @@ class SupervisorRuntime:
                             profile=self.config.profile,
                         )
                     if parsed is not None and parsed.kind != "env":
-                        from aka.light.workspace.sources import (
-                            policy_at,
-                            unpack,
-                            snapshot as source_snapshot,
-                            install as install_source,
-                        )
+                        from aka.light.workspace.sources import freeze_for_execution, stage_frozen, layout_at
                         authority = (capability.journal.view.worktree if capability.journal and capability.journal.view
                                      else self.config.workspace or capability.workspace)
-                        source_policy = policy_at(authority, committed=True)
-                        if candidate_source is not None:
-                            if unpack(candidate_source)[0] != source_policy:
-                                raise ValueError("Sealed candidate has a different source contract")
-                            frozen_source = candidate_source
-                        elif source_policy is not None:
-                            frozen_source = source_snapshot(capability.workspace, policy=source_policy)
-                        else:
-                            frozen_source = None
+                        frozen_source = freeze_for_execution(authority, capability.workspace, candidate_source)
                         snapshot(capability.workspace, staged,
                                  custom_tools=bool(capability.journal and capability.journal.view))
                         if frozen_source is not None:
-                            install_source(staged, frozen_source, replace=False)
-                            if source_policy is not None:
-                                # Remove obsolete editable files copied from the draft.
-                                install_source(staged, frozen_source)
+                            stage_frozen(staged, frozen_source)
                         if capability.journal and capability.journal.view:
                             from aka.light.workspace.episode import PUBLIC_FILES
                             # An Agent draft is never the authority for evaluator inputs.
                             for name in PUBLIC_FILES:
+                                if layout_at(staged).owns(name):
+                                    continue
                                 try:
                                     content = read_input(capability.journal.view.worktree, name)
                                 except FileNotFoundError:
@@ -1092,17 +1067,7 @@ class SupervisorRuntime:
                     audit=lambda argv, process, record: self.audit_process(capability, "gateway", argv, process, record),
                     publish_log=lambda staged: self.publish_evaluation_log(capability.workspace, staged),
                     publish_outputs=lambda staged, args: self.publish_legacy_outputs(capability.workspace, staged, args),
-                    deadline=(
-                        None
-                        if capability.deadline == float("inf")
-                        else capability.deadline
-                    ),
-                    request_id=capability.request_id,
-                    terminal_validation=terminal_validation,
-                    agent_git=(
-                        capability.journal.view.agent_git.capture()
-                        if capability.journal and capability.journal.view else None
-                    ),
+                    deadline=capability.deadline, request_id=capability.request_id,
                 )
                 return self.experiments.execute(staged, effective, argv, environment, command, effects=effects,
                                                reuse_completed=reuse_completed, reuse_correctness=reuse_correctness)
@@ -1145,7 +1110,7 @@ class SupervisorRuntime:
                 candidate_source=frozen, terminal_validation=True),
             read_record=self.measurements.read, ensure_live=ensure_live,
             research_records=self.journal_factory.research_records,
-            experiments_enabled=self.journal_factory.experiments_enabled,
+            experiments_enabled=getattr(self.journal_factory, "experiments_enabled", False),
             production_policy=(lambda frozen: policy_validator(
                 capability.journal.service.git_workspace,
                 frozen,
@@ -1153,9 +1118,7 @@ class SupervisorRuntime:
                 require_gluon=capability.journal.require_gluon,
             )) if policy_validator and capability.journal else None,
             supplemental=(lambda frozen, correctness_passed: validator(
-                capability.journal.service.git_workspace,
-                frozen,
-                parent=capability,
+                capability.journal.service.git_workspace, frozen, parent=capability,
                 standard_correctness_passed=correctness_passed,
             )) if validator else None,
         )
@@ -1178,15 +1141,10 @@ class SupervisorRuntime:
             except (AgentRequestError, RuntimeStateError):
                 raise
             except ValueError as error:
-                enabled = []
-                if self.journal_factory.directions_enabled:
-                    enabled.append("list/load-direction")
-                if self.journal_factory.experiments_enabled:
-                    enabled.append("list/load-experiment")
                 evidence_hint = (
-                    ("Use " + " and ".join(enabled) + " for Journal IDs, and record-read for measurement evidence. ")
-                    if enabled else
-                    "Use record-read to check gateway_record_ids; candidate_ready must cite a passing full Evaluate for the current Kernel source tree. "
+                    "Use list/load-direction or list/load-experiment for IDs, and record-read for measurement evidence. "
+                    if self.journal_factory.research_records else
+                    "Use record-read to check gateway_record_ids; candidate_ready must cite a passing full Evaluate for current candidate. "
                 )
                 raise AgentRequestError(str(error), next_action=(
                     "Correct the indicated field or lifecycle state, then retry. Read skills/runtime-records/references/journal.md. "
@@ -1361,15 +1319,15 @@ class SupervisorRuntime:
                 try:
                     data = read_input(capability.workspace, raw, limit=128 * 1024)
                 except FileNotFoundError as error:
-                    message = f"Wiki query input file does not exist: {raw}"
+                    from aka.light.runtime.request_errors import field_error
                     raise field_error(
                         "--file",
-                        message,
+                        f"Wiki query input file does not exist: {raw}",
                         code="file_not_found",
                         requested_path=raw,
                         next_action=(
-                            f"Create the workspace-relative regular file {raw!r}, or pass the "
-                            "query text directly to wiki-query without --file, then retry."
+                            "Create the named file inside the workspace or pass the query text "
+                            "directly, then retry the same Wiki operation."
                         ),
                     ) from error
                 target = staged / "query.txt"
@@ -1420,24 +1378,12 @@ class SupervisorRuntime:
                     raise ValueError("--sync must be inside profiles/ or scratch/")
                 source = staged / path
                 if source.is_symlink():
-                    raise ResultPublicationError(
-                        f"Synchronized output {path.as_posix()!r} cannot be a symlink",
-                        code="output_synchronization_rejected",
-                        phase="output_synchronization",
-                        output_path=path.as_posix(),
-                        rejection_reason="symlink",
-                    )
+                    raise ValueError("Synchronized output cannot be a symlink")
                 files = source.rglob("*") if source.is_dir() else [source]
                 for item in files:
                     visited += 1
                     if visited > 4096:
-                        raise ResultPublicationError(
-                            "Synchronized output exceeds the 4096-entry limit",
-                            code="output_synchronization_limit_exceeded",
-                            phase="output_synchronization",
-                            limit_type="entry_count",
-                            limit_entries=4096,
-                        )
+                        raise ValueError("Synchronized output exceeds 4096 entries")
                     if not item.is_file() or item.is_symlink():
                         continue
                     relative = item.relative_to(staged).as_posix()
@@ -1452,27 +1398,10 @@ class SupervisorRuntime:
                         if remaining <= MAX_FILE_BYTES:
                             message = (f"Synchronized output exceeds cumulative size limit of {MAX_TOTAL_BYTES} bytes; "
                                        f"{remaining} bytes remain while reading {relative!r}")
-                            details = {
-                                "output_path": relative,
-                                "limit_type": "cumulative_bytes",
-                                "limit_bytes": MAX_TOTAL_BYTES,
-                                "remaining_sync_budget_bytes": remaining,
-                            }
                         else:
                             message = (f"Synchronized output file {relative!r} exceeds per-file size limit "
                                        f"of {MAX_FILE_BYTES} bytes; {remaining} bytes remain in the sync budget")
-                            details = {
-                                "output_path": relative,
-                                "limit_type": "per_file_bytes",
-                                "limit_bytes": MAX_FILE_BYTES,
-                                "remaining_sync_budget_bytes": remaining,
-                            }
-                        raise ResultPublicationError(
-                            message,
-                            code="output_synchronization_limit_exceeded",
-                            phase="output_synchronization",
-                            **details,
-                        ) from error
+                        raise ValueError(message) from error
                     total += len(data)
                     paths.add(relative)
                     publish(ready, relative, data)
