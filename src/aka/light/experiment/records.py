@@ -26,7 +26,7 @@ from aka.light.evaluation.provider import PREFIXES, result_from_response
 from aka.light.evaluation.public_result import cacheable_evaluation, seal_response
 from aka.light.runtime.request_errors import AgentRequestError, RuntimeStateError, error_response, field_error
 from aka.light.experiment.identifiers import GATEWAY_RECORD_ID_RE, KERNEL_RECORD_ID_RE
-QUERY_KINDS = {"record-read", "kernel-read", "kernel-records", "kernel-pareto-frontier"}
+QUERY_KINDS = {"record-read", "kernel-read", "kernel-records"}
 
 
 def _completed_abba_timeout(sample: object, states: list[dict], *, truncated: bool) -> bool:
@@ -62,19 +62,20 @@ def query(store, args, workspace: Path) -> dict:
         record = _read_record(store.read, args.record_id, field="record_id", pattern=GATEWAY_RECORD_ID_RE)
         return seal_response(record["response"], record["request"],
                              record_id=record["gateway_record_id"], kernels=record["kernels"])
-    if args.kind == "kernel-pareto-frontier":
-        if args.kernel_id or args.record_id or args.output_path:
-            raise ValueError("kernel-pareto-frontier takes no IDs or output path; it queries this Campaign")
-        from .frontier import kernel_pareto_frontier
-        result = kernel_pareto_frontier(store)
-    elif args.kind == "kernel-records":
-        result = {"kernel_id": args.kernel_id, "gateway_records": _read_record(
-            store.kernel_records, args.kernel_id, field="kernel_id", pattern=KERNEL_RECORD_ID_RE)}
+    if args.kind == "kernel-records":
+        result = {"kernel_commit_id": args.kernel_commit_id, "gateway_records": _read_record(
+            store.kernel_records, args.kernel_commit_id,
+            field="kernel_commit_id", pattern=KERNEL_RECORD_ID_RE)}
     else:
         path = relative_path(args.output_path or "")
         if len(path.parts) < 2 or path.parts[0] != "scratch":
             raise ValueError("--output-path must name a file (or tree directory) inside scratch/")
-        source = _read_record(store.read_kernel, args.kernel_id, field="kernel_id", pattern=KERNEL_RECORD_ID_RE)
+        source = _read_record(
+            store.read_kernel,
+            args.kernel_commit_id,
+            field="kernel_commit_id",
+            pattern=KERNEL_RECORD_ID_RE,
+        )
         from aka.light.workspace.sources import Artifact
         try:
             exported = Artifact(source).export(workspace / path)
@@ -89,14 +90,19 @@ def query(store, args, workspace: Path) -> dict:
                     "scratch/, then retry kernel-read."
                 ),
             ) from exc
-        result = {"ok": True, "kernel_id": args.kernel_id, "file": str(path), "bytes": len(source)}
+        result = {
+            "ok": True,
+            "kernel_commit_id": args.kernel_commit_id,
+            "file": str(path),
+            "bytes": len(source),
+        }
         if exported:
             result.update(exported, directory=str(path))
     return {"exit_code": 0, "stdout": json.dumps(result) + "\n", "stderr": ""}
 
 
 def correctness_identity(request: dict) -> dict | None:
-    """A narrow equivalence: full/untimed six-case evaluation of the same inputs.
+    """A narrow equivalence: full/untimed five-case evaluation of the same inputs.
 
     Only mode, performance repetitions and timing iterations may differ. All
     evaluator bytes, input/source hashes, tolerances, dependencies, target and
@@ -200,8 +206,27 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
         raise AgentRequestError(str(error)) from error
     operation = request["operation"]
     from aka.light.workspace.sources import measurement_artifacts
-    kernels = {side: store.kernel(artifact.snapshot)
-               for side, artifact in measurement_artifacts(request, inputs).items()}
+    kernels = {}
+    preferred = effects.kernel_ids or {}
+    for side, artifact in measurement_artifacts(request, inputs).items():
+        kernel_id = preferred.get(side)
+        if kernel_id is None:
+            try:
+                kernel_id = store.find_kernel_id(artifact.snapshot)
+            except RecordNotFound as error:
+                raise AgentRequestError(
+                    f"{side.capitalize()} Kernel has no recorded Git commit identity.",
+                    code="kernel_commit_unknown",
+                    next_action=(
+                        "Commit the Kernel source before invoking Runtime tools. For an ABBA "
+                        "baseline, materialize a Kernel previously returned by this Campaign."
+                    ),
+                ) from error
+        kernels[side] = store.kernel(artifact.snapshot, kernel_id)
+    request = dict(
+        request,
+        kernel_ids={side: identity["kernel_id"] for side, identity in sorted(kernels.items())},
+    )
     if reuse_correctness and reuse_completed and "candidate" in kernels:
         response = reuse_correctness_result(store, request, kernels["candidate"]["kernel_id"])
         if response is not None:

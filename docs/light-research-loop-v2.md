@@ -3,7 +3,7 @@
 状态：核心闭环已实现（2026-10-31）
 
 当前实现覆盖 Research Board、有序 Direction、Runtime 派生 Experiment 事实、Agent 私有
-Git、过滤后的 Epoch Git 共享、持久 island lineage、前 5 个公开 Shape 与完整 workload
+Git、过滤后的 Epoch Git 共享、持久 island lineage、可配置数量的公开 Shape 与完整 workload
 评测。每条 trajectory 现在持久化自己的 Claude Provider Session，并在下一个 Episode 的
 首次调用中执行真实 resume；trajectory 级稳定 Session Home 保证 per-Episode 投影工作区
 变化时仍能找到原会话。Research Board、Agent Git 和 Kernel Artifact 仍是可审计、可恢复
@@ -29,7 +29,7 @@ Light 应保留可信评测边界，同时吸收 Ruibo 工作流中适合长期�
 
 ## 背景与问题
 
-Light 已保存绝大多数必要事实，但这些事实分散在 Direction、Experiment、Gateway Record、Kernel Artifact、Pareto frontier 和 Episode Report 中。新的 Episode 为恢复完整工程状态，通常需要多次执行 list/load/read，才能回答：
+Light 已保存绝大多数必要事实，但这些事实分散在 Direction、Experiment、Gateway Record、Kernel Artifact、Pareto frontier 和 Episode Report 中。新的 Episode 若没有统一投影，通常需要多次读取不同记录，才能回答：
 
 1. 当前经过认证的最佳 Kernel 是哪个？
 2. 每条 trajectory 正在实现什么？
@@ -76,62 +76,92 @@ Light 应把同样有用的工程视图做成可信状态的只读投影，而�
 | 层次 | 所有者 | 内容 |
 | --- | --- | --- |
 | Measurement Record | Runtime | 请求身份、精确源码摘要、公开结果、故障分类、标准化测量结果 |
-| Kernel Artifact | Runtime | 不可变的已提交源码树和对应 Kernel ID |
+| Kernel Artifact | Runtime | 不可变的已提交源码树和对应 `kernel_commit_id` |
 | Direction Journal | Agent 通过 Runtime 的受校验操作写入 | 有序研究意图、生命周期、下一步和关闭决定 |
 | Promotion Record | Supervisor | 被选择的 Kernel、完整 Evaluate 证据、Production 决策和最终 ABBA |
 
 Experiment 是对一个或多个 Measurement Record 的语义标注，不重复保存测量内容。Research Board 是上述权威状态的派生视图，不是权威状态，也不能被 Agent 直接修改。
 
-## Research Board
+## 工作区研究投影
 
-每个 Episode 开始时，Runtime 生成一份有大小限制的 Research Board，并自动放入 Prompt。Agent 也可以通过只读命令刷新它。该视图必须足够短，保证每次 Episode 都能完整读取。
+为了避免每次恢复都通过多轮工具调用才能拼回工程上下文，Runtime 将当前可见历史自动投影为普通文件：
 
-示例：
-
-```yaml
-incumbent:
-  kernel_id: kernel_0123
-  latency_us_geomean: 95.80
-
-lineages:
-  T1:
-    working_kernel_id: kernel_0456
-    lineage_best_kernel_id: kernel_0345
-    active_direction_id: direction_aaaa
-  T2:
-    working_kernel_id: kernel_0789
-    lineage_best_kernel_id: kernel_0678
-    active_direction_id: direction_bbbb
-
-open_queue:
-  - rank: 1
-    direction_id: direction_bbbb
-    name: Split KV across CTAs
-    change_scope: major_redesign
-    status: in_progress(T2)
-    next_step: 实现一个能够编译且正确的 KSPLIT=2 原型
-    evidence_summary: Profile 显示低 CTA waves 下存在无法隐藏的访存延迟
-  - rank: 2
-    direction_id: direction_aaaa
-    name: Reduce TMEM readout work
-    change_scope: local
-    status: proposed
-    next_step: 使用相同对照测试 64-column readout
-
-recent_experiments:
-  - experiment_id: experiment_cccc
-    direction_id: direction_aaaa
-    conclusion: refuted
-    latency_delta_percent: 3.2
-    kernel_id: kernel_0456
-
-closed_directions:
-  - direction_id: direction_dddd
-    status: abandoned
-    reopen_condition: 寄存器使用降到 160 以下时重新考虑
+```text
+directions/<status>/<direction_id>.json
+experiments/<experiment_id>/experiment.json
+records/<gateway_record_id>.json
+PROGRESS.md
 ```
 
-Research Board 不得包含隐藏输入、私有 evaluator 输出、conversation 原文或无上限的测量正文。完整 Direction、Experiment、Measurement 和 Kernel 数据仍通过对应的 load/read 操作按需读取。
+Direction 文件按当前状态存放在 `proposed/`、`in_progress/`、`deferred/`、`blocked/`、
+`completed/` 或 `abandoned/` 子目录；状态变化时 Runtime 移除旧路径并投影到新路径。
+文件包含完整的决策字段、生命周期、plan 进度、`next_step` 与队列位置。
+`experiment.json` 只包含研究语义与 Gateway Record 引用；根目录 `records/` 平铺当前可见的全部
+标准化公开结果，不再在各 Experiment 下复制一份。它不包含私有请求、输入哈希或兼容执行流。
+Record 中的 `kernel_commit_id` 是 Git commit ID，因此精确源码由同一 trajectory 仓库或已导入
+的同伴历史提供。
+
+这些文件只是 Runtime 私有 Journal、Research Store、Measurement Store 和 Git 的派生视图：
+
+- Episode 启动、恢复与 Epoch 历史导入时完整重建；
+- Direction/Experiment/队列变更后原子刷新相关 JSON；
+- Agent 可以用普通文件工具检索，也可以随 `command` 上传到远端诊断环境；
+- Agent 不得直接修改，Runtime 不会把文件内容读回为权威状态；
+- `PROGRESS.md`、`directions/` 和 `experiments/` 被 Kernel Git 与源码快照排除；
+- Direction/Experiment 不再提供重复的 list/load 工具；`record-read` 暂时保留为旧工作区和显式
+  单条查询的兼容入口，正常恢复直接读取根目录 `records/`。
+
+## Research Board
+
+Runtime 将有大小限制的 Research Board 持续投影到 Agent 工作区根目录 `PROGRESS.md`：Episode 启动/恢复、研究记录变化及测量完成后都会刷新。Prompt 只要求 Agent 直接读取该文件，不再内联 Board，也不再提供 Board 查询工具。
+
+示例结构：
+
+```markdown
+# Current state
+
+- **Best verified Kernel commit ID:** `456789ab...`; GeoMean: **95.80 us**;
+  evidence: `gateway-1111...`; also the promoted incumbent.
+- **Current lineage:** `T1`.
+- **Working Kernel commit ID:** `456789ab...`.
+- **Latest visible Gateway result and scope:** evaluate (completed; PASS; GeoMean 95.80 us);
+  scope: full, contract, 90 measured Shapes; Kernel commit ID `456789ab...`; evidence
+  `gateway-1111...`.
+- **Suggested next experiment:** Split KV across CTAs — 实现一个可编译、正确的
+  KSPLIT=2 原型。
+- **Current real blocker:** none recorded.
+- **Current work:** Split KV across CTAs (`direction_bbbb`).
+- **Hypothesis:** KSPLIT 能隐藏长 KV 的访存延迟并覆盖 reduction 开销。
+
+## Lineages
+
+| Lineage | Working Kernel commit ID | Best Kernel commit ID | Active Direction |
+| --- | --- | --- | --- |
+| `T1` | `456789ab...` | `456789ab...` | `direction_bbbb` |
+| `T2` | `789abcde...` | `6789abcd...` | none |
+
+## Directions
+
+### In Progress
+
+1. **Split KV across CTAs** (`direction_bbbb`) — queue #1; owner `T1`;
+   scope `major_redesign`.
+   - Hypothesis: KSPLIT 能隐藏长 KV 延迟。
+   - Next: 实现 KSPLIT=2 原型。
+
+### Proposed
+
+1. **Reduce TMEM readout work** (`direction_aaaa`) — queue #2; scope `local`.
+
+## Visible-history per-Shape Pareto frontier
+
+| Shape ID | Latency (us) | Kernel commit ID | Gateway Record ID |
+| --- | ---: | --- | --- |
+| `shape_0001` | 12.5 | `456789ab...` | `gateway-1111...` |
+```
+
+首页采用 Ruibo 风格的一页当前状态，但所有字段由 Runtime 机械生成而非 Agent 自由编辑：整体最佳来自正确且完整的标准 Evaluate；最新可见结果及适用范围来自本地与已导入同伴历史中时间上最新的终态 Gateway Record；建议实验来自 active Direction，缺失时取有序队列首项；真实 blocker 只采用显式 blocked Direction，或最新终态记录中的基础设施/超时故障。当前工作和下一步来自 active/queue Direction，三线状态来自 Research Store。Research Board 不得包含隐藏输入、私有 evaluator 输出、conversation 原文或无上限的测量正文。`pareto_frontier` 直接给出所有当前可见标准完整 Evaluate 历史中每个 Shape 的观测最优 Kernel/Record；它不是当前 lineage 私有边界，也不是一个已测量的合成 Kernel。完整 Direction、Experiment 和公开 Measurement 结果从工作区研究投影按需读取；Kernel 源码通过 Git commit 或 `kernel-read` 获取。
+内部 `schema_version`、`revision` 以及最近 Experiment 缓存不投影到 `PROGRESS.md`；前两项只用于 Runtime 恢复与一致性，Experiment 直接从 `experiments/` 按需读取。
 
 ### 队列排序
 
@@ -151,10 +181,13 @@ Direction 是研究意图的基本单位，不重复记录测量结果。
 
 ```yaml
 direction_id: direction_...
+proposed_by: T2
 name: Split KV across CTAs
 status: proposed | in_progress | deferred | completed | abandoned | blocked
 change_scope: local | major_redesign
 hypothesis: 多 CTA 可以在低 wave Shape 上隐藏 KV 访存延迟。
+applicability: 长上下文、CTA waves 较低且 reduction 开销可被摊薄的 Shape。
+expected_benefit: 降低长上下文延迟，并避免短上下文 dispatch 退化。
 plan:
   - 证明 KSPLIT=2 源码结构可以编译。
   - 在公开 Shape 上快速验证 reduction，再用完整 workload Evaluate 验证正确性。
@@ -163,7 +196,7 @@ stop_conditions:
   - 如果 reduction 开销大于 Profile 推导出的延迟收益，则终止。
 next_step: 证明 KSPLIT=2 源码结构可以编译。
 reopen_condition: null
-relationship: independent | refinement | alternative | reimplementation | contradiction
+relationship: refinement | correction | combination | alternative | reimplementation | contradiction
 derived_from_direction_ids: []
 derived_from_experiment_ids: []
 ```
@@ -174,7 +207,7 @@ Direction 关闭时记录 hypothesis status 和引用证据；完整的 Experime
 
 ### 所有权
 
-每条 trajectory 同时只能拥有一个 active Direction；不同 trajectory 可以同时拥有不同 Direction。Agent 看到的状态写成 `in_progress(T2)`，不要求 Agent 单独填写 owner 字段。
+每条 trajectory 同时只能拥有一个 active Direction；不同 trajectory 可以同时拥有不同 Direction。每个 Direction 的 Agent 可见投影包含不可变的 `proposed_by: Tn`，说明最初由哪条轨迹提出；`in_progress(T2)`/`owner` 只说明当前由谁执行，二者不能混用。Agent 不需要填写这些字段，它们由 Runtime 从可信搜索坐标生成。
 
 所有权是一种持久 lease：
 
@@ -196,23 +229,20 @@ intent: 判断 split KV 是否能隐藏足够延迟以抵消 reduction 开销。
 gateway_record_ids:
   - gateway-...
 interpretation: 结果不确定，因为只有 short-KV regime 得到改善。
+references:
+  - scratch/ksplit-analysis.md
+  - profiles/ksplit2
 ```
 
-Runtime 自动补充：
-
-```yaml
-before_kernel_id: kernel_...
-after_kernel_id: kernel_...
-source_diff_summary: 增加 split partial output 和二阶段 reduction。
-operations: [check, run, profile]
-correctness: pass
-latency_summary: {...}
-per_regime_summary: {...}
-failure_class: null
-measurement_digests: [...]
-```
-
-自动生成的字段是事实；`intent` 和 `interpretation` 是 Agent 的可修正判断。两者在存储和展示中必须明确区分。
+Runtime 验证每个 `gateway_record_id`；对应的标准化公开结果平铺在根目录 `records/`。
+操作类型、正确性、性能、故障和 Kernel commit 身份只保留在这些不可变 Record 中；源码变化
+通过 Git 比较相应 commit，不再在 Experiment 里保存第二份摘要。Runtime 同时验证
+`references` 中的工作区文件或目录，将其复制进私有归档，并把字段改写为
+`experiments/<experiment_id>/references/...`。原文件后续变化不会影响该 Experiment 的材料。
+`intent` 和 `interpretation` 是 Agent 的可修正判断，与测量事实和支撑材料分目录展示。
+`gateway_record_ids` 与 `references` 是互相独立的可选数组，均可省略或为空；只有非空
+`references` 才创建归档。没有测量 Record 的 Experiment 只能作为研究笔记，不能单独支撑
+`supported/refuted` 结论或候选晋升。
 
 Direction 和 Experiment 同时启用时，如果 trajectory 只有一个 active Direction，Experiment 默认自动关联该 Direction；如果请求明确指定其他可见 Direction，则使用显式值。只启用 Experiment 时不要求 `direction_id`，由 `intent` 表达本次局部假设。关闭 Experiment 时，Measurement Record 仍完整保留执行事实。
 
@@ -229,14 +259,14 @@ git status
 git diff
 git log --all --oneline --graph
 git switch -c split-kv
-git add kernel.py implementation/
+git add kernel.py impl/
 git commit -m 'Try KSPLIT=2 reduction'
 git tag experiment/ksplit2
 git revert <commit>
-git restore --source <commit> -- kernel.py implementation/
+git restore --source <commit> -- kernel.py impl/
 ```
 
-这个仓库只是工程工具，不是可信测量记录。每次测量前，Runtime 仍按实际源码字节生成不可变快照，并分配 Kernel ID 和 Gateway Record ID。晋升使用被选中 Measurement Record 所绑定的 Runtime 快照，绝不使用 Agent 提供的 Commit ID，也不直接读取当前 `HEAD` 作为证据。
+这个仓库同时提供工程历史和源码身份。正式测量前，Runtime 要求工作区干净，以完整 `HEAD` commit ID 作为 `kernel_commit_id`，并把该 commit 的实际源码字节密封进私有 Measurement Store。Gateway Record ID 标识一次逻辑测量；晋升使用 Record 绑定的密封源码，不信任之后可能被移动或删除的 Git ref。
 
 ### 仓库内容
 
@@ -244,7 +274,7 @@ Git 仓库根目录可以仍是 Agent workspace，但 evaluator 和 promotion �
 
 ```text
 kernel.py
-implementation/**
+impl/**
 ```
 
 `scratch/`、链接的工具、Skills、公开说明、Session 文件和 Runtime 投影全部忽略，不进入晋升。无论 Agent 是否把它们加入 Git，Source Policy 仍会拒绝 symlink、路径逃逸、受保护文件修改和非法源码布局。
@@ -264,51 +294,32 @@ refs/tags/atrex/lineage-best 当前 trajectory 历史最佳正确 Kernel
 refs/atrex/shared/T2/e0004/head  Epoch 边界导入的同伴密封源码历史
 ```
 
-Runtime 生成的 commit message 包含 Kernel ID、源码摘要、来源 trajectory 和 Epoch。这些 refs 在 trajectory 准备或恢复时由 Runtime Artifact 重建。Agent 可以自由创建、移动或删除自己的 branch/tag；任何私有 Git ref 都不是权威证据。
+Runtime 生成的 commit message 包含 Kernel commit ID、源码摘要、来源 trajectory 和 Epoch。这些 refs 在 trajectory 准备或恢复时由 Runtime Artifact 重建。Agent 可以自由创建、移动或删除自己的 branch/tag；已有 Measurement Record 仍由私有密封源码保证可审计。
 
 即使 Agent rewrite history，Runtime Measurement 仍然有效，因为 Runtime 保存完整源码树。Agent 仓库执行 GC 也不能删除 Runtime 的 Kernel Artifact。
 
-### Git Commit、Kernel 与测量的三层身份
+### Kernel commit 与测量的两层身份
 
-Git Commit ID 不能直接替代 Kernel ID。三种身份分别描述不同对象：
+Kernel 源码身份直接使用产生该源码的完整 Agent Git commit ID，公开字段名为 `kernel_commit_id`：
 
 | 身份 | 描述对象 | 主要用途 |
 | --- | --- | --- |
-| Agent Git Commit ID | 某个 trajectory 私有仓库中的版本及历史关系 | branch、diff、revert、cherry-pick 和人工审计 |
-| Kernel ID | Runtime 规范化后的实际评测源码内容 | 跨仓库去重、源码绑定、共享和晋升 |
-| Gateway Record ID | 某个 Kernel 在特定请求条件下的一次逻辑评测 | 正确性、性能、Profile 和诊断证据 |
+| Kernel commit ID | 某个 trajectory 仓库中被提交并实际测量的完整源码版本 | branch、diff、revert、共享、源码绑定和晋升 |
+| Gateway Record ID | 某个 Kernel commit 在特定请求条件下的一次逻辑评测 | 正确性、性能、Profile 和诊断证据 |
 
-Git Commit ID 还包含 parent、author、时间和 message。同一份源码在两个 trajectory 中可以有不同 Commit ID；rebase、amend 和路径过滤也会改变 Commit ID。反过来，同一个 Commit 可以在不同 evaluator、硬件、Shape 子集或 repetition policy 下产生多条 Gateway Record。因此三者不能合并。
+Git commit 还包含 parent、author、时间和 message；同一份源码在两个 trajectory 中可能有不同 `kernel_commit_id`。这正好保留其工程来源。同一个 commit 可以在不同 evaluator、硬件、Shape 子集或 repetition policy 下产生多条 Gateway Record，所以源码身份和测量身份仍不能合并。
 
 Runtime 按如下关系维护映射：
 
 ```text
-Agent Commit / Dirty Worktree
-    ↓ 读取并规范化 kernel.py + implementation/**
-Kernel ID
+Clean Agent HEAD commit
+    ↓ 密封并校验 kernel.py + impl/**
+Kernel commit ID
     ↓ 绑定 operation、evaluator、reference、hardware、Shapes 和 options
 Gateway Record ID
 ```
 
-Kernel ID 建议定义为规范化源码 manifest 与文件内容的 SHA-256：
-
-```text
-kernel_<sha256(canonical_source_tree)>
-```
-
-`canonical_source_tree` 至少包含按相对路径排序的文件名、文件类型、受支持的 mode 和完整文件字节。symlink、路径逃逸和非法文件类型在计算 ID 前拒绝。同样的评测源码无论来自哪个 branch、Commit 或 trajectory，都得到同一个 Kernel ID。
-
-例如同一份源码在共享历史导入前后可以是：
-
-```text
-T1 原 Commit:       a111...
-导入 T2 后 Commit: b222...
-Kernel ID:          kernel_c333...  # 保持不变
-```
-
-Agent 日常主要使用 Git ref 和 Commit，不需要手工管理 Kernel ID。Research Board 可以优先显示 `atrex/global-best`、`atrex/lineage-best` 和对应 Commit subject；Git note 与 Runtime 结果同时显示 Kernel ID 和 Gateway Record ID。Kernel ID 主要服务于 Runtime 去重、跨仓库关联和 Promotion 审计。
-
-Git tree ID 也不能取代 Kernel ID：它可能包含评测范围之外的文件，依赖仓库对象格式，而且不能表达 Runtime 的源码规范化规则。
+Runtime 另存规范化源码 digest 用于完整性校验和内容去重，但该 digest 不再作为第二个 Agent-facing Kernel ID。共享同伴历史时保留原 commit 对象，因此同伴记录中的 `kernel_commit_id` 仍能直接用于 `git show`、`diff`、`switch` 或 `cherry-pick`。
 
 ### 测量绑定
 
@@ -320,12 +331,12 @@ agent_git:
   clean: true | false
   tree: <Git tree ID or null>
 source_digest: <Runtime canonical digest>
-kernel_id: kernel_...
+kernel_commit_id: <full Agent Git commit ID>
 ```
 
-`source_digest` 和 Kernel ID 是权威身份；Git 身份只用于工程回溯和人工审计。Dirty worktree 仍可测量，但 Runtime 必须先保存不可变 Kernel Artifact，并明确说明结果没有绑定到 clean Agent commit。
+`kernel_commit_id` 是权威源码身份，`source_digest` 用于校验该 commit 对应的规范化源码快照。Dirty worktree 可以用于开发探针，但正式 Evaluate、ABBA 与晋升前必须先提交并保持工作区干净。
 
-如果 clean Commit 的规范化源码此前已出现，Runtime 复用已有 Kernel ID；如果同一个 Kernel 使用不同请求条件执行，则创建或复用对应的不同 Gateway Record。Commit 被删除或改写不会改变任何已有 Kernel/Record 身份。
+如果 clean commit 的规范化源码此前已出现，Runtime 复用该 `kernel_commit_id`；如果同一 commit 使用不同请求条件执行，则创建或复用对应的不同 Gateway Record。Runtime 私有存储继续密封源码快照，因此后续删除 Git ref 不会改变已有 Record 的证据内容。
 
 Prompt 建议 Agent 在正式实验前 commit，使 `git log`、Experiment 和 Measurement 自然对应。更严格的可选模式可以要求 full Evaluate 和 ABBA 前工作区 clean，但继续允许 dirty source 执行 `dev`、`check` 和编译探针。无论是否 clean，晋升始终密封 Runtime 实际测量的快照。
 
@@ -350,7 +361,7 @@ Agent 获得正常的本地 Git 能力，但没有远端仓库权限和 Git 凭�
 
 ```text
 kernel.py
-implementation/**
+impl/**
 ```
 
 推荐使用标准 Git 的 `fast-export` / `fast-import` 完成路径过滤和对象导入，而不是自行实现版本图。导出内容不包括：
@@ -393,7 +404,7 @@ refs/notes/atrex-measurements
 
 ```yaml
 measurement_status: measured
-kernel_id: kernel_...
+kernel_commit_id: <full Agent Git commit ID>
 gateway_record_ids: [gateway-...]
 experiment_id: experiment_...
 correctness: pass
@@ -413,7 +424,7 @@ git log --show-notes=atrex-measurements refs/atrex/shared/T2/e0004/head
 git notes --ref=atrex-measurements show <commit>
 ```
 
-Git note 只是 Measurement Record 的紧凑索引；Kernel ID 和 Gateway Record 仍是权威证据。未测量 commit 可以帮助理解实现步骤，但不能支持性能、正确性或因果结论。
+Git note 只是 Measurement Record 的紧凑索引；Kernel commit ID 与 Gateway Record 共同定位权威证据。未测量 commit 可以帮助理解实现步骤，但不能支持性能、正确性或因果结论。
 
 #### 共享范围与增量更新
 
@@ -445,7 +456,7 @@ Runtime 只在 trajectory 准备、恢复或 Epoch 边界显式移动生成的 `
 
 ### Episode 开始
 
-Runtime 注入 Research Board，并要求 Agent：
+Runtime 通过根目录 `PROGRESS.md` 提供 Research Board，并要求 Agent：
 
 1. 检查 incumbent、trajectory best、active Direction 和 open queue；
 2. 只加载与当前决策最相关的详细证据；
@@ -461,15 +472,13 @@ Runtime 继续负责长时间等待、重试、去重和基础设施故障分类
 
 ### Episode 结束
 
-以下情况可以提交 `episode-report`：
+一个 Episode 内可以持续完成多轮 `probe → candidate → measurement → revert/keep`。获得一个可晋升候选只是 checkpoint，不是终止条件。`episode-report` 必须声明 `handoff_reason`，且只允许：
 
-- 当前 Direction 的计划已完成；
-- 获得稳定且值得晋升的候选；
-- 已达到 stop condition；
-- 被明确的外部依赖阻塞；
-- 研究预算耗尽，且下一步已经保存。
+- `direction_terminal`：当前 Direction 真正完成或穷尽；启用 Direction 时必须先 `complete` 或 `abandon`；
+- `cross_trajectory_share`：仅限多轨迹搜索，需要把有意义的 checkpoint 发布给同伴；这是唯一可保留 active Direction 的 handoff；
+- `blocked`：具体 blocker 使当前工作无法继续；启用 Direction 时必须先用 `block` 关闭。
 
-找到第一个局部更快候选本身不足以结束 Episode。`major_redesign` 可以跨 Episode 延续，不需要把 WIP 源码晋升为 incumbent。
+Runtime 会校验 reason、report status、当前 Direction 生命周期及运行模式，避免 Agent 用普通 checkpoint 提前结束 Episode。
 
 ### Session 连续性
 
@@ -505,7 +514,7 @@ major redesign 在达到 stop condition、被明确 refute/abandon、milestone �
 `T2` 表示当前搜索职责，不是永久绑定某一个 Direction。一个 major redesign 结束时，本 Episode 不应立即混入另一个无关 Direction，而应先完成以下事务：
 
 1. 把 Direction 标记为 `completed`、`abandoned`、`blocked` 或 `deferred`；
-2. 绑定最终 Experiment、Measurement Record、Kernel ID 和 Agent Commit；
+2. 绑定最终 Experiment、Measurement Record 和 Kernel commit ID；
 3. 密封本 Direction 的 Git head 与可共享历史；
 4. 保存 lineage best、最终 WIP 和 closure/reopen condition；
 5. 释放 `in_progress(T2)` ownership lease；
@@ -543,6 +552,9 @@ Research Board、测量记录和 Git 历史始终是跨 Session 的权威工程�
 ## 并行搜索拓扑
 
 Pooled search 应采用 island model，不能每轮都用 Epoch winner 替换所有 trajectory。
+
+Light 默认启动三条持久 island，每条 island 每个 Epoch 运行一个 Episode，最多三条并发；
+显式配置 `search: {}` 时才使用串行 Workflow。默认使用同步 Epoch barrier，角色区分关闭。
 
 每条 trajectory 保留：
 
@@ -603,15 +615,18 @@ dimensions:
 
 ### 可见性划分规则
 
-可见性由 Runtime 在 Campaign 创建时一次性生成并固化：
+可见性由 Runtime 在 Campaign 创建时一次性生成并固化。启动参数
+`--public-shapes 0|N|all` 控制精确 Shape 参数的可见数量，默认值为 `all`：
 
-- 按 evaluator 的规范 Shape 顺序固定公开前 5 个 Shape；恢复 Campaign 时不得重新选择或重排；
-- 如果完整 workload 少于 5 个 Shape，则公开全部 Shape；
+- `0` 不生成 `public_shapes.json`，不公开任何精确 Shape 参数；
+- 正整数 `N` 按 evaluator 的规范 Shape 顺序固定公开前 `N` 个 Shape；如果完整 workload 少于 `N`，则公开全部 Shape；
+- `all` 公开全部 Shape；
+- 恢复 Campaign 时不得重新选择、重排或更改可见数量；如需更改必须使用新工作区；
 - 公开 Shape 使用 `public-*` ID；隐藏 Shape 可以使用 opaque ID，但 ID 不能编码或映射回参数；
 - Runtime 保存完整私有 visibility manifest，Agent 工作区只物化公开 Shape 参数；
 - Agent 可以看到公开 Shape 的精确频率权重，以及完整 workload 的频率桶摘要；隐藏 Shape 的精确参数与参数—权重映射不公开。
 
-例如 90 个 Shape 固定公开规范顺序中的前 5 个，其余 85 个参数保持隐藏。全部 90 个 Shape 仍参与每次标准 Evaluate；公开数量只控制 Agent 能看到多少精确参数，不改变评分样本。
+例如 90 个 Shape 使用默认配置时公开全部 90 个精确参数；显式使用 `--public-shapes 5` 时只公开规范顺序中的前 5 个，使用 `--public-shapes 0` 时不公开精确参数。无论配置为何，全部 90 个 Shape 都参与每次标准 Evaluate；公开数量只控制 Agent 能看到多少精确参数，不改变评分样本。
 
 Agent Problem 可以扩展为：
 
@@ -643,7 +658,7 @@ hidden_summary:
 
 - 不带 Shape 选择器的普通 full Evaluate 和终态 Evaluate/ABBA 固定运行全部 Shape；
 - Agent 可以显式传入 Shape ID 做子集 Evaluate，以缩短开发反馈或定位性能问题，但该结果不能满足 Episode Report、晋升或终态门禁；
-- `profile`、`check` 和 `disassemble` 可以按公开或 opaque Shape ID 运行；只有前 5 个公开 Shape 能关联具体参数，隐藏 Shape 仍只返回不含参数的诊断结果；
+- `profile`、`check` 和 `disassemble` 可以按公开或 opaque Shape ID 运行；只有配置为公开的 Shape 能关联具体参数，隐藏 Shape 仍只返回不含参数的诊断结果；
 - 公开 Shape 可以返回逐 Shape 结果；隐藏 Shape 默认只进入全量聚合，并按稳定的粗粒度 regime 返回有大小限制的摘要；
 - 如果保留隐藏 Shape 的逐 Shape 延迟，必须使用 opaque ID，且 Kernel 接口和 dispatcher 不得接收该 ID；
 - 普通 Evaluate 与终态评测的区别只应是重复次数、审查和晋升权限，不能是 Shape 集合、权重或容差策略；
@@ -716,7 +731,7 @@ Runtime 保存 append-only 研究事件流，至少记录：
 - lineage migration；
 - promotion 和 rejection。
 
-Research Board 和 Markdown 导出均从事件流与不可变存储重新生成，不能被读回作为权威状态。
+`PROGRESS.md`、Direction 和 Experiment 投影均从事件流与不可变存储重新生成，不能被读回作为权威状态。
 
 ## 实施计划
 
@@ -730,9 +745,9 @@ Research Board 和 Markdown 导出均从事件流与不可变存储重新生成�
 | Direction/Experiment 契约 | `workflow/journal_service.py`、`runtime/client/sandbox.py` | Journal API 改为 Research Store 的校验入口；保留旧 Journal 只读兼容 |
 | 持久 island lineage | `workflow/search.py`、`workflow/search_driver.py` | 搜索 checkpoint 升级为 per-trajectory working/best/WIP，取消 winner 覆盖 |
 | Agent 私有 Git | `workspace/agent_git.py`、`workspace/episode.py` | Episode draft 初始化受控本地 Git；Git 身份只用于工程审计 |
-| Epoch 共享源码历史 | `workspace/shared_history.py`、`workflow/search_driver.py` | 过滤导出 `kernel.py` 与 `implementation/**`，导入 peer refs 和测量 notes |
-| 前 5 个公开 Shape | `task/problem/layout.py`、`workflow/bootstrap.py`、`workflow/session_io.py` | Runtime 确定性生成只读 `public_shapes.json`；完整 evaluator 输入继续私有 |
-| Prompt 与上下文恢复 | `workflow/prompts/`、`workflow/episode.py`、`agent/home.py` | Episode 开始自动注入 Board 与上一轮结算；同一 trajectory 跨 Episode 恢复 Claude Session，并以 Board 与 Git 保持权威恢复边界 |
+| Epoch 共享源码历史 | `workspace/shared_history.py`、`workflow/search_driver.py` | 过滤导出 `kernel.py` 与 `impl/**`，导入 peer refs 和测量 notes |
+| 可配置公开 Shape | `task/problem/layout.py`、`workflow/bootstrap.py`、`workflow/session_io.py` | Runtime 按 `0`、`N` 或 `all` 确定性生成只读 `public_shapes.json`；完整 evaluator 输入始终参与评测 |
+| Prompt 与上下文恢复 | `workflow/prompts/`、`workflow/episode.py`、`agent/home.py` | Episode 开始要求读取 `PROGRESS.md` 与上一轮结算；同一 trajectory 跨 Episode 恢复 Claude Session，并以投影与 Git 保持权威恢复边界 |
 | 审计与恢复 | Research event store、search checkpoint、Measurement Store | 先写事件再更新投影；所有生成视图均可重建 |
 
 新搜索 checkpoint 使用 schema v2：
@@ -766,7 +781,7 @@ Research Board 和 Markdown 导出均从事件流与不可变存储重新生成�
 ### 第一阶段：投影与 Prompt
 
 - 从现有存储生成有大小限制的 Research Board；
-- 在 Episode 开始时自动注入，并提供刷新命令；
+- 持续投影到根目录 `PROGRESS.md`，不再注入 Prompt 或提供刷新命令；
 - 增加显式 Direction 队列顺序和原子 reorder；
 - 增加 `next_step` 与 `reopen_condition` 语义；
 - 修改 Prompt 和终态引导，避免第一个局部改善立即触发 handoff。
@@ -776,12 +791,12 @@ Research Board 和 Markdown 导出均从事件流与不可变存储重新生成�
 ### 第二阶段：Agent 私有 Git
 
 - 为每条 trajectory 初始化独立本地 Git 仓库；
-- 评测和晋升范围只包含 `kernel.py` 与 `implementation/`；
-- 定义稳定的规范化源码 manifest，并以其 SHA-256 生成 Kernel ID；
-- 建立 Agent Commit/tree、Kernel ID 和 Gateway Record ID 的可审计映射；
+- 评测和晋升范围只包含 `kernel.py` 与 `impl/`；
+- 定义稳定的规范化源码 manifest，并用 digest 校验 Git commit 对应的源码快照；
+- 建立 Kernel commit ID、源码 digest 和 Gateway Record ID 的可审计映射；
 - 初始化和刷新 incumbent、global-best、lineage-best 与同伴源码历史 refs，且不改变 Agent 当前 branch；
 - 使用受限 `fast-export` / `fast-import` 共享源码范围内的密封历史，并为测量过的 commit 生成 notes；
-- 在权威 source digest 和 Kernel ID 旁记录可选 Agent Commit/tree 身份；
+- 在权威 Kernel commit ID 旁记录 source digest/tree 校验身份；
 - 隔离 Git 配置，禁用凭据和远端能力；
 - 由 Runtime 生成源码 diff 与测量摘要；
 - 精简 Agent 必填 Experiment 字段；
@@ -798,7 +813,7 @@ Research Board 和 Markdown 导出均从事件流与不可变存储重新生成�
 ### 第四阶段：Workload 边界
 
 - 生成公开语义 workload descriptor；
-- 按 evaluator 规范顺序生成“前 5 个公开、其余隐藏”的稳定 visibility manifest；
+- 按 evaluator 规范顺序和 `--public-shapes 0|N|all` 生成稳定 visibility manifest；
 - 在 Agent 工作区只物化 public Shape 参数；Agent 可以按公开或 opaque Shape ID 做子集诊断，但子集结果不能晋升；
 - 默认 full Evaluate、终态 Evaluate 和 ABBA 固定使用完整 workload，同时保留显式、非晋升的诊断性子集 Evaluate；
 - 隐藏 Shape 只返回全量聚合、opaque ID 或有大小限制的 per-regime 摘要；
@@ -831,7 +846,7 @@ Research Board 和 Markdown 导出均从事件流与不可变存储重新生成�
 ## 必须保持的不变量
 
 1. 只有 Runtime Measurement Record 能声明实际执行内容和测量结果。
-2. 只有不可变 Kernel ID 能标识被评测源码。
+2. 只有完整 `kernel_commit_id` 与 Runtime 密封的不可变源码快照能标识被评测源码。
 3. Research Board 是只读派生视图。
 4. Git checkout、restore、reset、merge、cherry-pick 或 tag 都不能晋升 Kernel。
 5. trajectory 不能读取其他 trajectory 的实时草稿和 conversation。

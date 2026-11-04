@@ -62,6 +62,33 @@ TIMELINE_PROBE_MARKERS = (
 )
 
 
+def accepted_candidate_ref(candidate_commit: str) -> str:
+    return f"refs/atrex/accepted/{candidate_commit}"
+
+
+def _is_sealed_agent_commit(workspace: Path, candidate_commit: str) -> bool:
+    return git_text(
+        workspace,
+        "rev-parse",
+        "--verify",
+        f"{accepted_candidate_ref(candidate_commit)}^{{commit}}",
+        check=False,
+    ) == candidate_commit
+
+
+def source_changed_paths(workspace: Path, base_commit: str, candidate_commit: str) -> list[str]:
+    """Compare only canonical Kernel material, independent of repository ancestry."""
+    from aka.light.workspace.sources import Artifact, from_git
+
+    baseline = Artifact(from_git(workspace, base_commit)).materialized_files
+    candidate = Artifact(from_git(workspace, candidate_commit)).materialized_files
+    return sorted(
+        name
+        for name in baseline.keys() | candidate.keys()
+        if baseline.get(name) != candidate.get(name)
+    )
+
+
 def git_blob(workspace: Path, revision: str, path: str) -> bytes:
     """Read an exact controller-selected committed file."""
     return _git(workspace, "show", f"{revision}:{path}", binary=True).stdout
@@ -170,23 +197,25 @@ class EpisodeWorktree:
         )
         if not resolved:
             return "candidate_commit does not resolve", []
-        if resolved != git_head(self.path):
+        sealed_agent_commit = _is_sealed_agent_commit(self.path, resolved)
+        if not sealed_agent_commit and resolved != git_head(self.path):
             return "candidate_commit must equal episode HEAD", []
         branch = git_text(
             self.path, "symbolic-ref", "--quiet", "--short", "HEAD", check=False
         )
         if branch != self.branch:
             return "episode worktree left its isolated branch", []
-        ancestor = _git(
-            self.path,
-            "merge-base",
-            "--is-ancestor",
-            self.base_commit,
-            resolved,
-            check=False,
-        )
-        if ancestor.returncode:
-            return "candidate_commit is not descended from incumbent", []
+        if not sealed_agent_commit:
+            ancestor = _git(
+                self.path,
+                "merge-base",
+                "--is-ancestor",
+                self.base_commit,
+                resolved,
+                check=False,
+            )
+            if ancestor.returncode:
+                return "candidate_commit is not descended from incumbent", []
         from aka.light.workspace.sources import from_git, unpack, snapshot as source_snapshot, allowed_changes
         policy, _ = unpack(from_git(self.path, self.base_commit))
         if policy is not None:
@@ -194,7 +223,11 @@ class EpisodeWorktree:
                 source = from_git(self.path, resolved)
                 if unpack(source)[0] != policy:
                     return "candidate changed its source contract", []
-                paths = changed_paths(self.path, self.base_commit, resolved)
+                paths = (
+                    source_changed_paths(self.path, self.base_commit, resolved)
+                    if sealed_agent_commit
+                    else changed_paths(self.path, self.base_commit, resolved)
+                )
                 if not allowed_changes(paths, policy):
                     return "candidate changed a fixed or out-of-scope file", paths
                 if require_worktree_match and source_snapshot(self.path, policy=policy) != source:
@@ -212,7 +245,11 @@ class EpisodeWorktree:
             self.path, "diff", "--quiet", resolved, "--", "kernel.py", check=False,
         ).returncode:
             return "worktree kernel.py must match candidate_commit", []
-        paths = changed_paths(self.path, self.base_commit, resolved)
+        paths = (
+            source_changed_paths(self.path, self.base_commit, resolved)
+            if sealed_agent_commit
+            else changed_paths(self.path, self.base_commit, resolved)
+        )
         if not paths:
             return "candidate has no changes relative to incumbent", []
         if paths != ["kernel.py"]:
@@ -267,6 +304,12 @@ class EpisodeWorktree:
 
     def archive(self, destination: Path, candidate_commit: str = "HEAD") -> Path:
         destination.mkdir(parents=True, exist_ok=True)
+        sealed_agent_commit = _is_sealed_agent_commit(self.path, candidate_commit)
+        source_paths = (
+            source_changed_paths(self.path, self.base_commit, candidate_commit)
+            if sealed_agent_commit
+            else changed_paths(self.path, self.base_commit, candidate_commit)
+        )
         committed_patch = _git(
             self.path,
             "diff",
@@ -274,6 +317,7 @@ class EpisodeWorktree:
             self.base_commit,
             candidate_commit,
             "--",
+            *source_paths,
             binary=True,
         ).stdout
         (destination / "candidate.patch").write_bytes(committed_patch)
@@ -282,7 +326,7 @@ class EpisodeWorktree:
         ).stdout
         (destination / "worktree.patch").write_bytes(worktree_patch)
         archived_files = destination / "worktree_files"
-        paths = set(changed_paths(self.path, self.base_commit, candidate_commit))
+        paths = set(source_paths)
         paths.update(working_changes(self.path))
         paths.update(ignored_evidence_files(self.path))
         for relative in sorted(paths):
@@ -299,6 +343,8 @@ class EpisodeWorktree:
                 "base_commit": self.base_commit,
                 "branch": self.branch,
                 "head": git_head(self.path),
+                "candidate_commit": candidate_commit,
+                "sealed_agent_commit": sealed_agent_commit,
                 "dirty_paths": working_changes(self.path),
             },
         )
@@ -330,14 +376,38 @@ def promote_candidate(
     from aka.light.acceptance.promotion_audit import AUDIT_TRAILER, write_promotion_audit
 
     audit_digest = write_promotion_audit(incumbent_workspace, episode, evidence)
+    from aka.light.workspace.sources import Artifact, from_git
+
+    base_source = from_git(incumbent_workspace, base_commit)
+    sealed_agent_commit = _is_sealed_agent_commit(
+        incumbent_workspace, candidate_commit
+    )
     try:
-        subprocess.run(
-            ["git", "merge", "--squash", "--no-commit", candidate_commit],
-            cwd=str(incumbent_workspace),
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+        if sealed_agent_commit:
+            candidate_source = from_git(incumbent_workspace, candidate_commit)
+            staged_source_paths = source_changed_paths(
+                incumbent_workspace, base_commit, candidate_commit
+            )
+            if not staged_source_paths:
+                raise RuntimeError("Promotion candidate has no source change")
+            if not Artifact(base_source).allows_changes(staged_source_paths):
+                raise RuntimeError("Promotion may change only the sealed candidate source")
+            Artifact(candidate_source).install(incumbent_workspace)
+            subprocess.run(
+                ["git", "add", "-A", "--", *staged_source_paths],
+                cwd=str(incumbent_workspace),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        else:
+            subprocess.run(
+                ["git", "merge", "--squash", "--no-commit", candidate_commit],
+                cwd=str(incumbent_workspace),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
         staged = git_text(
             incumbent_workspace, "diff", "--cached", "--name-only", "--no-renames", "-z"
         ).split("\0")
@@ -390,6 +460,8 @@ def promote_candidate(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        if sealed_agent_commit:
+            Artifact(base_source).install(incumbent_workspace)
         raise
     # A read failure after commit must not reset a successful promotion.
     return git_head(incumbent_workspace)

@@ -15,7 +15,14 @@ PREFIXES = {
     "env": "[sandbox] ENV_JSON=",
 }
 ERROR_PREFIXES = ("[sandbox] SOURCE_ERROR_JSON=", "[sandbox] GATEWAY_ERROR_JSON=")
-IDENTITIES = ("gateway_record_id", "kernel_id", "baseline_kernel_id")
+PRIVATE_IDENTITIES = ("gateway_record_id", "kernel_id", "baseline_kernel_id")
+PUBLIC_IDENTITIES = (
+    "gateway_record_id",
+    "kernel_commit_id",
+    "candidate_kernel_commit_id",
+    "baseline_kernel_commit_id",
+)
+IDENTITIES = (*PRIVATE_IDENTITIES, *PUBLIC_IDENTITIES)
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
@@ -148,7 +155,17 @@ def canonical_result(response: dict, request: dict, *, record_id=None, kernels=N
     rewritten. New records seal this object alongside the controller's streams.
     """
     if isinstance(response.get("agent_result"), dict):
-        return deepcopy(response["agent_result"])
+        result = deepcopy(response["agent_result"])
+        # Historical immutable records used ``kernel_id`` for a value that has
+        # always been the full Agent Git commit.  Keep that storage compatible,
+        # but expose the precise name at the Agent boundary.
+        if "kernel_id" in result:
+            result["kernel_commit_id"] = result.pop("kernel_id")
+        if "baseline_kernel_id" in result:
+            result["baseline_kernel_commit_id"] = result.pop("baseline_kernel_id")
+        if "baseline_kernel_commit_id" in result and "kernel_commit_id" in result:
+            result["candidate_kernel_commit_id"] = result.pop("kernel_commit_id")
+        return result
     operation = request["operation"]
     options = request.get("options", {})
     prefix = PREFIXES.get(operation)
@@ -171,10 +188,35 @@ def canonical_result(response: dict, request: dict, *, record_id=None, kernels=N
             notes.append(line)
     has_sample = sample is not None
     sample = sample or {}
-    identity = {key: sample[key] for key in IDENTITIES if key in sample}
+    identity = {}
+    if "gateway_record_id" in sample:
+        identity["gateway_record_id"] = sample["gateway_record_id"]
+    candidate_commit = sample.get(
+        "candidate_kernel_commit_id",
+        sample.get("kernel_commit_id", sample.get("kernel_id")),
+    )
+    baseline_commit = sample.get(
+        "baseline_kernel_commit_id", sample.get("baseline_kernel_id")
+    )
+    if candidate_commit is not None:
+        identity[
+            "candidate_kernel_commit_id"
+            if operation == "same_allocation_abba"
+            else "kernel_commit_id"
+        ] = candidate_commit
+    if baseline_commit is not None:
+        identity["baseline_kernel_commit_id"] = baseline_commit
     if record_id:
         identity["gateway_record_id"] = record_id
-    for side, key in (("candidate", "kernel_id"), ("baseline", "baseline_kernel_id")):
+    for side, key in (
+        (
+            "candidate",
+            "candidate_kernel_commit_id"
+            if operation == "same_allocation_abba"
+            else "kernel_commit_id",
+        ),
+        ("baseline", "baseline_kernel_commit_id"),
+    ):
         if kernels and side in kernels:
             identity[key] = kernels[side]["kernel_id"]
     verdict = sample.get("correct", sample.get("all_pass"))

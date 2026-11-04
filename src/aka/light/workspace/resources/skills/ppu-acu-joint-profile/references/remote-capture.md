@@ -39,7 +39,7 @@ harness needs the adapter, header, decoder, and possibly ACU extraction:
 
 ```bash
 ATTEMPT=scratch/episode_N/timeline/attempt-N
-python tools/sandbox.py --kind profile --hardware <PPU_HARDWARE> \
+python3 tools/sandbox.py --kind profile \
   --input skills/ppu-acu-joint-profile \
   --input "$ATTEMPT" \
   --sync "$ATTEMPT" -- \
@@ -50,8 +50,10 @@ python tools/sandbox.py --kind profile --hardware <PPU_HARDWARE> \
 
 Custom `--input` selects the sandbox's isolated dev-compatible transport. It packages the explicitly
 named skill and attempt command inputs, chooses inline or OSS transport according to payload size,
-and synchronizes only the declared attempt directory. Keep raw captures below the attempt; raise
-`--max-output-file-mb` only when an expected evidence file exceeds the default bound.
+and synchronizes only the declared attempt directory. Keep raw captures below the attempt. Hardware,
+endpoint, transport limits and output-file limits are Supervisor-owned; if an expected artifact
+exceeds the configured bound, report that concrete requirement to the operator instead of adding
+authority flags to the Agent request.
 
 When the decision needs A/B perturbation, keep capture and measurement in one sandbox allocation.
 The wrapper first runs capture/decode, then invokes `timeline.py measure` with a predeclared
@@ -60,7 +62,7 @@ instrumented commands before returning:
 
 ```bash
 ATTEMPT=scratch/episode_N/timeline/attempt-N
-python tools/sandbox.py --kind profile --hardware <PPU_HARDWARE> \
+python3 tools/sandbox.py --kind profile \
   --input skills/ppu-acu-joint-profile \
   --input "$ATTEMPT" \
   --sync "$ATTEMPT" -- \

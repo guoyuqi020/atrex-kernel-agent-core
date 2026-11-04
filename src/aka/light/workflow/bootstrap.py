@@ -9,7 +9,6 @@ import hashlib
 import json
 import math
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -33,6 +32,7 @@ from aka.light.workflow.constants import (
     DEFAULT_VERIFY_REPEATS,
     DEFAULT_VERIFY_RUN_TIMEOUT,
     DEPENDENCY_REVIEW_PROMPT,
+    RESEARCH_CLAIM_REVIEW_PROMPT,
     DEPENDENCY_REVIEW_SCHEMA_VERSION,
     DEPENDENCY_REVIEW_TIMEOUT_S,
     FRAMEWORK_BASELINE_CATEGORY,
@@ -59,7 +59,7 @@ from aka.light.workflow.baseline_progress import (progress_path as framework_bas
 from aka.light.workflow.baseline_progress import (restore_latest_candidate as restore_latest_framework_baseline_candidate)
 from aka.light.workflow.baseline_progress import (save_supervisor_recovery as save_framework_baseline_recovery)
 from aka.light.evaluation.hardware import hardware_directive, hardware_vendor, kernel_is_gluon
-from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES
+from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES, SHAPE_BATCH_SIZE
 from aka.light.agent.dependency_policy import DEPENDENCY_GUARD_ENV
 from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT
 from aka.light.workspace.versions import (
@@ -70,18 +70,22 @@ from aka.light.workspace.versions import (
 )
 from aka.legacy.task.problem.layout import (
     AGENT_PROBLEM_FILENAME,
+    PUBLIC_SHAPES_FILENAME,
     agent_visible_operator_files,
     has_agent_problem,
     is_sol_op,
+    public_shapes_payload,
     validate_agent_problem,
     validate_generated_agent_problem,
     validate_private_shapes,
+    validate_public_shapes,
 )
 from aka.light.acceptance.source_policy import (
     install_workspace_policy,
     optimization_mode_directive,
     production_kernel_violations,
     production_structure_violations,
+    workspace_policy_block,
 )
 from aka.light.workflow.session_io import (
     SessionResult,
@@ -113,7 +117,7 @@ _WIKI_PROFILE_ROOT_ENV = "ATREX_WIKI_PROFILE_ROOT"
 _WIKI_TASK_ID_ENV = "ATREX_WIKI_TASK_ID"
 
 _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_TIMEOUT_S = 600
-_FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_SCHEMA_VERSION = 4
+_FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_SCHEMA_VERSION = 5
 _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_PATH = Path(
     ".atrex_long_horizon/framework_baseline/correctness_guidance.json"
 )
@@ -122,17 +126,39 @@ _FRAMEWORK_BASELINE_CORRECTNESS_CONTEXT_PATHS = (
     "reference.py",
     "input.py",
     "agent_problem.json",
+    "public_shapes.json",
     "shapes.json",
+    "metadata.json",
     "definition.json",
     "workload.jsonl",
 )
 _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_MARKERS = (
     "SEMANTIC_CHECKLIST:",
     "EDGE_CASES:",
-    "CUDA_IMPLEMENTATION_RISKS:",
-    "PRE_SMOKE_CHECKS:",
+    "TARGET_IMPLEMENTATION_RISKS:",
+    "PRE_VALIDATION_CHECKS:",
     "RECOMMENDED_CORRECTNESS_FIRST_DESIGN:",
 )
+
+
+def framework_baseline_workspace_contract(workspace: Path) -> bytes:
+    """Render the real SourceProvider boundary used by the pre-Episode V1 stage."""
+    from aka.light.workspace.sources import instructions, policy_at
+
+    source_contract = instructions(policy_at(workspace))
+    return (
+        "# Framework Baseline workspace contract\n\n"
+        "This file is Supervisor-owned; do not edit it. The SourceProvider section below "
+        "defines the complete candidate and its editable paths. References there to Runtime "
+        "measurement or reporting describe later optimization Episodes; they do not authorize "
+        "Runtime measurement calls during Framework Baseline.\n"
+        + source_contract
+        + "\nOnly the SourceProvider-declared candidate paths are editable in this stage. "
+        "README.md, CLAUDE.md, this file, evaluator/public-contract inputs, profile_driver.py "
+        "and memory/ are Supervisor-owned. Put temporary implementation probes under scratch/. "
+        "Do not create Git commits, submit episode-report, or write canonical memory; leave the "
+        "complete candidate in place for the Supervisor gates.\n"
+    ).encode("utf-8")
 
 
 def _framework_baseline_validation_failure(
@@ -248,6 +274,7 @@ class Campaign:
     platform: str
     framework: str
     specify_dsl: bool = True
+    public_shapes: int | str = "all"
     notes: str = "none"
     arch: str = ""  # real runtime GPU arch e.g. "sm_103" / "gfx942"; auto-detected
     work_dir: str = ""  # explicit working directory; "" = Path.cwd() (backward compat)
@@ -275,7 +302,7 @@ class Campaign:
         "leaderboard"  # permissive contest flow or strict production gate
     )
     framework_baseline: str = (
-        "auto"  # auto = production only; always | never override it
+        "never"  # direct V0 -> Episode by default; auto | always opt into V1 bring-up
     )
     framework_baseline_timeout: int = FRAMEWORK_BASELINE_TIMEOUT_S
     handoff_resumes: int = DEFAULT_HANDOFF_RESUMES
@@ -285,6 +312,7 @@ class Campaign:
     # ``verify_run_timeout`` accessor below remains a structural compatibility
     # alias for upstream v0.4 call sites.
     evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT
+    shape_batch_size: int = SHAPE_BATCH_SIZE
     min_improvement_pct: float = 0.0
     v1_ask_codex: bool = False
     v1_ask_qoder: bool = False
@@ -309,6 +337,13 @@ class Campaign:
     def __post_init__(self) -> None:
         if type(self.specify_dsl) is not bool:
             raise TypeError("specify_dsl must be a boolean")
+        if not (
+            (type(self.public_shapes) is int and self.public_shapes >= 0)
+            or self.public_shapes == "all"
+        ):
+            raise ValueError(
+                "public_shapes must be a non-negative integer or 'all'"
+            )
         if self.sandbox_timeout is None:
             from aka.contracts.evaluation import derived_evaluation_timeout
             self.sandbox_timeout = derived_evaluation_timeout(
@@ -326,6 +361,8 @@ class Campaign:
             raise ValueError("problem_generation_timeout must be positive")
         if self.production_review_timeout <= 0:
             raise ValueError("production_review_timeout must be positive")
+        if type(self.shape_batch_size) is not int or self.shape_batch_size <= 0:
+            raise ValueError("shape_batch_size must be a positive integer")
 
     @property
     def campaign_name(self) -> str:
@@ -473,6 +510,77 @@ class Campaign:
                 )
                 return
 
+    def _ensure_public_shapes(self) -> None:
+        """Materialize the configured deterministic Shape projection exactly once."""
+        private_dir = self.private_reference_dir
+        if private_dir is None:
+            return
+        destination = self.workspace / PUBLIC_SHAPES_FILENAME
+        if self.public_shapes == 0:
+            if destination.exists():
+                raise RuntimeError(
+                    "public_shapes is configured as 0 but public_shapes.json already exists; "
+                    "start a fresh workspace"
+                )
+            return
+        shapes_path = private_dir / "shapes.json"
+        expected = public_shapes_payload(shapes_path, count=self.public_shapes)
+        if destination.exists():
+            try:
+                validate_public_shapes(
+                    destination,
+                    private_shapes_path=shapes_path,
+                    count=self.public_shapes,
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    "workspace public_shapes.json does not match the configured "
+                    f"public_shapes={self.public_shapes!r}; start a fresh workspace"
+                ) from exc
+            return
+        destination.write_text(
+            json.dumps(expected, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    @property
+    def shape_ids_are_opaque(self) -> bool:
+        """Whether at least one evaluator Shape still has private parameters."""
+        private_dir = self.private_reference_dir
+        if private_dir is None:
+            return False
+        selection = public_shapes_payload(
+            private_dir / "shapes.json", count=self.public_shapes
+        )["selection"]
+        return selection["count"] < selection["total_shape_count"]
+
+    def _shape_disclosure_prompt(self) -> str:
+        private_dir = self.private_reference_dir
+        if private_dir is None:
+            return ""
+        selection = public_shapes_payload(
+            private_dir / "shapes.json", count=self.public_shapes
+        )["selection"]
+        count = selection["count"]
+        total = selection["total_shape_count"]
+        if count == 0:
+            return (
+                "For this generalized native task, no exact evaluator Shape parameters are "
+                "public and public_shapes.json is intentionally absent. Shape IDs in Runtime "
+                "results are opaque; do not try to reconstruct hidden inputs."
+            )
+        if count == total:
+            return (
+                f"For this generalized native task, public_shapes.json exposes all {total} "
+                "evaluator Shapes. The Supervisor still owns the evaluator input file and "
+                "all standard Evaluate and ABBA requests use the complete workload."
+            )
+        return (
+            f"For this generalized native task, public_shapes.json exposes exact parameters "
+            f"for the canonical first {count} of {total} evaluator Shapes. Other Shape IDs "
+            "are opaque; do not try to reconstruct hidden inputs."
+        )
+
 
     def _framework_baseline_correctness_reviewers(self) -> tuple[str, ...]:
         return tuple(
@@ -505,6 +613,7 @@ class Campaign:
         self._supervisor_runtime = self.tool_runtime.open(RuntimeConfig(
             hardware=self.sandbox_hardware or self.platform, timeout=self.sandbox_timeout,
             evaluation_step_timeout=self.evaluation_step_timeout,
+            shape_batch_size=self.shape_batch_size,
             url=self.sandbox_url, profile=self.sandbox_profile, ssh=self.sandbox_ssh,
             ssh_init=self.sandbox_ssh_init, ssh_gpu=self.sandbox_ssh_gpu,
             health_command=self.sandbox_health_command, private_reference_dir=self.private_reference_dir,
@@ -516,6 +625,7 @@ class Campaign:
                 self.framework,
                 source_checks_enabled=self.source_checks_enabled,
                 specify_dsl=self.specify_dsl,
+                numerical_validation_enabled=self.module_options.numerical_validation,
             ),
             workspace=self.workspace,
             request_timeout=request_timeout,
@@ -523,6 +633,145 @@ class Campaign:
         ), workspace_provider=self.candidate_workspace)
         self._supervisor_runtime.production_policy_validator = self.production_policy_feedback
         self._supervisor_runtime.numerical_validator = self.supplemental_numerical_feedback
+        self._supervisor_runtime.research_claim_reviewer = self.review_research_claim
+
+    @staticmethod
+    def _claim_review_evidence_digest(root: Path) -> str:
+        digest = hashlib.sha256()
+        for path in sorted(
+            item for item in root.rglob("*")
+            if item.is_file() and item.name != "review.json"
+        ):
+            relative = path.relative_to(root).as_posix()
+            digest.update(relative.encode() + b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    def review_research_claim(
+        self,
+        evidence_root: Path,
+        *,
+        resume_session_id: str | None = None,
+    ) -> dict[str, object]:
+        """Run the strict three-tier reviewer with the Qwen-only provider policy."""
+        from aka.light.agent.session_tail import read_regular_bytes
+        from aka.light.execution.retry import check_review_service
+        from aka.light.workflow.claim_review import validate_review
+
+        evidence_root = Path(evidence_root).resolve(strict=True)
+        before = self._claim_review_evidence_digest(evidence_root)
+        model = "qwen3.8-max"
+        base_environment = {
+            **self.agent_boundary_environment("research-claim-review"),
+            "ANTHROPIC_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+        }
+        from aka.light.agent.home import SESSION_HOME_ROOT_ENV
+        from aka.light.runtime.paths import supervisor_campaign_root
+
+        campaign_workspace = Path(getattr(self, "workspace", evidence_root.parent))
+        base_environment[SESSION_HOME_ROOT_ENV] = str(
+            supervisor_campaign_root(campaign_workspace)
+            / "research-review-session-homes"
+        )
+        capture_base = (
+            evidence_root.parent / "claim-review-sessions" / evidence_root.name
+        )
+        session_attempts: list[dict[str, object]] = []
+
+        def session_audit() -> dict[str, object]:
+            return {
+                "schema": "atrex.research-claim-review-session.v1",
+                "attempts": [dict(row) for row in session_attempts],
+            }
+
+        last_error: Exception | None = None
+        for attempt in range(1, 3):
+            response = evidence_root / "review.json"
+            response.unlink(missing_ok=True)
+            attempt_capture = capture_base / f"attempt-{attempt}"
+            environment = {
+                **base_environment,
+                "ATREX_SESSION_CAPTURE_DIR": str(attempt_capture),
+            }
+            resumed = attempt == 1 and bool(resume_session_id)
+            result = self._run_session(
+                evidence_root,
+                RESEARCH_CLAIM_REVIEW_PROMPT.read_text(encoding="utf-8"),
+                timeout=self.production_review_timeout,
+                agent_cli="claude",
+                reasoning_effort="high",
+                agent_plugins=False,
+                extra_environment=environment,
+                session_id=resume_session_id if resumed else None,
+                resume_session=resumed,
+            )
+            self._account(result, f"Qwen research-claim review attempt {attempt}")
+            conversations = sorted(
+                (
+                    path
+                    for path in attempt_capture.glob("run-*/conversation.jsonl")
+                    if path.is_file()
+                ),
+                key=lambda path: path.stat().st_mtime_ns,
+            )
+            conversation_path = (
+                conversations[-1].relative_to(evidence_root.parent).as_posix()
+                if conversations else None
+            )
+            attempt_audit: dict[str, object] = {
+                "attempt": attempt,
+                "session_id": result.session_id,
+                "status": "capture_missing" if conversation_path is None else "invalid",
+                "exit_status": result.exit_status,
+                "timed_out": result.timed_out,
+                "conversation_path": conversation_path,
+                "resumed": resumed,
+            }
+            session_attempts.append(attempt_audit)
+            try:
+                value = json.loads(read_regular_bytes(response, limit=128 * 1024 + 1))
+                if response.stat().st_size > 128 * 1024:
+                    raise ValueError("research claim review exceeds 128 KiB")
+                review = validate_review(value)
+                if self._claim_review_evidence_digest(evidence_root) != before:
+                    raise ValueError("research claim reviewer modified supplied evidence")
+                if result.timed_out:
+                    print(
+                        "[research-review] recovered a valid review from a timed-out reviewer",
+                        flush=True,
+                    )
+                else:
+                    check_review_service(result)
+                if conversation_path is not None:
+                    attempt_audit["status"] = "accepted"
+                return {
+                    **review,
+                    "_review_session_audit": session_audit(),
+                }
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                last_error = error
+                attempt_audit["error"] = {
+                    "type": type(error).__name__,
+                    "message": str(error)[:2000],
+                }
+                if not result.timed_out:
+                    try:
+                        check_review_service(result)
+                    except ValueError as service_error:
+                        last_error = service_error
+                        attempt_audit["error"] = {
+                            "type": type(service_error).__name__,
+                            "message": str(service_error)[:2000],
+                        }
+        failure = RuntimeError(
+            "Qwen research-claim reviewer produced no valid strict review"
+        )
+        failure.review_session_audit = session_audit()
+        raise failure from last_error
 
     def production_policy_feedback(
         self,
@@ -587,11 +836,13 @@ class Campaign:
 
     def measure_for_acceptance(self, workspace: Path, argv: list[str], *, execution_timeout: int | None = None,
                                parent=None, reference_snapshot: Path | None = None,
-                               terminal_validation: bool = False) -> dict:
+                               terminal_validation: bool = False,
+                               kernel_ids: dict[str, str] | None = None) -> dict:
         self.start_runtime()
         return self._supervisor_runtime.execute_trusted(workspace, argv, execution_timeout=execution_timeout,
                                                        parent=parent, reference_snapshot=reference_snapshot,
-                                                       terminal_validation=terminal_validation)
+                                                       terminal_validation=terminal_validation,
+                                                       kernel_ids=kernel_ids)
 
     def recorded_kernel(self, kernel_id: str) -> bytes:
         self.start_runtime()
@@ -622,12 +873,21 @@ class Campaign:
         service._publish_report(private)
         return True
 
-    def acceptance_measurement_context(self, incumbent_source: bytes) -> dict:
+    def acceptance_measurement_context(
+        self, incumbent_source: bytes, incumbent_commit: str
+    ) -> dict:
         """Public Kernel identity and frozen Runtime policy, without private inputs."""
         self.start_runtime()
         runtime = self._supervisor_runtime
+        from aka.light.experiment.store import RecordNotFound
+        try:
+            baseline_kernel_id = runtime.measurements.find_kernel_id(incumbent_source)
+        except RecordNotFound:
+            baseline_kernel_id = runtime.measurements.kernel(
+                incumbent_source, incumbent_commit
+            )["kernel_id"]
         return {
-            "baseline_kernel_id": runtime.measurements.kernel(incumbent_source)["kernel_id"],
+            "baseline_kernel_id": baseline_kernel_id,
             "measurement_repetitions": runtime.measurement_repetitions,
         }
 
@@ -675,14 +935,6 @@ class Campaign:
         """Read existing private state without registering or creating an Episode."""
         self.start_runtime()
         return self._supervisor_runtime.read_episode_journal(episode)
-
-    def research_board(self) -> dict:
-        self.start_runtime()
-        coordinate = getattr(self, "search_coordinate", None) or {}
-        trajectory = coordinate.get("trajectory", 1)
-        return self._supervisor_runtime.research_board(
-            trajectory=trajectory if type(trajectory) is int and trajectory > 0 else 1
-        )
 
     def close_runtime(self) -> None:
         runtime = getattr(self, "_supervisor_runtime", None)
@@ -758,6 +1010,15 @@ class Campaign:
         head = git_head(self.workspace)
         if head and not git_path_blob(self.workspace, head, AGENT_PROBLEM_FILENAME):
             return "agent_problem.json is not tracked by the V0 baseline commit"
+        public_blob = (
+            git_path_blob(self.workspace, head, PUBLIC_SHAPES_FILENAME)
+            if head
+            else ""
+        )
+        if self.public_shapes == 0 and public_blob:
+            return "public_shapes.json is tracked although public_shapes=0"
+        if self.public_shapes != 0 and head and not public_blob:
+            return "public_shapes.json is not tracked by the V0 baseline commit"
         return ""
 
     def _assert_generalized_inputs_are_private(self) -> None:
@@ -799,6 +1060,28 @@ class Campaign:
             raise RuntimeError(
                 f"generalized Atrex-Bench workspace has an invalid public problem: {exc}; "
                 "start a fresh workspace"
+            ) from exc
+        public_shapes = self.workspace / PUBLIC_SHAPES_FILENAME
+        try:
+            if self.public_shapes == 0:
+                if public_shapes.exists():
+                    raise ValueError(
+                        "public_shapes.json must be absent when public_shapes=0"
+                    )
+            else:
+                if not public_shapes.is_file():
+                    raise ValueError(
+                        "public_shapes.json is missing for the configured Shape projection"
+                    )
+                validate_public_shapes(
+                    public_shapes,
+                    private_shapes_path=private_dir / "shapes.json",
+                    count=self.public_shapes,
+                )
+        except ValueError as exc:
+            raise RuntimeError(
+                "generalized Atrex-Bench workspace has an invalid public Shape "
+                f"projection: {exc}; start a fresh workspace"
             ) from exc
         leaked = [
             name
@@ -1068,6 +1351,11 @@ class Campaign:
     def research_records(self) -> bool:
         return self.tool_runtime.research_records
 
+    @property
+    def research_modules(self) -> tuple[str, ...]:
+        """Return the one frozen research-module selection for every layer."""
+        return self.tool_runtime.tool_modules
+
     def _link_runtime(self) -> None:
         from aka.light.workflow.store import CampaignStore
 
@@ -1079,6 +1367,7 @@ class Campaign:
             native_root,
             plugin_registry=self.plugin_registry,
             research_records=self.research_records,
+            research_modules=self.research_modules,
             is_ppu=hardware_vendor(self.platform, self.arch) == "ppu",
         )
         install_workspace_policy(
@@ -1088,15 +1377,23 @@ class Campaign:
             agent_runtime=self.agent_cli,
             source_checks_enabled=self.source_checks_enabled,
             specify_dsl=self.specify_dsl,
+            numerical_validation_enabled=self.module_options.numerical_validation,
         )
 
     def _evaluator_directive(self) -> str:
         public = (
-            "Use agent_problem.json for the public domain. Exact shapes and metadata remain private; "
-            "result Shape IDs are opaque and must not be reverse-engineered. "
+            "Use agent_problem.json for the public domain. "
+            + self._shape_disclosure_prompt()
+            + " "
             if self.private_reference_dir else "The visible operator contract defines the supported inputs. "
         )
         if self.atrex_bench_root:
+            profile_shapes = (
+                "For generalized tasks, exact parameters are public only for IDs listed in "
+                "public_shapes.json; unlisted IDs remain opaque."
+                if self.private_reference_dir
+                else "For ordinary public-shape tasks, read exact parameters from shapes.json."
+            )
             return (
                 "## Evaluation contract: Atrex-Bench\n\n" + public +
                 "The Supervisor supplies the official evaluator. Minimize latency_us_geomean; "
@@ -1104,7 +1401,7 @@ class Campaign:
                 "Use --kind run --mode full --no-sync for the complete workload. "
                 "Correctness-only, custom-input or subset results do not satisfy an Episode report. "
                 "For diagnostic Profile, use --kind profile --profile-shape-id ID --no-sync "
-                "with an opaque Shape ID from a saved result. The same option selects the "
+                "with a Shape ID from a saved result. " + profile_shapes + " The same option selects the "
                 "privately supplied case in Typed Profile or a compatible Dev fallback. "
                 "Never substitute a custom timing/correctness harness for official evaluation."
             )
@@ -1160,7 +1457,9 @@ class Campaign:
 
     def _mode_directive(self) -> str:
         return optimization_mode_directive(self.optimization_mode, self.framework,
-                                           source_checks_enabled=self.source_checks_enabled)
+                                           source_checks_enabled=self.source_checks_enabled,
+                                           specify_dsl=self.specify_dsl,
+                                           numerical_validation_enabled=self.module_options.numerical_validation)
 
     def setup_baseline(self) -> None:
         # SOL-ExecBench op: seed a correct, directly-submittable V0 mechanically
@@ -1187,10 +1486,13 @@ class Campaign:
         # sandbox boundary. A missing public contract is authored before the baseline session.
         generalized = self.private_reference_dir is not None
         for name in agent_visible_operator_files(op_dir, generalized=generalized):
+            if name == PUBLIC_SHAPES_FILENAME:
+                continue
             source = op_dir / name
             if source.is_file():
                 shutil.copy2(source, self.workspace / name)
         self._ensure_agent_problem()
+        self._ensure_public_shapes()
         if generalized:
             # Seed the immutable public contract into the eventual V0 commit even when the
             # baseline agent stages only its own implementation files.
@@ -1210,8 +1512,8 @@ class Campaign:
 
     def _native_v0_readme(self, *, generalized: bool) -> str:
         contract = (
-            "`agent_problem.json` is the authoritative public contract. Exact evaluator "
-            "cases remain private; latency-map keys are opaque ids."
+            "`agent_problem.json` is the authoritative public contract. "
+            + self._shape_disclosure_prompt()
             if generalized
             else "`shapes.json` and the other copied operator files define the public workload."
         )
@@ -1225,19 +1527,25 @@ class Campaign:
             "Wiki queries are disabled. Use supplied, attributable hardware evidence; "
             "do not guess missing peak specifications. "
         )
+        dsl_goal = (
+            f"Final submitted Kernels must use `{self.framework}`; development probes may use "
+            "other languages or DSLs."
+            if self.specify_dsl
+            else "The Agent may choose any evaluator-supported GPU implementation DSL."
+        )
+        framework_line = self.framework if self.specify_dsl else "Agent-selected supported GPU DSL"
         return (
             f"# kernel_opt_{self.campaign_name}\n\n"
             "Evidence-backed optimization of one native Atrex-Bench operator.\n\n"
             "## Goal\n\n"
-            "Maximize the arithmetic mean of per-shape speedups against Atrex-Bench metadata "
-            "production performance while every evaluator case remains "
-            "correct. V0 is supplied by the selected SourceProvider; optimized versions must "
-            f"migrate the computation to `{self.framework}`.\n\n"
+            "Minimize full-workload `latency_us_geomean` while every evaluator case remains "
+            "correct. Per-Shape latency and `performance_score` are diagnostic, not the promotion "
+            f"objective. V0 is supplied by the selected SourceProvider. {dsl_goal}\n\n"
             "## Campaign\n\n"
             f"- Target platform: `{self.platform}`\n"
             f"- Runtime architecture: `{runtime_arch}`\n"
             f"- Optimization mode: `{self.optimization_mode}`\n"
-            f"- Target framework: `{self.framework}`\n"
+            f"- Target framework: `{framework_line}`\n"
             f"- Target utilization stop condition: `{self.target_util:g}%`\n"
             f"- Additional notes: {notes}\n\n"
             "## Contract and evaluator\n\n"
@@ -1413,6 +1721,7 @@ class Campaign:
                 "native V0 kernel.py does not match the selected initial source; refusing "
                 "mechanical baseline generation"
             )
+        self._ensure_framework_baseline_workspace_contract()
         (self.workspace / "README.md").write_text(
             self._native_v0_readme(generalized=generalized), encoding="utf-8"
         )
@@ -1420,6 +1729,7 @@ class Campaign:
             ".gitignore",
             "CLAUDE.md",
             "README.md",
+            "WORKSPACE.md",
             "kernel.py",
             "test_kernel.py",
             "profile_driver.py",
@@ -1499,6 +1809,7 @@ class Campaign:
         ]
         subprocess.run(cmd, check=True)
         self._link_runtime()
+        self._ensure_framework_baseline_workspace_contract()
         source_commit = v0_baseline_commit(self.workspace)
         if not source_commit:
             raise RuntimeError("SOL V0 has no committed kernel.py")
@@ -1506,7 +1817,7 @@ class Campaign:
         self._finalize_v0_measurement(
             result,
             source_commit,
-            extra_paths=("CLAUDE.md", ".gitignore"),
+            extra_paths=("CLAUDE.md", "WORKSPACE.md", ".gitignore"),
         )
 
     def ensure_framework_baseline(self) -> None:
@@ -1585,7 +1896,6 @@ class Campaign:
         while problem and not problem.startswith(SUPPLEMENTAL_PENDING_PREFIX) and (
             not recovery_used or (problem.startswith(SUPPLEMENTAL_REPAIR_PREFIX) and numerical_repairs < 2)
         ):
-            # The implementation Agent intentionally runs only a bounded smoke subset.
             # Give one focused repair turn when the authoritative combined gate finds a
             # full-domain or policy problem, then rerun the independent gates once.
             if problem.startswith(SUPPLEMENTAL_REPAIR_PREFIX):
@@ -1992,7 +2302,11 @@ class Campaign:
                 prompt = _render(
                     PROMPTS_DIR / "framework_baseline_correctness_review.md",
                     REVIEWER=label,
-                    FRAMEWORK=self.framework,
+                    IMPLEMENTATION_TARGET=(
+                        f"a `{self.framework}` Kernel"
+                        if self.specify_dsl
+                        else "a Kernel in an evaluator-supported GPU DSL"
+                    ),
                     PLATFORM=self.platform,
                     ARCH=self.arch or "the runtime GPU architecture",
                 )
@@ -2215,16 +2529,19 @@ class Campaign:
         rejection: str = "",
     ) -> SessionResult:
         """Run the configured outer V1 Agent; other CLIs only summarize an exit."""
+        # Re-project the authoritative boundary before every initial or recovery
+        # Session so a prior interrupted Agent cannot leave misleading instructions.
+        self._ensure_framework_baseline_workspace_contract()
         prompt = self._framework_baseline_prompt(n)
         if rejection:
             prompt = (
                 "# Repair the preserved V1 candidate\n\n"
                 f"The supervisor rejected the current candidate:\n\n{rejection}\n\n"
-                "Keep sound work, fix this exact rejection, and finish V1. If a prior targeted "
-                "smoke passed but the supervisor's combined full-workload validation failed, "
-                "you may run exactly one full base-seed evaluator while repairing; do not run "
-                "multi-seed or a separate benchmark because the supervisor will repeat the "
-                "combined authoritative gate.\n\n"
+                "Keep sound work, fix this exact rejection, and finish V1. The Supervisor will "
+                "run or repeat the configured authoritative gates after this repair; the rejection "
+                "text states which checks have already completed. Do not invoke Runtime measurement "
+                "tools, create a separate benchmark, "
+                "or override Runtime-owned correctness cases in this stage.\n\n"
                 + prompt
             )
         if framework_baseline_progress_path(self.workspace).is_file():
@@ -2261,8 +2578,9 @@ class Campaign:
                 stage_name="Framework baseline",
                 initial_purpose="framework_baseline",
                 completion_instruction=(
-                    "Finish the preserved V1 implementation inside kernel.py and, if useful, "
-                    "impl/. Leave the complete candidate ready for the Supervisor's "
+                    "Finish the preserved V1 implementation in the candidate paths declared "
+                    "by WORKSPACE.md and the active SourceProvider. Leave the complete "
+                    "candidate ready for the Supervisor's "
                     "framework-baseline gates; do not create Git commits or submit an "
                     "episode-report."
                 ),
@@ -2343,71 +2661,19 @@ class Campaign:
                 flush=True,
             )
 
-    def _framework_baseline_smoke_shape_ids(self, *, limit: int = 3) -> list[str]:
-        """Pick fast/median/slow V0 latency ids for bounded native V1 smoke coverage."""
-        memory = read_memory(self.workspace, 0) or {}
-        performance = memory.get("performance")
-        performance = performance if isinstance(performance, dict) else {}
-        by_shape = performance.get("latency_us_by_shape", {})
-        if not isinstance(by_shape, dict):
-            return []
-        measured: list[tuple[str, float]] = []
-        for shape_id, raw_latency in by_shape.items():
-            if isinstance(raw_latency, bool) or not isinstance(raw_latency, (int, float)):
-                continue
-            latency = float(raw_latency)
-            if latency > 0.0 and math.isfinite(latency):
-                measured.append((str(shape_id), latency))
-        if not measured or limit <= 0:
-            return []
-        measured.sort(key=lambda item: item[1])
-        if len(measured) <= limit:
-            return [shape_id for shape_id, _latency in measured]
-        if limit == 1:
-            return [measured[len(measured) // 2][0]]
-        indexes = [round(index * (len(measured) - 1) / (limit - 1)) for index in range(limit)]
-        return [measured[index][0] for index in dict.fromkeys(indexes)]
-
     def _ensure_framework_baseline_solution_manifest(self) -> None:
         from aka.light.workspace.sources import seed_baseline_metadata
         seed_baseline_metadata(self.workspace, self.framework, self.campaign_name,
                                native_eval=bool(self.atrex_bench_root))
 
-    def _framework_baseline_smoke_command(self, n: int) -> tuple[str, str]:
-        """Return the only ordinary evaluator command the V1 implementation Agent should run."""
-        command = ["python3", "tools/sandbox.py", "--kind", "run", "--no-sync"]
-        if self.atrex_bench_root:
-            command += ["--mode", "full", "--version", f"v{n}"]
-        else:
-            # SOL needs the Dev compatibility route. Top-level --version, like
-            # --mode, requires Typed evaluation; pass the label to its harness.
-            command += ["--", "python3", "test_kernel.py", "--version", f"v{n}", "--no-memory"]
-        shape_ids = (
-            self._framework_baseline_smoke_shape_ids()
-            if self.atrex_bench_root
-            else []
-        )
-        for shape_id in shape_ids:
-            command += ["--shape-id", shape_id]
-        if self.atrex_bench_root:
-            command += ["--timed-runs", "1"]
-        if shape_ids:
-            scope = (
-                f"The supervisor selected {len(shape_ids)} opaque V0 ids spanning the baseline "
-                "latency distribution. This is smoke coverage only; do not infer their private inputs."
-            )
-        else:
-            scope = (
-                "This evaluator route has no safe targeted-case selector, so run this base-seed "
-                "smoke at most once after the final implementation edit."
-            )
-        return shlex.join(command), scope
+    def _ensure_framework_baseline_workspace_contract(self) -> None:
+        from aka.light.workspace.files import publish
 
-    def _framework_baseline_sandbox_directive(self) -> str:
-        from aka.light.workflow.session_io import sandbox_boundary_directive
-        return sandbox_boundary_directive(
-            self.sandbox_hardware or self.platform, self.sandbox_profile,
-            self.sandbox_url, self.sandbox_ssh,
+        workspace = self.workspace.resolve()
+        publish(
+            workspace,
+            "WORKSPACE.md",
+            framework_baseline_workspace_contract(workspace),
         )
 
     def _framework_baseline_prompt(self, n: int) -> str:
@@ -2430,16 +2696,8 @@ class Campaign:
             ARCH=self.arch or "the runtime GPU arch",
             DSL_CONTEXT=self.dsl_context,
             NOTES=self.notes,
-            RUNTIME_WAIT_POLICY=(
-                "- Runtime requests: Agent and subagent execution is suspended while an "
-                "authenticated request is pending; this wait is excluded from the configured "
-                "active-time budget."
-                if self.tool_runtime.pause_agent_during_requests
-                else "- Runtime requests: suspension is disabled, so request wait counts toward "
-                "the configured active-time budget; keep the invocation in the foreground and "
-                "wait for it to finish."
-            ),
             CORRECTNESS_GUIDANCE=self._framework_baseline_correctness_guidance_text(),
+            SHAPE_DISCLOSURE=self._shape_disclosure_prompt(),
         )
 
     def _restore_immutable_baseline_paths(self, baseline_commit: str) -> list[str]:
@@ -2481,6 +2739,21 @@ class Campaign:
         candidate_blob = workspace_identity(self.workspace)
         if not candidate_blob or candidate_blob == v0_identity:
             return "the session left the V0 kernel unchanged; no framework implementation was produced"
+        try:
+            workspace_contract = (self.workspace / "WORKSPACE.md").read_bytes()
+        except OSError:
+            workspace_contract = b""
+        try:
+            expected_workspace_contract = framework_baseline_workspace_contract(
+                self.workspace
+            )
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+            return f"the candidate SourceProvider contract is invalid: {exc}"
+        if workspace_contract != expected_workspace_contract:
+            return (
+                "the session modified or removed Supervisor-owned WORKSPACE.md; restore the "
+                "workspace contract and edit only the SourceProvider-declared candidate paths"
+            )
         violations = [] if not self.source_checks_enabled else (
             self._production_kernel_violations()
             if include_policy_review
@@ -2826,7 +3099,7 @@ class Campaign:
         memory["git_commit_hash"] = kernel_commit
         memory[FRAMEWORK_BASELINE_CATEGORY] = {
             "framework": self.framework,
-            "validated_stages": ["combined-base-performance+six-cases" if self.atrex_bench_root
+            "validated_stages": ["combined-base-performance+five-cases" if self.atrex_bench_root
                                  else "combined-base-performance+multi-seed-5"],
         }
         save_version_record(self.workspace, n, memory, generate_memory=self.generate_memory)
@@ -2909,6 +3182,7 @@ class Campaign:
             per_run_timeout=self.verify_run_timeout,
             min_improvement_pct=self.min_improvement_pct,
             private_reference_dir=self.private_reference_dir,
+            shape_batch_size=self.shape_batch_size,
         )
         engine = LongHorizonCampaign(
             base_campaign=self,

@@ -574,8 +574,10 @@ def supplemental_feedback(campaign, workspace, *, state_root, standard_correctne
     elif status == "needs_repair":
         if flow == "framework_baseline":
             next_step = (
-                "Repair the candidate sources, rerun the bounded V1 smoke command, then stop. "
-                "Do not submit episode-report. "
+                "Repair the candidate sources, leave the complete worktree candidate in place, "
+                "then stop without committing. The Supervisor reruns validation and commits an "
+                "accepted V1; do not submit "
+                "episode-report. "
             )
         elif experiments_enabled:
             next_step = "Repair the candidate within its editable source scope, measure it, record its Experiment and resubmit episode-report. "

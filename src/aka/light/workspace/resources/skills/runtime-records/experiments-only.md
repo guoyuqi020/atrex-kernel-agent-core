@@ -6,19 +6,12 @@ allowed-tools: "Bash Read"
 
 # Runtime Experiment records
 
-Use `python3 tools/sandbox.py` inside the Episode. Available Journal commands are
-`research-board`, `list-experiments`, `load-experiment`, `record-experiment`, `adopt-kernel`, and
-`episode-report`. Direction commands
-are disabled. Measurement records remain available through `record-read`, `kernel-read`,
-`kernel-records`, and `kernel-pareto-frontier`.
+Experiment recording is enabled; Direction commands are disabled. Start with root `PROGRESS.md`, then open only relevant `experiments/<experiment_id>/experiment.json` and `records/*.json`. These Runtime projections are read-only.
 
-Export the catalog with `--kind list-experiments --output-path scratch/experiments.json` and load
-selected entries with `--kind load-experiment --record-id experiment_...`. Record decisive work via
-`--kind record-experiment --request-file scratch/experiment.json`. The JSON fields are
-`name,intent,gateway_record_ids,interpretation`; omit `direction_id`. Optional Wiki attribution
-fields retain their documented schema. Runtime derives execution facts from Gateway Records, so use
-`record-read` instead of copying them into interpretation.
+Record each decisive measurement or research conclusion with `name`, concrete `intent`, and bounded `interpretation`; omit `direction_id`. `gateway_record_ids` and archived `references` are independent optional lists. Keep execution facts in Records and source facts in Git rather than copying them into analysis. Continue bounded edit/measurement/revert-or-keep cycles while useful work remains.
 
-Candidate reports use `status,summary,selected_experiment_id`; the selected current-Episode
-Experiment must cite a passing standard full Evaluate for the exact source. Pivot uses
-`status,summary`; blocked also uses `blocker`. Never invent IDs or measured results.
+To correct an archived local Experiment, resubmit its required fields with the projected
+`experiment_id`. Runtime keeps the stable ID, increments `revision`, reruns Review, and updates the
+latest projection; omitted optional evidence is preserved. Shared peer Experiments are read-only.
+
+For `candidate_ready`, set `selected_experiment_id` to a current-Episode Experiment that cites a passing standard full Evaluate of the exact clean HEAD. Follow [the exact Experiment, adoption, and report schemas](references/journal.md) and [saved result/source semantics](references/records.md). Never invent IDs or measured results.

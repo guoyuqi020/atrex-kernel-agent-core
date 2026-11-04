@@ -1,13 +1,15 @@
 """Controlled local Git for one Agent trajectory.
 
-The repository is an engineering aid. Runtime source snapshots remain the only
-Kernel identity and all promotion continues to use sealed Measurement Records.
+The repository is an engineering aid and its full clean HEAD commit is the
+Agent-visible Kernel identity. Promotion still requires sealed Measurement Records
+whose stored source bytes match that commit exactly.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -15,8 +17,9 @@ from typing import Any
 
 IGNORED = (
     "scratch/", "tools/", "skills/", "memory/", "input/", "eval/", "profiles/",
-    "plans/", "reference/", "input/evidence/", ".atrex_*/", ".claude/", ".agents/",
-    "README.md", "CLAUDE.md", "WORKSPACE.md", "agent_problem.json", "public_shapes.json",
+    "plans/", "directions/", "experiments/", "records/", "reference/", "input/evidence/",
+    ".atrex_*/", ".claude/", ".agents/",
+    "README.md", "CLAUDE.md", "WORKSPACE.md", "PROGRESS.md", "agent_problem.json", "public_shapes.json",
     "reference.py", "input.py", "shapes.json", "metadata.json", "roofline.json", "valid.py",
     "definition.json", "workload.jsonl", "solution.json", "config.json", "test_kernel.py",
     "profile_driver.py", "*.jsonl",
@@ -24,6 +27,15 @@ IGNORED = (
 
 _RESUME_REMOTE_PREFIX = "refs/remotes/atrex-resume/heads/"
 _RESUME_BRANCH_PREFIX = "refs/atrex/resume-branch/"
+GIT_COMMIT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+class DirtyKernelWorktree(ValueError):
+    """The Agent repository has no exact committed identity for its current Kernel."""
+
+    def __init__(self, paths: list[str], message: str = "Kernel worktree is not clean"):
+        super().__init__(message)
+        self.paths = tuple(paths)
 
 
 def _run(
@@ -98,6 +110,22 @@ class AgentGit:
         if active:
             _run(self.workspace, "checkout", "-f", active)
 
+    def _fetch_bundle(self) -> None:
+        """Import recovery and peer refs without replacing live local branches."""
+        if not self.bundle.is_file():
+            return
+        _run(
+            self.workspace,
+            "-c",
+            "protocol.file.allow=always",
+            "fetch",
+            str(self.bundle),
+            "+refs/heads/*:refs/remotes/atrex-resume/heads/*",
+            "+refs/tags/*:refs/tags/*",
+            "+refs/atrex/*:refs/atrex/*",
+            "+refs/notes/*:refs/notes/*",
+        )
+
     def _record_active_branch(self) -> None:
         """Store the symbolic checkout in a bundled private ref."""
         markers = _run(
@@ -118,40 +146,58 @@ class AgentGit:
             _run(self.workspace, "update-ref", marker, head)
 
     def prepare(self) -> None:
-        if not (self.workspace / ".git").is_dir():
+        initialized = (self.workspace / ".git").is_dir()
+        if not initialized:
             _run(self.workspace, "init", "-b", "work")
             self._configure()
+            self._fetch_bundle()
             if self.bundle.is_file():
-                _run(
-                    self.workspace,
-                    "-c",
-                    "protocol.file.allow=always",
-                    "fetch",
-                    str(self.bundle),
-                    "+refs/heads/*:refs/remotes/atrex-resume/heads/*",
-                    "+refs/tags/*:refs/tags/*",
-                    "+refs/atrex/*:refs/atrex/*",
-                    "+refs/notes/*:refs/notes/*",
-                )
                 self._restore_branches()
-            (self.workspace / ".gitignore").write_text(
-                "# Runtime-managed Agent repository exclusions\n" + "\n".join(IGNORED) + "\n",
-                encoding="utf-8",
-            )
         else:
             self._configure()
+            # Epoch sharing updates the durable bundle between Sessions. A
+            # stable repository must import those refs in place instead of
+            # waiting for a future workspace reconstruction.
+            self._fetch_bundle()
+        # The Runtime owns this file. Refresh it for stable repositories too so
+        # newly introduced public projections never make a resumed Kernel
+        # worktree dirty or become part of a Kernel commit.
+        (self.workspace / ".gitignore").write_text(
+            "# Runtime-managed Agent repository exclusions\n" + "\n".join(IGNORED) + "\n",
+            encoding="utf-8",
+        )
         self.checkpoint("Runtime: materialize trusted trajectory source")
         head = self.head()
         if head:
             _run(self.workspace, "tag", "-f", "atrex/episode-start", head)
 
-    def install_runtime_ref(self, ref: str, source: bytes, *, message: str) -> str:
+    def install_runtime_ref(
+        self,
+        ref: str,
+        source: bytes,
+        *,
+        message: str,
+        commit_id: str | None = None,
+    ) -> str:
         """Create one source-only commit without changing the Agent checkout."""
-        from aka.light.workspace.sources import unpack
+        from aka.light.workspace.sources import Artifact
 
         if not ref.startswith("refs/") or ".." in ref or any(char.isspace() for char in ref):
             raise ValueError("Runtime Git ref is invalid")
-        _, files = unpack(source)
+        if commit_id is not None:
+            if GIT_COMMIT_ID.fullmatch(commit_id) is None:
+                raise ValueError("Runtime Kernel identity is not a Git commit ID")
+            present = _run(
+                self.workspace, "cat-file", "-e", f"{commit_id}^{{commit}}", check=False
+            )
+            if present.returncode == 0:
+                from aka.light.workspace.sources import from_git
+
+                if from_git(self.workspace, commit_id) != source:
+                    raise ValueError("Runtime Kernel commit does not match its saved source")
+                _run(self.workspace, "update-ref", ref, commit_id)
+                return commit_id
+        files = Artifact(source).materialized_files
         with tempfile.TemporaryDirectory(prefix="aka-agent-index-") as directory:
             index = str(Path(directory) / "index")
             environment = {"GIT_INDEX_FILE": index}
@@ -182,6 +228,176 @@ class AgentGit:
         result = _run(self.workspace, "rev-parse", "HEAD", check=False)
         value = result.stdout.strip()
         return value if result.returncode == 0 and value else None
+
+    def kernel_commit(self, expected_source: bytes | None = None) -> str:
+        """Return HEAD only when it exactly identifies the visible Kernel source.
+
+        Runtime-managed/public files are ignored by the repository.  Any
+        remaining status entry is therefore an Agent-owned change that must be
+        committed before a Kernel-bound request can acquire a stable identity.
+        """
+        status = _run(
+            self.workspace,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            check=False,
+        )
+        if status.returncode != 0:
+            raise DirtyKernelWorktree([], status.stderr.strip() or "Git status failed")
+        changes = [line[3:] if len(line) > 3 else line for line in status.stdout.splitlines()]
+        if changes:
+            raise DirtyKernelWorktree(changes)
+        head = self.head()
+        if head is None or GIT_COMMIT_ID.fullmatch(head) is None:
+            raise DirtyKernelWorktree([], "Kernel worktree has no valid HEAD commit")
+        from aka.light.workspace.sources import from_git, snapshot
+
+        try:
+            committed = from_git(self.workspace, head)
+            visible = snapshot(self.workspace)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise DirtyKernelWorktree(
+                [], "HEAD or the visible worktree is not a complete Kernel source tree"
+            ) from error
+        if committed != visible:
+            raise DirtyKernelWorktree(
+                [], "HEAD does not contain the exact visible Kernel source tree"
+            )
+        if expected_source is not None and committed != expected_source:
+            raise DirtyKernelWorktree(
+                [], "HEAD does not contain the exact Kernel source submitted for evaluation"
+            )
+        return head
+
+    def seal_into(
+        self,
+        supervisor_workspace: Path,
+        commit_id: str,
+        expected_source: bytes,
+    ) -> str:
+        """Import the exact Agent commit into the Supervisor's protected refs.
+
+        The Agent HEAD is the Kernel identity.  The Supervisor therefore imports
+        that object instead of manufacturing a second commit for the same source.
+        Only the canonical Kernel source and Runtime-owned ``.gitignore`` may be
+        tracked by the imported commit; evidence and scratch state stay outside
+        the trusted Kernel identity.
+        """
+        if GIT_COMMIT_ID.fullmatch(commit_id) is None:
+            raise ValueError("Agent Kernel identity is not a Git commit ID")
+        if self.kernel_commit(expected_source) != commit_id:
+            raise DirtyKernelWorktree(
+                [], "Agent HEAD changed before the Kernel commit could be sealed"
+            )
+
+        from aka.light.workspace.sources import commit_paths, from_git, install
+
+        allowed = set(commit_paths(self.workspace, normalize=False)) | {".gitignore"}
+        listing = _run(
+            self.workspace,
+            "ls-tree",
+            "-r",
+            "-z",
+            commit_id,
+        ).stdout
+        tracked: set[str] = set()
+        for entry in listing.split("\0"):
+            if not entry:
+                continue
+            metadata, name = entry.split("\t", 1)
+            mode, object_type, _ = metadata.split(" ", 2)
+            if object_type != "blob" or mode not in {"100644", "100755"}:
+                raise ValueError(
+                    f"Agent Kernel commit contains a link or special object: {name}"
+                )
+            tracked.add(name)
+        unexpected = sorted(tracked - allowed)
+        if unexpected:
+            raise ValueError(
+                "Agent Kernel commit contains non-Kernel tracked paths: "
+                + ", ".join(unexpected[:20])
+            )
+
+        supervisor_workspace = supervisor_workspace.resolve()
+        protected_ref = f"refs/atrex/accepted/{commit_id}"
+        existing = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{protected_ref}^{{commit}}"],
+            cwd=supervisor_workspace,
+            env={
+                **os.environ,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        created = existing.returncode != 0
+        if not created and existing.stdout.strip() != commit_id:
+            raise RuntimeError("Protected Agent Kernel ref resolves to a different commit")
+        if created:
+            export_ref = f"refs/atrex/export/{commit_id}"
+            _run(self.workspace, "update-ref", export_ref, commit_id)
+            try:
+                result = subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "protocol.file.allow=always",
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "fetch",
+                        "--no-tags",
+                        "--no-write-fetch-head",
+                        str(self.workspace),
+                        f"{export_ref}:{protected_ref}",
+                    ],
+                    cwd=supervisor_workspace,
+                    env={
+                        **os.environ,
+                        "GIT_CONFIG_NOSYSTEM": "1",
+                        "GIT_CONFIG_GLOBAL": "/dev/null",
+                        "GIT_TERMINAL_PROMPT": "0",
+                        "GIT_ASKPASS": "/usr/bin/false",
+                    },
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+            finally:
+                _run(self.workspace, "update-ref", "-d", export_ref, check=False)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Supervisor could not import the Agent Kernel commit: "
+                    + (result.stderr.strip() or "git fetch failed")
+                )
+
+        try:
+            resolved = subprocess.run(
+                ["git", "rev-parse", "--verify", f"{protected_ref}^{{commit}}"],
+                cwd=supervisor_workspace,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            if resolved != commit_id:
+                raise RuntimeError("Imported Agent Kernel ref changed identity")
+            if from_git(supervisor_workspace, commit_id) != expected_source:
+                raise RuntimeError("Imported Agent Kernel commit does not match measured source")
+            install(supervisor_workspace, expected_source)
+        except Exception:
+            if created:
+                subprocess.run(
+                    ["git", "update-ref", "-d", protected_ref],
+                    cwd=supervisor_workspace,
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            raise
+        return commit_id
 
     def checkpoint(self, message: str) -> str | None:
         from aka.light.workspace.sources import commit_paths

@@ -48,7 +48,8 @@ class _Runtime:
         result = self.runtime.run(LegacyRequest(
             workspace=request.workspace, prompt=request.prompt,
             timeout_s=request.timeout_s, reasoning_effort=request.reasoning_effort,
-            session_id=request.session_id, extra_environment=environment,
+            session_id=request.session_id, resume_session=request.resume_session,
+            extra_environment=environment,
             observation_directory=request.observation_directory,
         ))
         return AgentRunResult(

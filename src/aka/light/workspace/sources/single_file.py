@@ -23,7 +23,15 @@ class SingleFile:
     def from_git(self, workspace, revision, policy):return {'kernel.py':git_blob(workspace,revision,'kernel.py')}
     def from_inputs(self, inputs, policy, prefix):return {'kernel.py':inputs[prefix+'kernel.py']}
     def editable(self, policy, name):return name=='kernel.py'
-    def instructions(self, policy):return ''
+    def instructions(self, policy):
+        return (
+            "\n## Single-file Kernel\n"
+            "Editable `kernel.py` is the complete candidate and evaluator entry point. "
+            "Keep the implementation self-contained in that file; do not add auxiliary candidate "
+            "sources or edit `solution.json`, which is Supervisor-owned metadata in this layout. "
+            "Evaluate, Profile, Check, Disassemble, reports and broadcasts bind the committed "
+            "`kernel.py`.\n"
+        )
     def metadata(self, policy):return {}
     def obsolete(self, workspace, policy):return {'kernel.py'}
     def install(self, workspace, files, policy):publish(workspace,'kernel.py',files['kernel.py'])

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 import subprocess
 import uuid
@@ -66,6 +67,12 @@ def _session_terminal_status(result: Any) -> str:
 
 
 def _render(template: str, values: dict[str, object]) -> str:
+    required = set(re.findall(r"\{\{([A-Z][A-Z0-9_]*)\}\}", template))
+    missing = required - set(values)
+    if missing:
+        raise ValueError(
+            "Episode prompt has unresolved fields: " + ", ".join(sorted(missing))
+        )
     for key, value in values.items():
         template = template.replace("{{" + key + "}}", str(value))
     while "\n\n\n" in template:
@@ -393,7 +400,7 @@ def _memory_profile_evidence(
             "tool_used": (
                 "episode-owned profiler evidence plus supervisor ABBA"
                 if promoted
-                else "episode journal"
+                else "terminal Episode record"
             ),
             "evidence_summary": f"{experiment_count} structured experiments",
             "bottleneck_type": "episode-derived",
@@ -537,6 +544,7 @@ class LongHorizonCampaign:
         if isinstance(selected_verifier, RecordedABBAValidator):
             context = self.base_campaign.acceptance_measurement_context(
                 source_from_git(worktree.path, worktree.base_commit),
+                worktree.base_commit,
             )
             acceptance_request = selected_verifier.agent_instructions(**context)
         research_records = self.base_campaign.research_records
@@ -565,13 +573,18 @@ class LongHorizonCampaign:
         coordinate = getattr(self.base_campaign, "search_coordinate", None)
         if coordinate is not None:
             role = ""
-            if coordinate.get("role_specialization", True):
+            if coordinate.get("role_specialization", False):
+                trajectory_two_role = (
+                    "T2 role: continue the highest-priority Direction marked as a major redesign "
+                    "until its stop condition, blocker, or completion; then select the next "
+                    "high-value major redesign."
+                    if "directions" in research_modules
+                    else "T2 role: continue the highest-value major redesign until its stop "
+                    "condition, blocker, or completion; then select the next high-value redesign."
+                )
                 role = " " + {
                     1: "T1 role: bounded exploitation around the global or lineage best.",
-                    2: (
-                        "T2 role: continue the highest-priority major redesign until its milestone, "
-                        "stop condition, blocker, or completion; then select the next major redesign."
-                    ),
+                    2: trajectory_two_role,
                     3: "T3 role: capability probes, profiling, and independent exploration.",
                 }.get(
                     coordinate["trajectory"],
@@ -579,49 +592,38 @@ class LongHorizonCampaign:
                 )
             template = (
                 f"Search location: Epoch {coordinate['epoch']}, Trajectory {coordinate['trajectory']}, "
-                f"Episode {coordinate['episode']}. One Episode is one serial optimization step. "
-                "This trajectory is a persistent island: keep its working tree, local Git history, "
-                "lineage best, active Direction and major-redesign WIP across Epochs. The Supervisor "
-                "updates global-best metadata and imports sealed peer refs at Epoch boundaries but "
-                "does not overwrite this trajectory. Adopt peer work explicitly with Git and Runtime "
-                f"evidence, then validate it normally.{role}\n\n"
+                f"Episode {coordinate['episode']}. This persistent island keeps its working tree, Git history, "
+                + (
+                    "lineage best, active Directions and major-redesign WIP across Epochs. "
+                    if "directions" in research_modules
+                    else "lineage best and unfinished optimization WIP across Epochs. "
+                )
+                + "The Supervisor updates global-best metadata and imports sealed peer Git refs "
+                + (
+                    "after each terminal Episode publication "
+                    if coordinate.get("synchronization") == "asynchronous"
+                    else "at synchronous Epoch barriers "
+                )
+                + "without overwriting local work. Adopt peer work explicitly and validate it normally."
+                f"{role}\n\n"
                 + template
             )
         # Insert fragments before substituting values so nested task placeholders resolve too.
         for marker, name in fragments.items():
             text = (PROMPTS_DIR / name).read_text(encoding="utf-8").strip() if name else ""
             template = template.replace("{{" + marker + "}}", text)
-        research_board_section = ""
-        if research_records or coordinate is not None:
-            research_board_section = (
-                "## Research Board\n\n"
-                "This is a compact read-only projection of durable Runtime state. Refresh it with "
-                "`python3 tools/sandbox.py --kind research-board` when a decision depends on newly "
-                "recorded or peer state.\n\n"
-                "```json\n"
-                + json.dumps(
-                    self.base_campaign.research_board(),
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    indent=2,
-                )
-                + "\n```"
-            )
         return _render(
             template,
             {
                 "EPISODE": episode,
                 "GOAL_DIRECTIVE": (
-                    "This is a goal-oriented Episode after sustained stalls. Reassess the operator "
-                    "roadmap and explore materially different approaches sequentially. "
-                    + ("Respect the Runtime's Direction limits. " if "directions" in research_modules else "") +
-                    "Preserve measured Kernel IDs so you can restore "
-                    "the best validated candidate before reporting. Continue until the useful "
-                    "roadmap is completed or exhausted; do not stop at the first failed Direction. "
-                    "Journal, correctness, production policy, and ABBA promotion rules are unchanged."
+                    "This goal-oriented Episode follows sustained stalls. Reassess the roadmap and test "
+                    "materially different high-value approaches while preserving the measured best in Git. "
+                    "All ordinary research, correctness, handoff, and promotion rules remain unchanged."
                     if episode_mode == "goal" else ""
                 ),
                 "VERSION": version,
+                "BASE_COMMIT": worktree.base_commit,
                 "WORKSPACE": agent_workspace or worktree.path,
                 "ACCEPTANCE_REQUEST": acceptance_request,
                 "ARCH": self.base_campaign.arch or "<authoritative runtime architecture>",
@@ -645,7 +647,6 @@ class LongHorizonCampaign:
                     else ""
                 ),
                 "CONVERSION_TOLERANCE": f"{main_adapter.CONVERT_PERF_TOL:.0%}",
-                "RESEARCH_BOARD_SECTION": research_board_section,
             },
         )
 
@@ -702,7 +703,13 @@ class LongHorizonCampaign:
             runtime_journal_loader=load_private_runtime_journal,
         )
         if diagnosis:
-            return diagnosis
+            return (
+                "Supervisor could not confirm the published Episode handoff: "
+                f"{diagnosis}. This projection is Runtime-owned; do not edit it. "
+                "Resubmit the identical accepted episode-report once to repair publication. "
+                "If Runtime rejects that replay or the diagnosis persists, report the concrete "
+                "blocker to the operator."
+            )
         if handoff.status != "candidate_ready":
             return ""
         if private_journal is not None:
@@ -711,10 +718,18 @@ class LongHorizonCampaign:
             try:
                 source = sealed_candidate_source(private_journal, worktree.path)
                 if source is None:
-                    return "private report has no sealed candidate"
+                    return (
+                        "The accepted Episode handoff has no sealed candidate source. "
+                        "Do not edit Runtime-owned state; replay the identical accepted "
+                        "episode-report once, then report the blocker if it persists."
+                    )
                 violation, _ = self.base_campaign.candidate_workspace.restore_sealed_candidate(worktree, candidate, source)
             except (OSError, ValueError, RuntimeError) as error:
-                return f"cannot restore sealed candidate: {error}"
+                return (
+                    "Supervisor could not restore the candidate source sealed by the accepted "
+                    f"Episode handoff: {error}. Do not edit Runtime-owned state; replay the "
+                    "identical accepted episode-report once, then report the blocker if it persists."
+                )
         else:
             violation, _ = self.base_campaign.candidate_workspace.validate_candidate(worktree, candidate)
         if violation:
@@ -726,10 +741,16 @@ class LongHorizonCampaign:
                 git_text(worktree.path, "show", "-s", "--format=%ct", candidate)
             )
         except (KeyError, ValueError, OSError, json.JSONDecodeError) as exc:
-            return f"cannot validate terminal journal ordering: {exc}"
+            return (
+                "Supervisor could not validate accepted Episode handoff ordering: "
+                f"{exc}. Replay the identical accepted episode-report once; if the diagnosis "
+                "persists, report the blocker to the operator."
+            )
         if finalized_at <= committed_at:
             return (
-                "candidate journal must be finalized after the exact candidate commit"
+                "The accepted candidate handoff was not finalized after its exact candidate "
+                "commit. Replay the identical accepted episode-report once; if the diagnosis "
+                "persists, report the blocker to the operator."
             )
         if self.base_campaign.optimization_mode == "production":
             try:
@@ -739,7 +760,11 @@ class LongHorizonCampaign:
                 self.base_campaign.selected_episode_evaluation(worktree.episode, sealed)
                 return self.base_campaign.supplemental_numerical_feedback(worktree.path, sealed)
             except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
-                return f"cannot verify production evidence: {error}"
+                return (
+                    "Supervisor could not verify the accepted candidate's production evidence: "
+                    f"{error}. Follow any candidate-specific diagnostic; otherwise report this "
+                    "Supervisor blocker instead of editing Runtime-owned state."
+                )
         return ""
 
     def _copy_runtime_artifacts(
@@ -800,8 +825,7 @@ class LongHorizonCampaign:
                 ),
                 "latency_us_by_shape": by_shape if isinstance(by_shape, dict) else {},
                 "measurement_scope": "real_evaluator_shapes",
-                "shape_ids_are_opaque": self.base_campaign.private_reference_dir
-                is not None,
+                "shape_ids_are_opaque": self.base_campaign.shape_ids_are_opaque,
                 "measurement_status": "complete",
                 "measured_shape_count": len(by_shape),
                 "expected_shape_count": (
@@ -872,7 +896,7 @@ class LongHorizonCampaign:
             "open_directions": [
                 {
                     "direction": value,
-                    "rationale": "carried from terminal episode journal",
+                    "rationale": "carried from the terminal Episode record",
                 }
                 for value in directions
                 if isinstance(value, str)
@@ -1011,8 +1035,7 @@ class LongHorizonCampaign:
                 "latency_us_arith_mean": representative.get("latency_us_arith_mean"),
                 "latency_us_by_shape": by_shape,
                 "measurement_scope": "real_evaluator_shapes",
-                "shape_ids_are_opaque": self.base_campaign.private_reference_dir
-                is not None,
+                "shape_ids_are_opaque": self.base_campaign.shape_ids_are_opaque,
                 "measurement_status": (
                     "complete"
                     if measurement_complete
@@ -1076,7 +1099,7 @@ class LongHorizonCampaign:
             "open_directions": [
                 {
                     "direction": value,
-                    "rationale": "carried from terminal episode journal",
+                    "rationale": "carried from the terminal Episode record",
                 }
                 for value in directions
                 if isinstance(value, str)
@@ -1139,6 +1162,20 @@ class LongHorizonCampaign:
                 "verifying"
             )
             store.save_active(active)
+            private_journal = self.base_campaign._supervisor_runtime.read_episode_journal(
+                worktree.episode
+            )
+            candidate_kernel_id = private_journal.get("candidate_kernel_id")
+            baseline_source = source_from_git(worktree.path, worktree.base_commit)
+            from aka.light.experiment.store import RecordNotFound
+            try:
+                baseline_kernel_id = (
+                    self.base_campaign._supervisor_runtime.measurements.find_kernel_id(
+                        baseline_source
+                    )
+                )
+            except RecordNotFound:
+                baseline_kernel_id = worktree.base_commit
             from aka.light.execution.retry import retry_infrastructure
             verification = retry_infrastructure(
                 self.workspace,
@@ -1151,6 +1188,8 @@ class LongHorizonCampaign:
                     changed_paths=[
                         path for path in paths if not path.startswith(EVIDENCE_PREFIXES)
                     ],
+                    candidate_kernel_id=candidate_kernel_id,
+                    baseline_kernel_id=baseline_kernel_id,
                 ),
                 cancel=getattr(self.base_campaign, "search_cancel", None),
             )
@@ -1211,7 +1250,9 @@ class LongHorizonCampaign:
             state.tokens += max(0, int(tokens))
 
         episode_dir = store.episode_dir(episode)
-        self.base_campaign.candidate_workspace.archive(worktree, episode_dir / "archive", "HEAD")
+        self.base_campaign.candidate_workspace.archive(
+            worktree, episode_dir / "archive", candidate_commit or "HEAD"
+        )
         self._copy_runtime_artifacts(worktree, episode_dir)
         journal = load_journal(journal_path)
         outcome = (
@@ -1230,6 +1271,7 @@ class LongHorizonCampaign:
             "episode_branch": worktree.branch,
             "episode_head": git_head(worktree.path),
             "candidate_commit": candidate_commit or None,
+            "candidate_kernel_commit_id": journal.get("candidate_kernel_id"),
             "changed_paths": paths,
             "session_id": session_id or None,
             "resume_count": max(0, int(resume_count)),
@@ -1956,8 +1998,9 @@ class LongHorizonCampaign:
             telemetry_environment.update(
                 self.base_campaign.agent_environment()
             )
-            # Agent workspaces are projected per Episode, while provider
-            # transcripts persist for the whole trajectory.
+            # Both the Agent repository and provider transcript are stable for
+            # the whole trajectory. Episode Journals and evidence remain
+            # independently sealed by the Supervisor.
             telemetry_environment[SESSION_HOME_ROOT_ENV] = str(
                 store.root / "agent-session-homes"
             )

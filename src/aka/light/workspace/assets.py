@@ -39,7 +39,7 @@ def _agent_runtime_directive(
     )
     return (
         f"- `skills/` (also discoverable under `{root}/skills/`): `gpu-measurement`, "
-        f"`atrex-gpu-gateway`, `runtime-records`{knowledge}, and optional timeline diagnostics{extra}. "
+        f"`runtime-records`{knowledge}, and optional timeline diagnostics{extra}. "
         "Read the relevant Skill for request schemas/examples. "
         "Use `python3 tools/plugin.py list` for additional operator-enabled tools and Skills. "
         + suspension
@@ -137,7 +137,19 @@ def link_custom_skills(workspace: Path, reserved: tuple[str, ...]) -> None:
 
 
 def link_runtime(workspace: Path, atrex_bench_root: Path | None = None, *, is_ppu: bool = False,
-                 plugin_registry=None, research_records: bool = False) -> None:
+                 plugin_registry=None, research_records: bool = False,
+                 research_modules=None) -> None:
+    # Install the same frozen module contract enforced by the Runtime.  A Skill
+    # that advertises a disabled operation is not harmless documentation drift:
+    # it causes the Agent to submit requests the Runtime must reject.
+    modules = tuple(
+        ("directions", "experiments") if research_records and research_modules is None
+        else research_modules or ()
+    )
+    if len(set(modules)) != len(modules) or set(modules) - {"directions", "experiments"}:
+        raise ValueError("research_modules may contain only unique directions and experiments")
+    if research_records != bool(modules):
+        raise ValueError("research_records must agree with whether research_modules are enabled")
     from aka.light.agent.home import open_private_directory
     from aka.light.workspace.files import publish
 
@@ -150,7 +162,7 @@ def link_runtime(workspace: Path, atrex_bench_root: Path | None = None, *, is_pp
     if plugin_registry is None:
         from aka.light.runtime.catalog import PluginRegistry
         plugin_registry = PluginRegistry()
-    names = ["gpu-measurement", "atrex-gpu-gateway", "runtime-records", "autonomous-gpu-kernel-timeline"]
+    names = ["gpu-measurement", "runtime-records", "autonomous-gpu-kernel-timeline"]
     if any(plugin.id == "gpu-wiki" for plugin in plugin_registry.plugins):
         names.append("KernelWiki")
     if is_ppu:
@@ -162,9 +174,24 @@ def link_runtime(workspace: Path, atrex_bench_root: Path | None = None, *, is_pp
         manifest = SKILL_MANIFEST[name]
         for filename in manifest.files:
             source = resource(f"{manifest.root}/{filename}")
-            if name == "runtime-records" and not research_records and filename != "references/records.md":
-                source = resource(f"skills/runtime-report/{filename}")
-            publish(workspace, f"skills/{name}/{filename}", source.read_bytes())
+            if name == "runtime-records":
+                if not research_records and filename != "references/records.md":
+                    source = resource(f"skills/runtime-report/{filename}")
+                elif set(modules) in ({"directions"}, {"experiments"}) and filename in {
+                    "SKILL.md", "references/journal.md"
+                }:
+                    variant = (
+                        "directions-only.md"
+                        if set(modules) == {"directions"}
+                        else "experiments-only.md"
+                    )
+                    source = resource(
+                        f"skills/runtime-records/{variant}"
+                        if filename == "SKILL.md"
+                        else f"skills/runtime-records/references/{variant}"
+                    )
+            data = source.read_bytes()
+            publish(workspace, f"skills/{name}/{filename}", data)
     names.extend(plugin_registry.install_agent_skills(workspace))
     for backend in (".claude", ".qoder", ".agents"):
         _remove_legacy_link(workspace / backend / "agents")

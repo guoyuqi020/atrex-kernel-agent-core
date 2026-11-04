@@ -13,18 +13,14 @@ from copy import deepcopy
 
 JOURNAL_TOOLS = {
     "direction_update": "update-direction", "experiment_record": "record-experiment",
-    "episode_report": "episode-report", "directions_list": "list-directions",
-    "experiments_list": "list-experiments", "direction_load": "load-direction",
-    "experiment_load": "load-experiment",
-    "research_board": "research-board", "direction_progress": "progress-direction",
+    "episode_report": "episode-report", "direction_progress": "progress-direction",
     "direction_prioritize": "prioritize-direction",
     "kernel_adopt": "adopt-kernel",
 }
 DIRECTION_TOOLS = {
     "direction_update", "direction_progress", "direction_prioritize",
-    "directions_list", "direction_load",
 }
-EXPERIMENT_TOOLS = {"experiment_record", "experiments_list", "experiment_load"}
+EXPERIMENT_TOOLS = {"experiment_record"}
 
 
 def _text():
@@ -47,13 +43,20 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
     from aka.light.workflow.journal_service import (
         DIRECTION_PROPOSAL_FIELDS,
         DIRECTION_PROPOSAL_OPTIONAL_FIELDS,
+        DIRECTION_REVISION_FIELDS,
         DIRECTION_CHANGE_SCOPES,
         DIRECTION_UPDATE_FIELDS,
         DIRECTION_CLOSURE_FIELDS,
         DIRECTION_CLOSURE_OPTIONAL_FIELDS,
         EXPERIMENT_FIELDS,
+        EXPERIMENT_OPTIONAL_FIELDS,
     )
-    from aka.light.workflow.direction_lifecycle import DIRECTION_STATUS, CLOSURES
+    from aka.light.workflow.direction_lifecycle import (
+        DIRECTION_ACTIONS,
+        DIRECTION_REVISION_ACTION,
+        DIRECTION_STATUS,
+        CLOSURES,
+    )
     from aka.light.workflow.direction_genealogy import RELATIONSHIPS
 
     directions_enabled = research_records if directions_enabled is None else directions_enabled
@@ -64,8 +67,9 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
         return {"available": False, "reason": "experiments_disabled"}
     if operation == "episode_report":
         properties = {"status": {"enum": ["candidate_ready", "pivot", "blocked"]}, "summary": _text(),
+                      "handoff_reason": {"enum": ["direction_terminal", "cross_trajectory_share", "blocked"]},
                       "accepted_ppu_diagnostics": {"type": "array", "items": {"type": "object"}}}
-        required = {"status", "summary"}
+        required = {"status", "summary", "handoff_reason"}
         status = body.get("status")
         status = status if isinstance(status, str) else None
         if status in {None, "candidate_ready"}:
@@ -101,10 +105,28 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
         }, {"query_id", "disposition"})
         usage["anyOf"] = [{"required": ["wiki_id"]}, {"required": ["cite"]}]
         fields = set(EXPERIMENT_FIELDS)
-        properties = {key: _text() for key in fields}
+        properties = {key: _text() for key in fields | EXPERIMENT_OPTIONAL_FIELDS}
+        properties["experiment_id"] = {
+            "type": "string",
+            "pattern": "^experiment_[0-9a-f]{32}$",
+            "description": (
+                "Omit to create a new Experiment. Supply an editable local Experiment ID "
+                "to submit its next reviewed revision."
+            ),
+        }
+        properties["references"] = {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 32,
+            "uniqueItems": True,
+            "items": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "description": (
+                "Workspace-relative files or directories to archive with this Experiment"
+            ),
+        }
         if directions_enabled:
             properties["direction_id"] = {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"}
-        properties.update(gateway_record_ids=_ids("gateway-", minimum=1),
+        properties.update(gateway_record_ids=_ids("gateway-", minimum=0),
                           wiki_usage={"type": "array", "maxItems": 64, "items": usage},
                           wiki_query_ids={"type": "array", "maxItems": 64, "items": query_id},
                           wiki_usage_status={"type": "string", "enum": sorted(WIKI_USAGE_STATUSES)})
@@ -125,28 +147,70 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
         return schema
     if operation == "kernel_adopt":
         return _object({
-            "kernel_id": {"type": "string", "pattern": "^kernel-[0-9a-f]{32}$"},
+            "kernel_commit_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+                "description": "Full Agent Git commit ID identifying the Kernel source",
+            },
             "source_ref": _text(),
             "reason": _text(),
-        }, {"kernel_id", "source_ref", "reason"})
+        }, {"kernel_commit_id", "source_ref", "reason"})
     if operation == "direction_update":
         action = body.get("action")
-        if not isinstance(action, str) or action not in DIRECTION_STATUS:
+        if not isinstance(action, str) or action not in DIRECTION_ACTIONS:
             return {"oneOf": [journal_schema(operation, {"action": item}, research_records=True,
                                               directions_enabled=True, experiments_enabled=experiments_enabled)
-                              for item in DIRECTION_STATUS]}
+                              for item in sorted(DIRECTION_ACTIONS)]}
         fields = (DIRECTION_PROPOSAL_FIELDS if action == "propose" else
+                  DIRECTION_REVISION_FIELDS if action == DIRECTION_REVISION_ACTION else
                   DIRECTION_CLOSURE_FIELDS if action in CLOSURES else DIRECTION_UPDATE_FIELDS)
+        if action in CLOSURES and not experiments_enabled:
+            fields = fields - {"supporting_experiment_ids"}
         properties = {key: _text() for key in fields}
         properties["action"] = {"const": action}
-        if action == "propose":
-            properties["change_scope"] = {"enum": sorted(DIRECTION_CHANGE_SCOPES)}
+        if action in {"propose", DIRECTION_REVISION_ACTION}:
+            properties["name"]["description"] = (
+                "Short name for the optimization-relevant hypothesis or investigation."
+            )
+            properties["change_scope"] = {
+                "enum": sorted(DIRECTION_CHANGE_SCOPES),
+                "description": (
+                    "Scope of the Kernel path affected or unlocked by the hypothesis; for a "
+                    "probe-led Direction this is not the number of files touched by the probe."
+                ),
+            }
+            properties["hypothesis"]["description"] = (
+                "Falsifiable claim whose resolution can change Kernel design, implementation "
+                "selection, candidate repair, or the next optimization decision."
+            )
+            properties["applicability"]["description"] = (
+                "Workload, Shape regime, semantic case, or hardware/compiler condition where "
+                "the hypothesis should hold."
+            )
+            properties["expected_benefit"]["description"] = (
+                "Expected Kernel improvement or consequential implementation decision that this "
+                "Direction can unlock."
+            )
             for key in ("plan", "stop_conditions"):
                 properties[key] = {"type": "array", "maxItems": 64,
                                    "items": {"type": "string", "minLength": 1, "maxLength": 4000}}
-            properties.update(relationship={"enum": list(RELATIONSHIPS)},
-                              derived_from_direction_ids=_ids("direction_", maximum=32),
-                              derived_from_experiment_ids=_ids("experiment_", maximum=32))
+            properties["plan"]["description"] = (
+                "Bounded probes, edits, and measurements that discriminate the hypothesis."
+            )
+            if action == "propose":
+                properties.update(relationship={"enum": list(RELATIONSHIPS)},
+                                  derived_from_direction_ids=_ids("direction_", maximum=32),
+                                  **({"derived_from_experiment_ids": _ids("experiment_", maximum=32)}
+                                     if experiments_enabled else {}))
+            else:
+                properties["direction_id"] = {
+                    "type": "string",
+                    "pattern": "^direction_[0-9a-f]{32}$",
+                    "description": (
+                        "Editable local Direction identity whose claim and plan will receive "
+                        "the next reviewed revision."
+                    ),
+                }
             for key in DIRECTION_PROPOSAL_OPTIONAL_FIELDS:
                 properties.setdefault(key, _text())
         else:
@@ -157,16 +221,7 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
                     properties[key] = _text()
                 if experiments_enabled:
                     properties["supporting_experiment_ids"] = _ids("experiment_", minimum=1, maximum=32)
-                else:
-                    fields = fields - {"supporting_experiment_ids"}
         return _object(properties, fields)
-    if operation in {"directions_list", "experiments_list"}:
-        return {"cli_options": {"--output-path": {"type": "string", "pattern": "^scratch/.+"}},
-                "required_options": ["--output-path"]}
-    if operation in {"direction_load", "experiment_load"}:
-        prefix = "direction_" if operation == "direction_load" else "experiment_"
-        return {"cli_options": {"--record-id": {"type": "string", "pattern": f"^{prefix}[0-9a-f]{{32}}$"}},
-                "required_options": ["--record-id"]}
     return None
 
 
@@ -174,20 +229,23 @@ def gateway_schema(kind, parser):
     """Read option types/choices from the real parser; never expose its defaults."""
     groups = {
         "run": {"--mode", "--version", "--shape-id", "--timed-runs", "--baseline-path",
-                "--comparison-repeats", "--shape-batch-size", "--input-path", "--shapes-path"},
+                "--comparison-repeats", "--comparison-run-timeout", "--input-path", "--shapes-path"},
         "profile": {"--kernel-name", "--kernel-regex", "--profile-source", "--launch-skip", "--launch-count",
                     "--profile-shape-id", "--requirement", "--deps-mode", "--profile-level", "--profiler",
                     "--profile-counter", "--top-kernels", "--include-raw-profile"},
         "check": {"--arch", "--sanitize", "--requirement", "--deps-mode"},
         "disassemble": {"--format", "--requirement", "--deps-mode"},
-        "dev": set(), "env": {"--env-gpu", "--env-capabilities", "--env-force"},
-        "record-read": {"--record-id"}, "kernel-read": {"--kernel-id", "--output-path"},
-        "kernel-records": {"--kernel-id"}, "kernel-pareto-frontier": set(),
+        "dev": set(), "command": set(),
+        # Managed Runtime injects the Campaign hardware and capability view.
+        "env": set(),
+        "record-read": {"--record-id"},
+        "kernel-read": {"--kernel-commit-id", "--output-path"},
+        "kernel-records": {"--kernel-commit-id"},
     }
     if kind not in groups:
         return {"supported_kinds": list(groups), "instruction": "Use an explicit --kind and full option names."}
     allowed = groups[kind] | {"--kind"}
-    if kind in {"run", "profile", "dev", "check", "disassemble"}:
+    if kind in {"run", "profile", "dev", "command", "check", "disassemble"}:
         allowed |= {"--input", "--sync", "--no-sync", "--env", "--inline-output", "--keep-pod", "--dry-run"}
     options = {}
     for action in parser._actions:
@@ -202,11 +260,34 @@ def gateway_schema(kind, parser):
                 item["repeatable"] = True
             options[flag] = item
     options["--kind"] = {"const": kind}
-    required = ["--kind", *({"record-read": ["--record-id"], "kernel-read": ["--kernel-id", "--output-path"],
-                             "kernel-records": ["--kernel-id"]}.get(kind, []))]
+    required = ["--kind", *({
+        "record-read": ["--record-id"],
+        "kernel-read": ["--kernel-commit-id", "--output-path"],
+        "kernel-records": ["--kernel-commit-id"],
+    }.get(kind, []))]
     schema = {"cli_options": options, "required_options": required}
-    if kind in {"run", "profile", "dev"}:
-        schema["command"] = "Optional argv after --; run defaults to python3 test_kernel.py."
+    command_contract = {
+        "run": (
+            "Optional argv after --; without it Runtime executes the trusted "
+            "python3 test_kernel.py evaluator."
+        ),
+        "profile": (
+            "Optional argv after --; without it Runtime executes the trusted "
+            "python3 profile_driver.py entry point."
+        ),
+        "dev": (
+            "Optional argv after --; without it Runtime runs python3 test_kernel.py --no-memory "
+            "through stateless Dev, which is not official Evaluate evidence. For a custom probe, "
+            "provide explicit argv, declare every extra workspace input with --input, and request "
+            "returned files with --sync."
+        ),
+        "command": (
+            "Required argv after --; uploads a bounded Agent-visible workspace engineering "
+            "projection and synchronizes scratch/ back."
+        ),
+    }
+    if kind in command_contract:
+        schema["command"] = command_contract[kind]
     return schema
 
 
@@ -298,14 +379,46 @@ def augment_error(response, *, route, request, research_records=False, direction
         if operation in JOURNAL_TOOLS:
             result["operation"] = JOURNAL_TOOLS[operation]
         if operation == "episode_report":
+            status = body.get("status")
+            evidence_instruction = (
+                (
+                    "Select a current-Episode Experiment that cites a passing standard full "
+                    "Evaluate of the exact committed source; do not add gateway_record_ids "
+                    "directly. "
+                    if experiments_enabled
+                    else "Cite gateway_record_ids including a passing standard full Evaluate "
+                    "of the exact committed source; do not add selected_experiment_id. "
+                )
+                if status == "candidate_ready"
+                else (
+                    "A pivot does not nominate a candidate: omit selected_experiment_id, "
+                    "gateway_record_ids and blocker, and use handoff_reason=direction_terminal. "
+                    if status == "pivot"
+                    else "A blocked report does not nominate a candidate: omit "
+                    "selected_experiment_id and gateway_record_ids, provide blocker, and use "
+                    "handoff_reason=blocked. "
+                    if status == "blocked"
+                    else "Choose a valid status first; candidate_ready carries candidate evidence, "
+                    "while pivot and blocked omit it. "
+                )
+            )
+            direction_instruction = (
+                "Close all local active Directions with complete/abandon for direction_terminal, "
+                "or with block for a blocked report. Only candidate_ready may use "
+                "cross_trajectory_share while leaving Directions active. "
+                if directions_enabled
+                else "No Direction mutation is required because Direction recording is disabled. "
+            )
             instruction = (
-                "Correct the report fields or cited evidence and resubmit episode-report. "
-                "A validation rejection does not complete the Episode. " +
-                ("Select the current Episode's Experiment and close active Directions." if experiments_enabled and directions_enabled else
-                 "Select the current Episode's Experiment." if experiments_enabled else
-                 "Close active Directions and cite gateway_record_ids directly." if directions_enabled else
-                 "Do not create Direction/Experiment records. candidate_ready cites gateway_record_ids, "
-                 "including a passing standard full Evaluate for the byte-identical Kernel source tree."))
+                "A validation rejection does not complete the Episode. Continue the current "
+                "optimization unless a valid handoff condition exists. Every report requires "
+                "handoff_reason=direction_terminal, cross_trajectory_share, or blocked; the "
+                "second is available only in pooled search with status=candidate_ready and a "
+                "passing standard full Evaluate. Correct the report fields or cited evidence and "
+                "resubmit only when that condition is satisfied. "
+                + evidence_instruction
+                + direction_instruction
+            )
             from aka.light.runtime.request_errors import REPAIR_REQUEST
             if error.get("next_action") == REPAIR_REQUEST:
                 error["next_action"] = instruction
@@ -326,11 +439,13 @@ def augment_error(response, *, route, request, research_records=False, direction
             elif word.startswith("--kind="):
                 kind = word.split("=", 1)[1]
         result["request_schema"] = gateway_schema(kind if isinstance(kind, str) else None, parser)
-        if isinstance(kind, str) and kind in {"record-read", "kernel-read", "kernel-records", "kernel-pareto-frontier"}:
+        if isinstance(kind, str) and kind in {"record-read", "kernel-read", "kernel-records"}:
             result["recovery"].append({"instruction":
                 "Use an ID returned by this Campaign. record-read needs --record-id; kernel-read needs "
-                "--kernel-id and --output-path scratch/FILE; kernel-records needs --kernel-id. "
-                "kernel-pareto-frontier takes no IDs. Queries never require a GPU resubmission."})
+                "--kernel-commit-id and --output-path scratch/PATH; kernel-records needs "
+                "--kernel-commit-id. Per-Shape historical winners are projected in root "
+                "PROGRESS.md. "
+                "Queries never require a GPU resubmission."})
     elif route == "/v1/plugins/execute":
         name = request.get("tool")
         tool = next((item for item in catalog if item["name"] == name), None)

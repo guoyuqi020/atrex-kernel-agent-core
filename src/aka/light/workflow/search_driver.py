@@ -26,6 +26,7 @@ from aka.light.workspace.sources import from_git, unpack, snapshot as source_sna
 from aka.light.experiment.store import MeasurementStore, digest as evidence_digest, private_write
 from aka.light.runtime.paths import supervisor_campaign_root
 from aka.light.workflow.journal_service import (
+    copy_experiment_reference_archive,
     load_journal,
     research_projection,
     shared_research_path,
@@ -73,9 +74,12 @@ class EpisodeSearchDriver:
             raise RuntimeError("Pooled search requires a verified Bootstrap/Framework baseline")
         return self._kernel(self.campaign.workspace, git_head(self.campaign.workspace), record, 0, 0)
 
-    def _kernel(self, workspace, commit, record, trajectory, episode):
+    def _kernel(
+        self, workspace, commit, record, trajectory, episode, kernel_id=None
+    ):
         source = from_git(workspace, commit)
         value = {"workspace": str(workspace), "commit": commit,
+                 "kernel_id": kernel_id or commit,
                  "sha256": hashlib.sha256(source).hexdigest(), "record": record,
                  "trajectory": trajectory, "episode": episode,
                  "latency_us_geomean": record["performance"]["latency_us_geomean"]}
@@ -235,6 +239,10 @@ class EpisodeSearchDriver:
             job_rows,
             "Direction",
         )
+        for direction_id, direction in directions.items():
+            trajectory = direction_origins.get(direction_id, {}).get("trajectory")
+            if type(trajectory) is int and trajectory > 0:
+                direction["proposed_by"] = f"T{trajectory}"
         experiments, experiment_origins = self._merge_named(
             experiment_rows,
             previous.get("experiments", {}),
@@ -242,6 +250,27 @@ class EpisodeSearchDriver:
             job_rows,
             "Experiment",
         )
+        for experiment_id, experiment in experiments.items():
+            if not experiment.get("references"):
+                continue
+            owner = experiment_origins.get(experiment_id, {}).get("trajectory")
+            if owner not in self.children:
+                raise RuntimeError(
+                    f"Shared Experiment {experiment_id} has no archive owner"
+                )
+            source_root = (
+                supervisor_campaign_root(self.children[owner].workspace) / "journals"
+            )
+            for child in self.children.values():
+                destination_root = supervisor_campaign_root(child.workspace) / "journals"
+                if destination_root.resolve() == source_root.resolve():
+                    continue
+                copy_experiment_reference_archive(
+                    source_root,
+                    destination_root,
+                    experiment_id,
+                    int(experiment.get("reference_revision", 1)),
+                )
 
         research_stores = {
             number: ResearchStore(
@@ -396,7 +425,7 @@ class EpisodeSearchDriver:
         for number, episode in sorted(terminal.items()):
             agent_workspace = (
                 supervisor_campaign_root(self.children[number].workspace)
-                / "journals" / "episodes" / f"e{episode:08d}" / "agent" / "workspace"
+                / "agent-workspace"
             )
             if not (agent_workspace / ".git").is_dir():
                 # Pre-v2/migrated Episodes have no Agent-private repository.
@@ -415,7 +444,7 @@ class EpisodeSearchDriver:
                 continue
             export_epoch(
                 agent_workspace,
-                self.root / "shared" / "git" / f"T{number}" / f"e{epoch:08d}.fast-export",
+                self.root / "shared" / "git" / f"T{number}" / f"e{epoch:08d}.bundle",
                 trajectory=number,
                 epoch=epoch,
                 audit_path=self.root / "shared" / "git" / f"T{number}" / f"e{epoch:08d}.json",
@@ -516,15 +545,16 @@ class EpisodeSearchDriver:
                 )
             child.start_runtime()
             kernel_identity = child._supervisor_runtime.measurements.kernel(
-                self.source(expected_kernel)
+                self.source(expected_kernel), expected_kernel["kernel_id"]
             )
             official_identity = child._supervisor_runtime.measurements.kernel(
-                self.source(official)
+                self.source(official), official["kernel_id"]
             )
             child._supervisor_runtime.research.checkpoint_lineage(
                 {
                     "working_kernel_id": kernel_identity["kernel_id"],
                     "lineage_best_kernel_id": kernel_identity["kernel_id"],
+                    "lineage_best_latency_us": expected_kernel["latency_us_geomean"],
                     "last_correct_kernel_id": kernel_identity["kernel_id"],
                 },
                 origin={"epoch": epoch, "trajectory": number},
@@ -545,7 +575,7 @@ class EpisodeSearchDriver:
                     if peer == number:
                         continue
                     root = self.root / "shared" / "git" / f"T{peer}"
-                    export = root / f"e{epoch - 1:08d}.fast-export"
+                    export = root / f"e{epoch - 1:08d}.bundle"
                     if export.is_file():
                         exports.append(export)
                         exported_peers.append(peer)
@@ -633,15 +663,16 @@ class EpisodeSearchDriver:
             )
         child.start_runtime()
         kernel_identity = child._supervisor_runtime.measurements.kernel(
-            self.source(expected_kernel)
+            self.source(expected_kernel), expected_kernel["kernel_id"]
         )
         official_identity = child._supervisor_runtime.measurements.kernel(
-            self.source(official)
+            self.source(official), official["kernel_id"]
         )
         child._supervisor_runtime.research.checkpoint_lineage(
             {
                 "working_kernel_id": kernel_identity["kernel_id"],
                 "lineage_best_kernel_id": kernel_identity["kernel_id"],
+                "lineage_best_latency_us": expected_kernel["latency_us_geomean"],
                 "last_correct_kernel_id": kernel_identity["kernel_id"],
             },
             origin={"epoch": epoch, "trajectory": trajectory, "episode": episode},
@@ -666,7 +697,7 @@ class EpisodeSearchDriver:
             if peer == trajectory:
                 continue
             root = self.root / "shared" / "git" / f"T{peer}"
-            export = root / f"e{shared_publication:08d}.fast-export"
+            export = root / f"e{shared_publication:08d}.bundle"
             if export.is_file():
                 exports.append(export)
                 exported_peers.append(peer)
@@ -746,6 +777,8 @@ class EpisodeSearchDriver:
             "epoch": epoch,
             "trajectory": trajectory,
             "episode": episode,
+            "cross_trajectory_sharing": True,
+            "synchronization": self.campaign.module_options.search.synchronization,
             "role_specialization": (
                 self.campaign.module_options.search.role_specialization
             ),
@@ -784,7 +817,16 @@ class EpisodeSearchDriver:
             if (attempt.get("candidate_commit") and from_git(child.workspace, commit)
                     != from_git(child.workspace, attempt["candidate_commit"])):
                 raise RuntimeError("Promoted search Kernel differs from the accepted Episode candidate")
-            retained = self._kernel(child.workspace, commit, record, trajectory, episode)
+            retained = self._kernel(
+                child.workspace,
+                commit,
+                record,
+                trajectory,
+                episode,
+                kernel_id=attempt.get(
+                    "candidate_kernel_commit_id", attempt.get("candidate_kernel_id")
+                ),
+            )
         return {"epoch": epoch, "trajectory": trajectory, "episode": episode,
                 "status": attempt["status"], "retained_kernel": retained,
                 "archive": str(child.workspace / f".atrex_long_horizon/episodes/e{episode:04d}"),

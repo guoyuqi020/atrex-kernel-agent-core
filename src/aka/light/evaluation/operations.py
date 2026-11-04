@@ -83,14 +83,21 @@ def validate_comparison(args) -> None:
 
 def comparison_run_timeout(args) -> int:
     available = (args.timeout - 30) // (2 * args.comparison_repeats)
-    seconds = getattr(
-        args,
-        "evaluation_step_timeout",
-        DEFAULT_EVALUATION_STEP_TIMEOUT,
-    )
+    # The Agent-visible comparison override is intentionally narrower than the
+    # Supervisor's general evaluation-step setting.  Recorded acceptance emits
+    # this exact option, so silently ignoring it would make the prompt/request
+    # identity disagree with the job actually executed.
+    seconds = getattr(args, "comparison_run_timeout", None)
+    if seconds is None:
+        seconds = getattr(
+            args,
+            "evaluation_step_timeout",
+            DEFAULT_EVALUATION_STEP_TIMEOUT,
+        )
     if seconds <= 0 or seconds > available:
         raise ValueError(
-            "--evaluation-step-timeout must be positive and fit the full ABBA allocation schedule"
+            "--comparison-run-timeout must be positive and fit the full ABBA allocation "
+            f"schedule (maximum {available} seconds for this request)"
         )
     return seconds
 

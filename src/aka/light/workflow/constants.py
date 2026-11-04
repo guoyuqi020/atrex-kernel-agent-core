@@ -52,10 +52,12 @@ FRAMEWORK_BASELINE_MODES = ("auto", "always", "never")
 FRAMEWORK_BASELINE_CATEGORY = "framework_baseline"
 DEPENDENCY_REVIEW_TIMEOUT_S = 600
 DEPENDENCY_REVIEW_PROMPT = resource("prompts/dependency_review.md")
+RESEARCH_CLAIM_REVIEW_PROMPT = resource("prompts/research_claim_review.md")
 AGENT_PROBLEM_GENERATION_PROMPT = resource("prompts/generalize_agent_problem.md")
 DEFAULT_PROBLEM_GENERATION_TIMEOUT_S = 1_800
 ATREX_PRIVATE_REFERENCE_ENV = "ATREX_PRIVATE_REFERENCE_DIR"
 IMMUTABLE_BASELINE_PATHS = (
+    "WORKSPACE.md",
     "test_kernel.py",
     "config.json",
     "reference.py",

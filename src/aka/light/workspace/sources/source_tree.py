@@ -137,7 +137,8 @@ def instructions(policy):
     return ("\n## Kernel source tree\nEditable kernel.py and impl/ form one Kernel. "
             "You may keep the implementation in kernel.py or add, edit and delete helper, host, "
             "CUDA and header sources below impl/. Keep impl/__init__.py present. "
-            "Keep notes/tools and temporary builds in tools/, skills/ and scratch/. "
+            "Keep probes and temporary build outputs in scratch/; use custom tools/ or skills/ "
+            "only for genuinely reusable Agent helpers. "
             "Evaluate, Profile, Check, Disassemble, sealed reports and broadcasts bind the entire tree. "
             "kernel-read writes a directory for tree Kernels; pass that directory to --baseline-path.\n")
 

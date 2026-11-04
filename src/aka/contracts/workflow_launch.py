@@ -33,6 +33,13 @@ class WorkflowLaunch:
                 raise TypeError(f"{name} must be a string")
         if type(settings.specify_dsl) is not bool:
             raise TypeError("specify_dsl must be a boolean")
+        if not (
+            (type(settings.public_shapes) is int and settings.public_shapes >= 0)
+            or settings.public_shapes == "all"
+        ):
+            raise ValueError(
+                "public_shapes must be a non-negative integer or 'all'"
+            )
         for name, value in (("timeout", runtime.timeout), ("verify_repeats", runtime.verify_repeats),
                             ("shape_batch_size", runtime.shape_batch_size),
                             ("evaluation_step_timeout", runtime.evaluation_step_timeout),

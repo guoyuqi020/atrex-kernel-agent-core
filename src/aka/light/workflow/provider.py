@@ -3,7 +3,7 @@
 No global adapter is replaced. The selected Agent is borrowed and remains owned
 by its composition; this Workflow owns only Campaigns and their private servers.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from weakref import WeakSet
 
@@ -21,7 +21,9 @@ class WorkflowOptions:
     output_limit_recovery_retries: int = DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES
     dependency_policy_recovery_retries: int = 2
     episode_timeout_seconds: float | None = None
-    search: SearchOptions | dict | None = None
+    # Persistent three-island search is the default topology.  An explicit
+    # empty mapping keeps a supported escape hatch for a serial Campaign.
+    search: SearchOptions | dict | None = field(default_factory=SearchOptions)
     source_tree: dict | None = None
 
     def __post_init__(self):
@@ -101,6 +103,7 @@ class LightWorkflow:
             timeout=runtime.timeout,
             verify_repeats=runtime.verify_repeats,
             evaluation_step_timeout=runtime.evaluation_step_timeout,
+            shape_batch_size=runtime.shape_batch_size,
             min_improvement_pct=runtime.min_improvement_pct,
             ssh=connection.ssh,
             ssh_init=connection.ssh_init,

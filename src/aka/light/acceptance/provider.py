@@ -251,7 +251,12 @@ class RecordedAcceptance:
         }, wrapped
 
     def validate_candidate(self, context: CandidateValidation, source: bytes) -> dict:
-        """Run independent final-candidate gates concurrently and report them together."""
+        """Start final-candidate gates together and return one combined result.
+
+        Policy review is independent. Supplemental numerical work may proceed in
+        parallel but waits for the ordinary correctness verdict before it can
+        finalize, so a failed candidate cannot be legitimized by a side probe.
+        """
         with ThreadPoolExecutor(
             max_workers=3 if context.production else 1,
             thread_name_prefix="candidate-acceptance",

@@ -38,6 +38,7 @@ class AgentRunRequest:
     sandbox_url: str = ""
     sandbox_timeout_s: int = derived_evaluation_timeout()
     session_id: str | None = None
+    resume_session: bool = False
     extra_environment: Mapping[str, str] | None = None
     sandbox_ssh: str = ""
     sandbox_ssh_init: str = ""

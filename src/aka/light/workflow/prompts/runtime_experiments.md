@@ -1,11 +1,3 @@
 ## Handoff
 
-Write `scratch/episode-report.json` as one of:
-
-```json
-{"status":"candidate_ready","summary":"...","selected_experiment_id":"experiment_..."}
-{"status":"pivot","summary":"..."}
-{"status":"blocked","summary":"...","blocker":"..."}
-```
-
-For `candidate_ready`, select a current-Episode Experiment that cites a passing standard full Evaluate for the exact source left in the workspace. Do not add `gateway_record_ids` directly. Submit with `python3 tools/sandbox.py --kind episode-report --request-file scratch/episode-report.json`. Correct a rejected handoff and resubmit; stop only after acceptance. Do not commit—the Supervisor seals the source.
+Experiment recording is enabled; Direction recording is disabled. Follow `skills/runtime-records/SKILL.md` for the exact report schema. `candidate_ready` must set `selected_experiment_id` to a current-Episode Experiment that cites a passing standard full Evaluate of the exact clean HEAD; do not add `gateway_record_ids` directly. `pivot` uses `direction_terminal`, and `blocked` requires `handoff_reason=blocked` plus a concrete `blocker`. In pooled search only, `candidate_ready` may use `cross_trajectory_share`.

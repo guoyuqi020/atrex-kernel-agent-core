@@ -146,6 +146,7 @@ class AgentRunRequest:
     timeout_s: int
     reasoning_effort: str = "max"
     session_id: str | None = None
+    resume_session: bool = False
     environment: Mapping[str, str | None] | None = None
     observation_directory: Path | None = None
 

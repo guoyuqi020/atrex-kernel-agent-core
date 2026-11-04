@@ -1,15 +1,21 @@
 # Supervisor-owned Episode handoff and promotion
 
-Light gives each optimization Episode a persistent Git-free draft. The Supervisor owns
-the real worktree, source seals, private Journal, and promotion audit. The agent submits
-an `episode-report` with evidence IDs, never a Git commit as proof of measurement.
+Light gives each trajectory one stable Agent-visible Git repository across optimization
+Episodes. The Supervisor separately owns per-Episode trusted worktrees, source seals,
+private Journals, and the promotion audit. Agent commits and branches are engineering
+state, not measurement proof: the agent submits an `episode-report` with evidence IDs and an
+explicit terminal/share/blocker reason. A clean Agent `HEAD` is the canonical Kernel ID; after
+the evidence gates pass, the Supervisor imports that exact commit object under
+`refs/atrex/accepted/<kernel_commit_id>` and verifies its source instead of recommitting it.
 
 ## Boundary and retained workflow
 
-The default report-only workflow cites `gateway_record_ids`. Optional research recording
-uses a selected Experiment and closed Directions. Both paths require exact-source evidence
-and the same acceptance/promotion gates. V0 and the optional framework baseline are separate
-initialization stages.
+Direction and Experiment recording are enabled by default and independently selectable. A
+candidate report selects an Experiment when that module is enabled, or cites
+`gateway_record_ids` directly when it is disabled. Direction lifecycle requirements apply only
+when that module is enabled. Every combination requires exact-source evidence and the same
+acceptance/promotion gates. Optimization starts from measured V0 by default; the dedicated
+framework-baseline stage is an explicit compatibility option.
 
 Native mode is a cooperative separation of directories. Select `--profile light-sandbox`
 on Linux to enforce the draft/private-worktree boundary through Bubblewrap.
@@ -17,11 +23,13 @@ A managed Session requires valid private Git provenance before it can receive a 
 
 ## Lifecycle
 
-1. CandidateWorkspace materializes or resumes the draft.
+1. CandidateWorkspace opens or initializes the trajectory's stable Agent repository and
+   refreshes Episode-scoped capabilities, public inputs, and shared evidence in place.
 2. The agent edits the permitted source layout and requests measurements through the Runtime.
 3. The Journal validates the report and passing full Evaluate evidence for that exact source.
 4. Acceptance obtains or reuses mandatory correctness and enabled policy/numerical evidence.
-5. The Workspace seals the validated snapshot using private Git operations.
+5. The Workspace imports the exact Agent commit into a protected Supervisor ref, verifies that
+   it contains the measured source, and materializes those bytes in the private worktree.
 6. The report is persisted before controller projections and handoff publication.
 7. The Workflow obtains policy-matched native ABBA and promotes only a strict improvement.
 
@@ -31,7 +39,7 @@ Post-report draft edits do not change the sealed candidate.
 
 | Mechanism | Current owner |
 | --- | --- |
-| Draft construction and publication | `aka.light.workspace.episode` |
+| Stable Agent repository and publication | `aka.light.workspace.episode` |
 | Report transaction | `aka.light.workflow.journal_service` |
 | Source snapshot and private Git sealing | `aka.light.workspace.sources`, `git` |
 | Recorded ABBA and scoring | `aka.light.acceptance.recorded_verifier`, `verifier` |
@@ -39,27 +47,32 @@ Post-report draft edits do not change the sealed candidate.
 
 ## Agent-visible workspace
 
-The source layout is task-selected: `source_tree` has a fixed adapter and editable roots;
-`cuda_manifest` has CUDA sources and a manifest; `single_file` has one Python candidate.
-The agent also sees public instructions, reserved HTTP clients, custom writable
+Native Light Campaigns normalize the editable Kernel boundary to `kernel.py + impl/`.
+Both files and directories are part of one source tree, and `kernel.py` is an editable
+evaluator entry point rather than a fixed adapter. Legacy `single_file` and manifest
+providers remain import/execution compatibility mechanisms, not a second Agent-facing
+version model. The agent also sees public instructions, reserved HTTP clients, custom writable
 `skills/` and `tools/`, `scratch/`, eligible historical conversations, and optional
 read-only memory summaries.
 
-There is no real Git directory, private Journal, promotion audit, or evaluator checkout
-in the managed draft. New Episodes start with empty scratch; same-Episode recovery keeps it.
+The managed trajectory is a real, persistent Agent-owned Git repository. Its clean `HEAD`
+commits are engineering checkpoints and canonical Kernel IDs, while the Supervisor's private Journal, immutable
+measurement artifacts, promotion audit and evaluator checkout remain outside that repository.
 Custom Skills/tools can carry across Episodes independently of kernel promotion.
 
 Snapshots and commits bind **all selected candidate files**, including source deletions,
-headers, and build settings. The seal is constructed from validated snapshot bytes,
-not a later mutable draft read. Runtime observations and supplemental probe inputs are
-excluded from candidate identity. See [candidate layouts](native-cuda.md).
+headers, and build settings. Before importing the Agent commit, the Supervisor rechecks that
+its source equals the frozen measured snapshot and that it tracks no non-Kernel workspace
+files. Runtime observations and supplemental probe inputs are excluded from candidate
+identity. The later incumbent promotion commit may additionally contain version/audit facts,
+but it does not replace the accepted candidate's Kernel ID. See [candidate layouts](native-cuda.md).
 
 ## Acceptance and reuse
 
 | Phase | Authoritative evidence |
 | --- | --- |
 | Candidate report | Passing standard full Evaluate for exact source; direct record citations or an enabled selected Experiment |
-| Correctness | Native six-case contract, or the supported evaluator's full-workload gate |
+| Correctness | Native five-case contract, or the supported evaluator's full-workload gate |
 | Production policy | Applicable framework/source review over exact candidate files |
 | Promotion | Same-allocation native ABBA for committed incumbent and sealed candidate |
 

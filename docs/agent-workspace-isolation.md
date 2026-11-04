@@ -69,8 +69,8 @@ provider options; do not reinterpret a running Session by changing environment v
 Bubblewrap starts from an empty root with selected read-only system/runtime files, minimal
 devices, private temporary directories, and its selected proc view. It mounts:
 
-- The managed draft, permitted editable source roots, custom Skills/tools, and scratch.
-- Public contracts, fixed source adapters, reserved clients/Skills, and eligible history read-only.
+- The managed draft, editable `kernel.py + impl/` source tree, custom Skills/tools, and scratch.
+- Public contracts, reserved clients/Skills, and eligible history read-only.
 - A writable Session-specific Provider Home outside the candidate Git tree.
 - Minimal CLI installation files and explicitly validated extra grants.
 

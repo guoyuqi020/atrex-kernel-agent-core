@@ -18,6 +18,7 @@ class WorkflowSettings:
     platform: str
     framework: str
     specify_dsl: bool = True
+    public_shapes: int | str = "all"
     notes: str = "none"
     arch: str = ""
     max_iters: int = 20
@@ -30,7 +31,10 @@ class WorkflowSettings:
     convert_after: int = 3
     agent_cli: str = "claude"
     optimization_mode: str = "leaderboard"
-    framework_baseline: str = "auto"
+    # Optimization Episodes start directly from the measured V0 by default.
+    # ``auto`` and ``always`` remain explicit compatibility modes for callers
+    # that still want the dedicated framework bring-up Session.
+    framework_baseline: str = "never"
     gateway_candidate_recovery: str = "disabled"
     framework_baseline_timeout: int = 28800
     handoff_resumes: int = 2
@@ -46,6 +50,13 @@ class WorkflowSettings:
     def __post_init__(self):
         if type(self.specify_dsl) is not bool:
             raise TypeError("specify_dsl must be a boolean")
+        if not (
+            (type(self.public_shapes) is int and self.public_shapes >= 0)
+            or self.public_shapes == "all"
+        ):
+            raise ValueError(
+                "public_shapes must be a non-negative integer or 'all'"
+            )
         for name in (
             "setup_timeout",
             "framework_baseline_timeout",

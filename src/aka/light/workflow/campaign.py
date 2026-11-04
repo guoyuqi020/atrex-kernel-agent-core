@@ -24,6 +24,7 @@ class ManagedCampaign(Campaign):
             atrex_bench_root=str(problem.evaluation.runtime_root or ""),
             verify_repeats=evaluation.verify_repeats,
             evaluation_step_timeout=evaluation.evaluation_step_timeout,
+            shape_batch_size=evaluation.shape_batch_size,
             min_improvement_pct=evaluation.min_improvement_pct,
             problem_generation_timeout=settings.setup_timeout,
             v1_ask_codex="codex" in settings.framework_baseline_reviewers,
@@ -90,6 +91,8 @@ class ManagedCampaign(Campaign):
         # session boundary obtains only a scoped ToolHost capability.
         result = self.agent.runtime(agent_cli).run(AgentRunRequest(
             workspace, prompt, timeout, reasoning_effort=reasoning_effort,
+            session_id=legacy.get("session_id"),
+            resume_session=bool(legacy.get("resume_session", False)),
             environment=environment))
         return SessionResult(result.exit_status, result.timed_out,
             result.terminal_usage.total_tokens or 0, result.stdout_tail, result.stderr_tail,
@@ -168,6 +171,7 @@ class ManagedCampaign(Campaign):
         self.candidate_workspace.initialize_at(self.workspace, content)
         self.candidate_workspace.install_files(self.workspace, self.problem.agent.files)
         self._ensure_agent_problem()
+        self._ensure_public_shapes()
         self._link_runtime()
         self._install_native_evaluator()
         self._install_profile_driver()

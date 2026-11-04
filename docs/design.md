@@ -79,8 +79,10 @@ the remote GPU executor.
    contract while detailed inputs remain private.
 2. **Establish baselines.** Measure V0 and, when configured, establish V1 in the target
    framework. Imported source trees retain their pinned initial package.
-3. **Explore.** Start or resume an Episode in a managed Git-free draft. The Agent can
-   research, edit, profile, evaluate, and inspect previous measurement records.
+3. **Explore.** Start or resume an Episode in the trajectory's stable Agent Git repository.
+   Uncommitted work, local branches, tags, `scratch/`, tools, and Skills survive Episode
+   boundaries. Runtime capabilities, public inputs, and shared evidence are refreshed for
+   the new Episode without reconstructing the repository.
 4. **Report and seal.** A report cites a passing standard full Evaluate for the exact
    source. Mandatory correctness, applicable production policy, and enabled supplemental
    validation must succeed before the report can seal that candidate.
@@ -90,19 +92,22 @@ the remote GPU executor.
 6. **Continue or export.** Carry eligible adaptive Skills/tools into the next Episode,
    enforce campaign limits, and export the retained source with verified version facts.
 
-The default report uses `gateway_record_ids`. Direction/Experiment annotations are enabled
-separately by `light_journal.research_records`; then a report selects a recorded Experiment.
+The default Journal configuration enables both Direction and Experiment annotations through
+`light_journal.tool_modules`. When the Experiment module is enabled, a candidate report selects a
+recorded Experiment; otherwise it cites `gateway_record_ids` directly.
 Generated memory is also optional. With it disabled, committed `.atrex_versions/vN.json`
 facts still support versioning, reporting, and recovery.
 
 ## Source and measurement identity
 
-New tasks default to `source_tree`, with a fixed Python adapter and editable `impl/`.
+New tasks default to `source_tree`, with editable evaluator entry point `kernel.py` and optional
+editable helpers below `impl/`.
 Explicit alternatives are `single_file` and `cuda_manifest`. Layout implementations own
 validation and packaging; Workflow uses their common artifact interface.
 
-A Kernel ID binds the complete source snapshot for multi-file candidates, including headers
-and build settings. A measurement identity additionally binds evaluator/input bytes, target,
+`kernel_commit_id` is the full Agent Git commit ID. Runtime accepts it only when the worktree is clean
+and the commit contains the exact complete source snapshot, including headers and build settings.
+A measurement identity additionally binds evaluator/input bytes, target,
 options, transport, and repetition policy. Changing any required identity produces a new task.
 Agent duplicates return the existing record reference; trusted acceptance can reuse compatible,
 completed evidence. Unavailable or contradictory results cannot become cached verdicts.
@@ -112,9 +117,11 @@ and [evaluator outcomes](evaluator-outcomes/README.md).
 
 ## Correctness and promotion
 
-Native Atrex-Bench candidate acceptance uses six correctness cases per shape. A targeted
+Native Atrex-Bench candidate acceptance uses five correctness cases per Shape (the base case plus
+four Runtime-owned additional cases). A targeted
 smoke test, custom-input probe, or partial-shape measurement cannot replace full-contract
-evidence. Supplemental numerical planning is default-off and adds measured probes when enabled.
+evidence. Supplemental numerical planning is enabled by default in Production and adds measured
+risk probes; it can be disabled independently.
 
 Light uses native same-allocation A/B/B/A measurements. Its promotion metric is:
 

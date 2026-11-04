@@ -146,8 +146,9 @@ def prepare_agent_environment(
             raise ValueError("Agent Session Home root must be absolute")
         state_root = state_root.resolve()
         # The Supervisor supplies a trajectory-private root. Its stable path,
-        # rather than the per-Episode projected workspace, is the continuity
-        # boundary for a native provider Session.
+        # shared with the trajectory-stable Agent repository rather than the
+        # per-Episode trusted worktree, is the continuity boundary for a native
+        # provider Session.
         identity_scope = str(state_root)
     else:
         state_root = workspace.resolve().parent / ".atrex-agent-homes"

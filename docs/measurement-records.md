@@ -26,10 +26,11 @@ Campaign records live under
 The store includes a private identity key, Kernel snapshots, Gateway records with frozen
 inputs and repetition/job checkpoints, and task reservation indexes.
 
-- A `kernel-...` ID binds the exact candidate artifact. For multi-file layouts this includes
+- `kernel_commit_id` is the full Git commit ID and binds the exact committed candidate artifact. For multi-file layouts this includes
   the complete serialized source snapshot, headers, and build settings, not only `kernel.py`.
-  Historical single-file IDs retain their interpretation. A private file named `kernel.py`
-  may contain the snapshot encoding; use the artifact reader instead of assuming Python text.
+  The Measurement Store also archives and verifies the serialized source bytes. A private file
+  named `kernel.py` may contain the snapshot encoding; use the artifact reader instead of
+  assuming Python text.
 - A `gateway-...` ID identifies one logical measurement and its public result. ABBA binds
   both candidate and incumbent artifacts.
 - Task identity additionally binds evaluator/input bytes, operation, target/transport settings,
@@ -49,14 +50,14 @@ Run these commands in an active managed draft, using IDs returned by the campaig
 ```bash
 python3 tools/sandbox.py --kind run --no-sync
 python3 tools/sandbox.py --kind record-read --record-id gateway-11111111111111111111111111111111
-python3 tools/sandbox.py --kind kernel-records --kernel-id kernel-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-python3 tools/sandbox.py --kind kernel-read --kernel-id kernel-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output-path scratch/previous
-python3 tools/sandbox.py --kind kernel-pareto-frontier
+python3 tools/sandbox.py --kind kernel-records --kernel-commit-id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+python3 tools/sandbox.py --kind kernel-read --kernel-commit-id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output-path scratch/previous
+# Read root PROGRESS.md for the Research Board and per-Shape frontier.
 ```
 
 GPU calls and `record-read` return one JSON object containing `operation`, `status`,
-`result`, `gateway_record_id`, and `kernel_id` when source-bound.
-ABBA is `operation: evaluate` with a comparison and baseline Kernel ID.
+`result`, `gateway_record_id`, and `kernel_commit_id` when source-bound.
+ABBA is `operation: evaluate` with a comparison and `baseline_kernel_commit_id`.
 Parse the complete JSON, not private executor marker lines.
 
 A successful read exits zero even when the stored evaluator rejected the source.
@@ -66,7 +67,7 @@ Record reads submit no GPU work and do not recreate old profiler artifacts.
 
 `kernel-read` restores a file for `single_file` and a directory for multi-file artifacts.
 Use that same layout for `--baseline-path`. `kernel-records` lists metadata; a listed
-ID still needs full integrity validation when read. The Pareto query returns observed
+ID still needs full integrity validation when read. Root `PROGRESS.md` returns observed
 per-shape minima from eligible passing full Evaluations, not a measured composite kernel.
 
 An Agent duplicate returns `duplicate_gateway_task` with an existing record reference
@@ -114,9 +115,9 @@ aggregated into summaries; ABBA sides are aggregated separately. Correctness-onl
 Profile, Dev, Check, and Disassemble remain single-operation requests. An incomplete or
 rejected repetition cannot become a successful median.
 
-This repetition count is separate from native six-case correctness and ABBA's even
-measurement count per side. Standard native Evaluate defaults to six correctness cases;
-targeted smoke tests default to one. Matching correctness evidence can be reused by trusted
+This repetition count is separate from native five-case correctness and ABBA's even
+measurement count per side. Standard native Evaluate uses five correctness cases;
+matching correctness evidence can be reused by trusted
 acceptance without relaxing full-measurement or ABBA identity.
 
 SOL uses its full-workload contract with `sol_execbench_coverage_v1` in task identity.

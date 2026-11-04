@@ -53,10 +53,12 @@ adapter and every implementation source; directory hashes include relative names
 and reject symlinks. The sandbox evaluator binds correctness to the canonical complete Kernel source
 tree, so `decision_grade` evidence must identify the same source-set digest as the measured candidate.
 
-An exploration receipt may use `--correctness passed` as an explicit agent report. A final
-`decision_grade` receipt additionally requires `--correctness-evidence` pointing to the
-sandbox-owned `.atrex_long_horizon/evaluations.jsonl` produced by the immutable evaluator for the
-instrumented source tree.
+An exploration receipt may use `--correctness passed` as an explicit Agent report. In managed Light,
+the Supervisor's private evaluator log is not projected into the Agent workspace, so do not search
+for or fabricate `.atrex_long_horizon/evaluations.jsonl`. Produce diagnostic evidence unless the
+Runtime explicitly returns a hash-bound correctness receipt that the tool accepts through
+`--correctness-evidence`. Final Kernel acceptance still uses the ordinary immutable evaluator after
+all probes are removed.
 
 Campaign workspaces expose `skills/` as a local symlink that is not uploaded implicitly. Add
 `--input skills/autonomous-gpu-kernel-timeline/backends/cuda_backend` to a sandbox command that reads

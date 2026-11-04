@@ -56,8 +56,10 @@ if [[ ! -d .git ]]; then
     git config user.name "GPU Kernel Optimizer"
 fi
 
-# Step 3: Copy kernel demo as kernel.py
+# Step 3: Initialize the unified editable source tree
 cp "$KERNEL_DEMO" "$WORKSPACE/kernel.py"
+mkdir -p "$WORKSPACE/impl"
+touch "$WORKSPACE/impl/__init__.py"
 
 # Step 4: Create .gitignore
 cat > "$WORKSPACE/.gitignore" << 'EOF'
@@ -80,5 +82,5 @@ cp "$SCRIPT_DIR/CLAUDE.md" "$WORKSPACE/CLAUDE.md"
 echo ""
 echo "Workspace initialized at: $WORKSPACE"
 echo ""
-echo "Supervisor staging ready: kernel.py, CLAUDE.md, memory/, scratch/."
-echo "The Supervisor will normalize kernel.py into the unified source-tree contract before V0."
+echo "Supervisor staging ready: kernel.py + impl/, CLAUDE.md, memory/, scratch/."
+echo "kernel.py is the evaluator entry point; optional host/CUDA helpers belong under impl/."

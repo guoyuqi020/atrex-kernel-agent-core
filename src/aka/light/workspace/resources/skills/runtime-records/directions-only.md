@@ -6,22 +6,12 @@ allowed-tools: "Bash Read"
 
 # Runtime Direction records
 
-Use `python3 tools/sandbox.py` inside the Episode. Available Journal commands include
-`research-board`, `list-directions`, `load-direction`, `update-direction`, `progress-direction`,
-`prioritize-direction`, `adopt-kernel`, and `episode-report`. Experiment commands
-are disabled. Measurement records remain available through `record-read`, `kernel-read`,
-`kernel-records`, and `kernel-pareto-frontier`.
+Direction recording is enabled; Experiment commands are disabled. Start with root `PROGRESS.md`, then open only relevant `directions/<status>/*.json` and `records/*.json`. These Runtime projections are read-only.
 
-Start by exporting the catalog with `--kind list-directions --output-path scratch/directions.json`,
-then load every visible entry with `--kind load-direction --record-id direction_...`. Submit
-Direction JSON using `--kind update-direction --request-file scratch/direction.json`:
+A Direction is a consequential Kernel path or uncertainty, not Runtime/evaluator maintenance. Check for duplicates and rank by expected benefit and applicability. Multiple local Directions may be `in_progress`; keep that set intentional and address updates by ID. Continue bounded probe/edit/measurement/revert-or-keep cycles while useful work remains.
 
-- `propose`: `action,name,change_scope,hypothesis,plan`; optional `stop_conditions` and genealogy.
-- `start`: `action,direction_id,analysis`.
-- `complete|abandon|block|defer`: `action,direction_id,analysis,hypothesis_status`.
+Use `update-direction`, `progress-direction`, and `prioritize-direction` for mutations. Omit `supporting_experiment_ids`; Experiment-derived genealogy is unavailable. For `candidate_ready`, cite `gateway_record_ids` containing a passing standard full Evaluate of the exact clean HEAD. Follow [the exact Direction, adoption, and report schemas](references/journal.md) and [saved result/source semantics](references/records.md). Never invent IDs or measured results.
 
-Do not include `supporting_experiment_ids`. Keep at most one local Direction in progress. A valuable
-major redesign may remain active across reports; unresolved deferred/blocked/abandoned work needs
-`reopen_condition`. Candidate reports use `status,summary,gateway_record_ids`; a cited record must be
-a passing standard full Evaluate for the exact source. Pivot uses `status,summary`; blocked also
-uses `blocker`. Never invent IDs or measured results.
+Revise an open local Direction with `action=revise`, its `direction_id`, and the complete revised
+claim and plan. Runtime keeps the ID, increments `revision`, reruns Review, and preserves lifecycle
+status and genealogy. Shared peer Directions are read-only.

@@ -5,17 +5,17 @@ Use the file system pinned in `.atrex_file_system.json`. New tasks default to
 
 ## Source directory (default)
 
-Keep the fixed `kernel.py` adapter unchanged. Without an import configuration it
-imports `Model` from editable `impl/model.py`. Edit/add/delete implementation files
-under `impl/`; an imported package instead uses the `editable_roots` in
-`.atrex_source.json`. All source files travel together in a source archive.
+The candidate is one editable source tree rooted at `kernel.py + impl/`. `kernel.py`
+is the evaluator entry point and may either contain the implementation or import it
+from files under `impl/`. Edit/add/delete both the entry point and implementation
+files as needed; all source files travel together in one source archive.
 
 CUDA implementations may use separate `.cu`, `.cpp` and header files with a
 Python loader in the editable directory. Compile through the supported Torch
 extension API on Agate; use paths relative to the loader's `__file__`.
 Do not import `pathlib` or `os`, which Agate source validation rejects.
-The source-directory adapter supplies the Python `Model` entry point; an Agate
-native-CUDA manifest is not used in this mode. Do not replace the pinned adapter.
+`kernel.py` must continue to supply the evaluator's Python `Model` entry point; an
+Agate native-CUDA manifest is not used in this mode.
 `kernel-read` exports the entire source directory for `--baseline-path`.
 Use the managed Evaluate/Profile tools and submit the usual episode report.
 
@@ -71,4 +71,5 @@ covers correctness and performance. Change JSON and native sources together;
 any file, build option or dependency change creates a different Kernel identity.
 `kernel-read` exports a directory for a native Kernel, suitable for baseline-path.
 Temporary experiments belong in scratch/, not source.files. Leave the final exact
-candidate in place and use the usual episode-report flow; the Supervisor owns Git.
+candidate in place and use the usual episode-report flow. The Agent owns engineering Git and
+commits; the Supervisor independently validates and seals the exact reported HEAD.

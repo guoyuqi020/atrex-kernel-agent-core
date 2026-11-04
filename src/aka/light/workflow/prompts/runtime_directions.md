@@ -1,11 +1,3 @@
 ## Handoff
 
-Before reporting, close every local in-progress Direction. Write `scratch/episode-report.json` as one of:
-
-```json
-{"status":"candidate_ready","summary":"...","gateway_record_ids":["..."]}
-{"status":"pivot","summary":"..."}
-{"status":"blocked","summary":"...","blocker":"..."}
-```
-
-For `candidate_ready`, cite a passing standard full Evaluate for the exact source left in the workspace. Do not add `selected_experiment_id`. Submit with `python3 tools/sandbox.py --kind episode-report --request-file scratch/episode-report.json`. Correct a rejected handoff and resubmit; stop only after acceptance. Do not commit—the Supervisor seals the source.
+Direction recording is enabled; Experiment recording is disabled. Follow `skills/runtime-records/SKILL.md` for the exact report schema. Close all local active Directions before `direction_terminal` or `blocked`; omit `supporting_experiment_ids`. `candidate_ready` must cite `gateway_record_ids` containing a passing standard full Evaluate of the exact clean HEAD; do not use `selected_experiment_id`. In pooled search only, `candidate_ready` with `cross_trajectory_share` may leave Directions active.

@@ -15,7 +15,7 @@ SKIP = {".git", ".claude", ".codex", ".qoder", ".qodersec", ".pi", ".agents",
         ".aka-agent-observations",
         ".atrex_long_horizon", ".atrex_versions", ".atrex_plugins", ".gpu_wiki_profile", ".atrex_environment",
         "atrex-bench", "tools", "skills", "reference", "reference-projects",
-        "gpu-wiki", "__pycache__", ".venv", "node_modules", "plans"}
+        "gpu-wiki", "records", "__pycache__", ".venv", "node_modules", "plans"}
 
 
 def relative_path(value: str) -> Path:
@@ -99,3 +99,21 @@ def publish(workspace: Path, relative: str, data: bytes, *, append: bool = False
                 os.unlink(temporary, dir_fd=parent)
             except FileNotFoundError:
                 pass
+
+
+def publish_if_changed(workspace: Path, relative: str, data: bytes) -> bool:
+    """Atomically publish immutable projection bytes only when they changed.
+
+    Agent-visible research history can contain thousands of immutable records
+    and large archived references.  Avoid replacing every file at every
+    Episode bind while still healing deleted, modified, linked, or malformed
+    projections from the authoritative private stores.
+    """
+    try:
+        current = read_regular_bytes(workspace / relative_path(relative), limit=len(data) + 1)
+    except (FileNotFoundError, OSError, ValueError):
+        current = None
+    if current == data:
+        return False
+    publish(workspace, relative, data)
+    return True

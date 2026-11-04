@@ -13,6 +13,22 @@ from .cli_problem import problem_request
 from .cli_request import campaign_request
 
 
+def _public_shapes_argument(value: str) -> int | str:
+    if value.casefold() == "all":
+        return "all"
+    try:
+        count = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "expected a non-negative integer or 'all'"
+        ) from exc
+    if count < 0:
+        raise argparse.ArgumentTypeError(
+            "expected a non-negative integer or 'all'"
+        )
+    return count
+
+
 def parse_arguments(argv):
     ap = argparse.ArgumentParser(
         description="Long-horizon episode orchestrator for atrex-kernel-agent."
@@ -175,6 +191,17 @@ def parse_arguments(argv):
         ),
     )
     ap.add_argument(
+        "--public-shapes",
+        type=_public_shapes_argument,
+        default="all",
+        metavar="COUNT|all",
+        help=(
+            "Expose exact parameters for the canonical first COUNT evaluator Shapes "
+            "through public_shapes.json. Use 0 to expose none or 'all' to expose every "
+            "Shape. This never changes the full evaluator workload (default: all)."
+        ),
+    )
+    ap.add_argument(
         "--notes", default="none", help="Extra constraints / known bottlenecks."
     )
     ap.add_argument(
@@ -261,12 +288,12 @@ def parse_arguments(argv):
     ap.add_argument(
         "--framework-baseline",
         choices=FRAMEWORK_BASELINE_MODES,
-        default="auto",
+        default="never",
         help="Run one dedicated session after V0 setup that "
         "replaces the V0 PyTorch wrapper with the first self-contained framework "
         "kernel, recorded as v1 (so optimization episodes start at v2). "
-        "auto and always enable the stage in either optimization mode; "
-        "never = optimize directly from the V0 kernel.",
+        "The default, never, optimizes directly from the measured V0 kernel; "
+        "auto applies the compatibility policy and always forces the separate V1 stage.",
     )
     ap.add_argument(
         "--framework-baseline-timeout",
@@ -476,6 +503,8 @@ def adapt_argv(argv):
                         if "--" + field.name.replace("_", "-") in explicit}
     if "--no-specify-dsl" in explicit:
         workflow_options.add("specify_dsl")
+    if "--public-shapes" in explicit:
+        workflow_options.add("public_shapes")
     runtime_options = {field.name for field in __import__("dataclasses").fields(request.runtime)
                        if "--" + field.name.replace("_", "-") in explicit}
     if "--verify-shape-batch-size" in explicit:

@@ -236,8 +236,10 @@ def _budget_reminder(state_path):
     return (
         f"Active-time reminder: {stage_name} has approximately "
         f"{_format_duration(remaining)} remaining. Waiting for Runtime or Agate does "
-        "not consume this budget. Prioritize a complete, verifiable result and publish "
-        "the required handoff before the budget expires."
+        "not consume this budget. Use the remaining active time on the smallest concrete "
+        "evidence-backed step. Publish a handoff only if the stage's documented handoff "
+        "condition is actually satisfied; budget pressure does not make a merely promotable "
+        "checkpoint terminal."
     )
 
 
@@ -274,9 +276,10 @@ def hook_output(
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": (
-                "Dependency policy rejected this command before execution. "
-                f"Reason: {violation}. Use provisioned dependencies and permitted "
-                "Runtime tools, then continue the same task without repeating it."
+                "The local execution boundary rejected this command before execution. "
+                f"Reason: {violation}. Keep development inside the documented workspace, "
+                "transport, and shared-service boundaries; use the permitted Runtime operation "
+                "when remote execution is needed, then continue the same task."
             ),
         }}, reminder)
     if not any(name in value["command"] for name in ("tools/sandbox.py", "tools/plugin.py")):

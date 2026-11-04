@@ -108,6 +108,30 @@ Other invocations through the Agent runtime, including framework-baseline and po
 
 Set `ATREX_SESSION_CAPTURE_DIR` to override that root for standalone invocations. Relative paths resolve against the invocation workspace. Light selects its Episode-specific archive directory. Every invocation, including same-session repair/resume, gets a new `run-<uuid>`; the provider session ID can remain the same.
 
+Research-claim reviewers use an explicit Episode-private capture root instead of the
+temporary evidence bundle, so deleting that bundle never deletes the conversation:
+
+```text
+<episode>/claim-review-sessions/claim-review-<id>/attempt-<n>/run-<uuid>/
+  conversation.jsonl
+  token-usage.json
+  provider/
+```
+
+The private `claim-reviews/review_<id>.json` receipt stores the provider Session ID and
+relative conversation path for every attempt. The corresponding
+`claim-audit/claimaudit_<id>/review.json` links the Agent submission, canonical review
+receipt and captured conversations. Rejected and unavailable reviews keep the same
+Session audit under the private audit outcome. None of these paths or private identifiers
+are projected into the Agent-facing Runtime response.
+
+When a local Direction or Experiment is revised, Runtime indexes the latest valid reviewer
+Session by stable claim ID and resumes it for the next Review. The resumed invocation uses a
+campaign-stable, reviewer-only provider Home while writing a new invocation-scoped capture, so
+later continuation never overwrites the earlier audit. Missing or incompatible native Session
+state causes one fresh-Session retry; lifecycle-only Direction updates do not replace the claim's
+revision-review Session.
+
 ## Disable capture and roll back
 
 Both `light` and `light-sandbox` enable capture. Configure it through the selected Agent
@@ -134,7 +158,7 @@ when resuming a campaign, or start a new compatible launch at an Episode boundar
 Ordinary Agent calls also publish normalized conversation/usage to their requested
 observation directory, including V1 and recovery calls before the first Episode.
 Those observations are separate from private raw capture and excluded from source identity.
-Provider-throttle/output-limit replacement Sessions retain their Episode observations;
+Provider-throttle replacement Sessions and same-provider-session output-limit continuations retain their Episode observations;
 they do not reset settled usage.
 
 ## Conversation

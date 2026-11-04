@@ -1,26 +1,15 @@
 ---
 name: runtime-records
-description: Query saved measurement evidence and submit an Episode Report without Direction or Experiment recording.
+description: Inspect saved evidence and submit an Episode Report without Direction or Experiment recording.
 allowed-tools: "Bash Read"
 ---
 
 # Runtime records — report-only mode
 
-Use `python3 tools/sandbox.py` inside a controller-registered Episode. Direction and research
-Experiment recording are disabled; do not use `update-direction` or `record-experiment`.
-This does not disable automatic measurement persistence, duplicate detection, correctness checks,
-or independent ABBA promotion. Framework Baseline has its own smoke-and-exit procedure.
+Direction and Experiment recording are disabled; automatic Gateway Records, duplicate detection, validation, and promotion remain enabled. Start with root `PROGRESS.md` and relevant `records/*.json`. Do not call Direction or Experiment operations or invent their IDs.
 
-Inspect saved measurement evidence and optional canonical `memory/v*.json` summaries when present.
-Implement and measure a candidate, then leave its complete source tree in place as declared by
-`WORKSPACE.md` and cite real Gateway Record IDs in `episode-report`.
-No synthetic Direction, Experiment, separate plan/profile document, or Git operation is required.
+Use local Git for candidate history. Before every Kernel-bound Runtime request, commit the complete SourceProvider candidate and leave the worktree clean; the full HEAD is its `kernel_commit_id`. Continue bounded edit/measurement/revert-or-keep cycles while the selected path has a concrete high-value next step. A promotable checkpoint alone is not a stop condition.
 
-- [Episode report and examples](references/journal.md): direct evidence selection and repair.
-- [Saved results and source](references/records.md): measurement readers, per-Shape historical best, and errors.
-- Use `skills/gpu-measurement/SKILL.md` for new measurements.
+For `candidate_ready`, cite real `gateway_record_ids`, including a passing standard full Evaluate of the exact clean HEAD. `pivot` and `blocked` reports omit them; a blocker also supplies `blocker`. Follow [the exact report schema and repair rules](references/journal.md) and [saved result/source semantics](references/records.md). Report acceptance is a handoff, not promotion.
 
-Read-only Direction/Experiment history queries remain available for earlier recorded Episodes;
-they do not create records or change the current policy. Never invent IDs or measured results.
-Reuse saved results rather than repeating identical tasks. Accepted reports can be replayed to
-repair publication, but different terminal reports are rejected. Report acceptance is not promotion.
+Framework Baseline has a separate source-and-exit procedure: the Supervisor, not the Agent, commits an accepted V1.

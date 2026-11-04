@@ -556,7 +556,7 @@ class LongSessionRunner:
                     ):
                         # A second failed compaction can leave the provider Session
                         # unable to accept even a short continuation. Preserve the
-                        # draft and Runtime Journal, but rebuild conversational
+                        # draft and Runtime records, but rebuild conversational
                         # context once from the ordinary Episode prompt instead of
                         # discarding the whole Episode as an invalid handoff.
                         native.close()
@@ -572,12 +572,13 @@ class LongSessionRunner:
                             prompt.rstrip()
                             + "\n\n"
                             + f"Recover the SAME {stage_name} from the existing workspace and "
-                            "Runtime Journal. Claude's automatic context compaction failed after "
+                            "Runtime records. Claude's automatic context compaction failed after "
                             "the provider connection was lost. Preserve the current source tree, "
                             "Git checkpoints, measurements, and recorded research. Inspect the "
                             "durable state before doing new work; do not reset or repeat completed "
-                            "measurements. Finish the smallest remaining concrete steps and publish "
-                            f"the required terminal handoff. {completion_instruction.strip()}"
+                            "measurements. Continue with one small evidence-backed step at a time; "
+                            "do not treat the recovery itself as a terminal condition. "
+                            f"{completion_instruction.strip()}"
                         )
                         retry_resume = False
                         purpose = "compaction_recovery"

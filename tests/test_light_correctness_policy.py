@@ -1,9 +1,13 @@
 """Regression tests for Runtime-owned AKA-Light correctness coverage."""
 
 from contextlib import ExitStack
+import base64
+import io
 import json
 import os
+import re
 import subprocess
+import tarfile
 import tempfile
 import threading
 import unittest
@@ -31,16 +35,24 @@ from aka.light.acceptance.source_policy import (
     workspace_policy_block,
 )
 from aka.light.evaluation.gateway import (
+    COMMAND_WORKSPACE_MANIFEST,
+    _command_input_paths,
+    _make_input_bundle,
+    _requested_gateway_kind,
     _run_typed_gateway,
     build_parser,
     build_typed_request,
     evaluation_policy,
+    measurement_inputs,
+    requested_sync_paths,
+    validate_evaluation_options,
 )
 from aka.light.evaluation.hardware import hardware_directive
 from aka.light.evaluation.evaluation_failures import (
     embedded_candidate_wall_clock_timeouts,
 )
 from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES
+from aka.light.evaluation.public_result import canonical_result
 from aka.light.evaluation.projection import gateway_error_from_process
 from aka.light.evaluation.shapes import (
     effective_shape_batch_size,
@@ -56,22 +68,102 @@ from aka.light.execution.gateway_jobs import (
     execute_job,
     retry_kind,
 )
-from aka.light.runtime.server import RuntimeConfig, SupervisorRuntime
+from aka.light.runtime.server import (
+    RuntimeConfig,
+    SupervisorRuntime,
+    filter_options,
+    managed_gateway_help,
+    managed_gateway_argv,
+    parse_gateway,
+)
+from aka.light.runtime.catalog import PluginRegistry
+from aka.light.runtime.plugins import PluginError
 from aka.light.runtime.request_errors import AgentRequestError
 from aka.light.runtime.request_feedback import gateway_schema
-from aka.light.workflow.bootstrap import Campaign, framework_baseline_validation_command
+from aka.light.workflow.bootstrap import (
+    Campaign,
+    _FRAMEWORK_BASELINE_CORRECTNESS_CONTEXT_PATHS,
+    _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_MARKERS,
+    framework_baseline_workspace_contract,
+    framework_baseline_validation_command,
+)
 from aka.light.workflow.context import conversion_required, session_execution_policy
 from aka.light.workflow.plugin import Defaults as WORKFLOW_PLUGIN_DEFAULTS
 from aka.light.workflow.provider import WorkflowOptions
+from aka.light.workflow.output_limit import dependency_policy_recovery_prompt
 from aka.light.workflow.episode import LongHorizonCampaign
 from aka.light.workflow.search import SearchOptions
-from aka.light.workflow.session_io import _evaluation_performance_timeout
-from aka.light.workspace.sources import default_tree, install, pack
+from aka.light.workflow.session_io import (
+    _evaluation_performance_timeout,
+    _render as render_file_prompt,
+)
+from aka.light.workspace.sources import default_tree, install, instructions, pack
 from aka.light.workspace.episode import _claude_instructions
 from aka.legacy.workflow.cli_conversion import adapt_argv
 
 
 class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
+    def test_historical_abba_result_renames_both_git_kernel_identities(self):
+        result = canonical_result(
+            {
+                "agent_result": {
+                    "operation": "evaluate",
+                    "status": "completed",
+                    "result": {"correct": True},
+                    "gateway_record_id": "gateway-" + "1" * 32,
+                    "kernel_id": "a" * 40,
+                    "baseline_kernel_id": "b" * 40,
+                }
+            },
+            {"operation": "evaluate"},
+        )
+
+        self.assertEqual(result["candidate_kernel_commit_id"], "a" * 40)
+        self.assertEqual(result["baseline_kernel_commit_id"], "b" * 40)
+        self.assertNotIn("kernel_commit_id", result)
+        self.assertNotIn("kernel_id", result)
+        self.assertNotIn("baseline_kernel_id", result)
+
+    def test_single_candidate_result_keeps_unqualified_kernel_commit_identity(self):
+        result = canonical_result(
+            {
+                "agent_result": {
+                    "operation": "evaluate",
+                    "status": "completed",
+                    "result": {"correct": True},
+                    "gateway_record_id": "gateway-" + "1" * 32,
+                    "kernel_id": "a" * 40,
+                }
+            },
+            {"operation": "evaluate"},
+        )
+
+        self.assertEqual(result["kernel_commit_id"], "a" * 40)
+        self.assertNotIn("candidate_kernel_commit_id", result)
+
+    def test_new_abba_result_names_candidate_and_baseline_symmetrically(self):
+        result = canonical_result(
+            {
+                "exit_code": 0,
+                "stdout": "[sandbox] ABBA_JSON=" + json.dumps({
+                    "correct": True,
+                    "baseline": {"correct": True, "latency_us_geomean": 12.0},
+                    "candidate": {"correct": True, "latency_us_geomean": 10.0},
+                }) + "\n",
+                "stderr": "",
+            },
+            {"operation": "same_allocation_abba", "options": {}},
+            record_id="gateway-" + "1" * 32,
+            kernels={
+                "candidate": {"kernel_id": "a" * 40},
+                "baseline": {"kernel_id": "b" * 40},
+            },
+        )
+
+        self.assertEqual(result["candidate_kernel_commit_id"], "a" * 40)
+        self.assertEqual(result["baseline_kernel_commit_id"], "b" * 40)
+        self.assertNotIn("kernel_commit_id", result)
+
     def test_episode_claude_instructions_include_current_mode_policy(self):
         production = workspace_policy_block(
             "production",
@@ -86,6 +178,17 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("During development, you may use any language or DSL", projected)
         self.assertIn("final-candidate constraint, not a development-method restriction", projected)
         self.assertEqual(projected.count("ATREX_OPTIMIZATION_MODE_POLICY_BEGIN"), 1)
+
+        without_numerical = workspace_policy_block(
+            "production",
+            "Cuda",
+            source_checks_enabled=True,
+            specify_dsl=True,
+            numerical_validation_enabled=False,
+        )
+        self.assertIn("candidate_ready production candidate", without_numerical)
+        self.assertIn("When the optional Framework Baseline stage is enabled", without_numerical)
+        self.assertNotIn("Numerical review produces targeted", without_numerical)
 
         leaderboard = _claude_instructions(
             workspace_policy_block(
@@ -139,7 +242,6 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                     framework="Cuda",
                     dsl_context="- DSL: `Cuda`",
                     plugin_directive=lambda stage: "",
-                    research_board=lambda: {},
                     tool_runtime=SimpleNamespace(
                         pause_agent_during_requests=True
                     ),
@@ -159,6 +261,13 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 "T1 role: bounded exploitation" in prompt,
                 enabled,
             )
+            self.assertIn("PROGRESS.md", prompt)
+            self.assertNotIn("## Research Board", prompt)
+            self.assertIn("unfinished optimization WIP", prompt)
+            self.assertNotIn("active Direction and major-redesign WIP", prompt)
+            self.assertNotIn("high-upside Direction", prompt)
+            self.assertNotIn("selected Direction or optimization path", prompt)
+            self.assertNotIn("first failed Direction", prompt)
 
     def test_episode_prompt_has_one_workflow_and_modular_contracts(self):
         prompt_dir = (
@@ -171,9 +280,28 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         )
         episode = (prompt_dir / "episode.md").read_text(encoding="utf-8")
         self.assertEqual(episode.count("## Workflow"), 1)
+        self.assertNotIn("## Terms", episode)
+        self.assertLess(len(episode.split()), 400)
         self.assertIn("{{RESEARCH_MODULE_RULES}}", episode)
         self.assertIn("{{HANDOFF_CONTRACT}}", episode)
         self.assertIn("{{RUNTIME_WAIT_POLICY}}", episode)
+        self.assertIn("skills/runtime-records/SKILL.md", episode)
+        self.assertIn("Supervisor comparison base: `{{BASE_COMMIT}}`", episode)
+        self.assertIn("measurable candidate identity: clean Git HEAD", episode)
+        self.assertNotIn("Promoted campaign version", episode)
+        self.assertIn("Hardware: `{{ARCH}}`", episode)
+        self.assertIn("Gateway Records are measurement authority", episode)
+        self.assertIn("highest plausible full-workload latency impact", episode)
+        self.assertIn("bounded probe, not to discard a higher-upside path", episode)
+        self.assertIn("commit the complete candidate", episode)
+        self.assertIn("smallest measurement that resolves the current question", episode)
+        self.assertIn("Repeat `probe → candidate → measurement → revert/keep` cycles", episode)
+        self.assertNotIn("at most one local Direction `in_progress`", episode)
+        self.assertIn("Submit `episode-report` only when", episode)
+        self.assertIn("`cross_trajectory_share` is available only", episode)
+        self.assertNotIn("high-upside Direction", episode)
+        self.assertNotIn("selected Direction or optimization path", episode)
+        self.assertNotIn("{{RESEARCH_BOARD_SECTION}}", episode)
         for removed in (
             "{{MODE_POLICY}}",
             "{{EVALUATOR}}",
@@ -192,12 +320,371 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             fragment = (prompt_dir / name).read_text(encoding="utf-8")
             self.assertNotIn("## Workflow", fragment)
             self.assertNotIn("## Handoff", fragment)
+        self.assertIn(
+            "supporting_experiment_ids",
+            (prompt_dir / "episode_research.md").read_text(encoding="utf-8"),
+        )
+
+        baseline = (prompt_dir / "framework_baseline.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("existing SourceProvider layout", baseline)
+        self.assertIn("`WORKSPACE.md`", baseline)
+        self.assertIn("Reference version:", baseline)
+        self.assertIn("Hardware: `{{ARCH}}`", baseline)
+        self.assertIn("Wiki query is a knowledge request, not a Kernel measurement", baseline)
+        self.assertIn("Do not invoke GPU measurement, diagnostic, or custom-execution", baseline)
+        self.assertIn("Do not create a Git commit", baseline)
+        self.assertIn("Supervisor validates the worktree", baseline)
+        self.assertIn("returns gate diagnostics to a recovery Session", baseline)
+        self.assertIn("commits an accepted V1", baseline)
+        self.assertNotIn("recovery header", baseline)
+        self.assertNotIn("leave `git status` clean", baseline)
+        self.assertNotIn("rerun the bounded V1 smoke", baseline)
+
+        wiki_plugin = Path(__file__).resolve().parents[1] / "plugins/gpu-wiki"
+        wiki_baseline = (wiki_plugin / "framework_baseline.md").read_text(
+            encoding="utf-8"
+        )
+        wiki_common = (wiki_plugin / "instructions.md").read_text(
+            encoding="utf-8"
+        )
+        for wiki_prompt in (wiki_baseline, wiki_common):
+            self.assertIn("publicly disclosed Shape/domain facts", wiki_prompt)
+            self.assertIn("infer or request private Shape cases", wiki_prompt)
+        boundary = (prompt_dir / "sandbox_safety_boundary.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("selected SourceProvider layout", boundary)
+        self.assertIn("SourceProvider explicitly declares", boundary)
+        full_workflow = (prompt_dir / "sandbox_full_workflow.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("configured coverage, seeds and repetitions", full_workflow)
+        self.assertNotIn("five-case correctness", full_workflow)
+
+        claude = (
+            Path(__file__).resolve().parents[1]
+            / "src/aka/light/workspace/resources/reference/CLAUDE.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("selected SourceProvider layout", claude)
+        self.assertIn("public_shapes.json", claude)
+        self.assertIn("generated tensor values", claude)
+        self.assertIn("Runtime regenerates after accepted state changes", claude)
+        self.assertNotIn("continuously rewrites root `PROGRESS.md`", claude)
+
+        runtime_records = (
+            Path(__file__).resolve().parents[1]
+            / "src/aka/light/workspace/resources/skills/runtime-records/SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Multiple local Directions may be `in_progress`", runtime_records)
+        self.assertNotIn("at most three distinct Directions", runtime_records)
+        self.assertIn("not necessarily an immediate source edit", runtime_records)
+        self.assertIn("consequential decision it unlocks", runtime_records)
+        self.assertIn("Do not use it for Runtime/evaluator maintenance", runtime_records)
+        self.assertIn("genealogy only", (
+            Path(__file__).resolve().parents[1]
+            / "src/aka/light/workspace/resources/skills/runtime-records/references/journal.md"
+        ).read_text(encoding="utf-8"))
+        self.assertIn("does not inherit parent status", (
+            Path(__file__).resolve().parents[1]
+            / "src/aka/light/workspace/resources/skills/runtime-records/references/journal.md"
+        ).read_text(encoding="utf-8"))
+
+        for prompt_path in sorted(prompt_dir.glob("runtime_*.md")):
+            source = prompt_path.read_text(encoding="utf-8")
+            self.assertNotIn("supplemental numerical validation when enabled, and promotion", source)
+            self.assertNotIn("Report acceptance is a handoff, not promotion", source)
+            for language, body in re.findall(
+                r"```(json|jsonl)\n(.*?)\n```", source, flags=re.DOTALL
+            ):
+                if language == "json":
+                    json.loads(body)
+                else:
+                    for line in body.splitlines():
+                        if line.strip():
+                            json.loads(line)
+        self.assertIn("Report acceptance is a handoff, not promotion", episode)
+
+        agent_docs = [
+            *prompt_dir.glob("*.md"),
+            *(Path(__file__).resolve().parents[1]
+              / "src/aka/light/workspace/resources/skills/runtime-records").rglob("*.md"),
+            *(Path(__file__).resolve().parents[1]
+              / "src/aka/light/workspace/resources/skills/runtime-report").rglob("*.md"),
+            *(Path(__file__).resolve().parents[1]
+              / "src/aka/light/workspace/resources/skills/gpu-measurement").rglob("*.md"),
+        ]
+        for path in agent_docs:
+            source = path.read_text(encoding="utf-8")
+            self.assertNotRegex(source, r"gateway-\.\.\.")
+            self.assertNotRegex(source, r"experiment_\.\.\.")
+            self.assertNotRegex(source, r"direction_\.\.\.")
+
+        single_file_contract = instructions(None)
+        self.assertIn("## Single-file Kernel", single_file_contract)
+        self.assertIn("`kernel.py` is the complete candidate", single_file_contract)
+        self.assertIn("do not add auxiliary candidate sources", single_file_contract)
+
+        resource_dir = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "aka"
+            / "light"
+            / "workspace"
+            / "resources"
+            / "skills"
+        )
+        records_reference = (
+            resource_dir / "runtime-records" / "references" / "records.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("public_shapes.json", records_reference)
+        self.assertNotIn("examples. Shape IDs are opaque.", records_reference)
+        records_skill = (resource_dir / "runtime-records" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        measurement_skill = (resource_dir / "gpu-measurement" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        measurement_requests = (
+            resource_dir / "gpu-measurement" / "references" / "requests.md"
+        ).read_text(encoding="utf-8")
+        sandbox_boundary = (
+            prompt_dir / "sandbox_safety_boundary.md"
+        ).read_text(encoding="utf-8")
+        for source in (measurement_skill, measurement_requests, sandbox_boundary):
+            normalized = re.sub(r"\s+", " ", source)
+            self.assertIn("self-contained single-file probe", normalized)
+            self.assertIn("other workspace", normalized)
+        self.assertIn(
+            "Dev uploads only its declared inputs",
+            re.sub(r"\s+", " ", measurement_requests),
+        )
+        self.assertNotIn("contracted candidate is supplied", measurement_requests)
+        self.assertIn("Knowledge queries, when installed", records_skill)
+        report_skill = (resource_dir / "runtime-report" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("source-and-exit procedure", report_skill)
+        self.assertIn("Supervisor, not the Agent, commits an accepted V1", report_skill)
+        self.assertIn("`pivot` and `blocked` reports omit them", report_skill)
+        self.assertNotIn("smoke-and-exit procedure", report_skill)
+        self.assertLess(len(claude.split()), 700)
+        self.assertLess(len(records_skill.split()), 400)
+        self.assertLess(len(report_skill.split()), 250)
+
+        wiki_plugin = Path(__file__).resolve().parents[1] / "plugins/gpu-wiki"
+        wiki_episode = (wiki_plugin / "episode.md").read_text(encoding="utf-8")
+        wiki_common = (wiki_plugin / "instructions.md").read_text(encoding="utf-8")
+        self.assertIn("tools/sandbox.py --kind wiki-query", wiki_episode)
+        self.assertIn("skills/KernelWiki/SKILL.md", wiki_common)
+        self.assertIn("missing hardware or implementation fact", wiki_episode)
+        self.assertIn("runtime architecture {{ARCH}}", wiki_episode)
+        self.assertIn("skills/KernelWiki/SKILL.md", wiki_episode)
+        self.assertNotIn("aka.legacy.resources.cli", wiki_episode)
+        self.assertNotIn("aka.legacy.resources.cli", wiki_common)
+
+        numerical_review = (prompt_dir / "numerical_review.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("candidate/<actual-source-file>:location", numerical_review)
+        self.assertNotIn("candidate/kernel.py:location", numerical_review)
+
+        dependency_review = (
+            Path(__file__).resolve().parents[1]
+            / "src/aka/legacy/workflow/prompts/dependency_review.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("candidate/<replace-with-an-actual-file>:line-or-field", dependency_review)
+        self.assertIn("native manifest candidate", dependency_review)
+
+    def test_every_research_module_combination_renders_one_complete_prompt(self):
+        expected_heading = {
+            (): "## Research records",
+            ("directions",): "## Direction records",
+            ("experiments",): "## Experiment records",
+            ("directions", "experiments"): "## Direction and Experiment records",
+        }
+        for modules, heading in expected_heading.items():
+            with self.subTest(modules=modules), tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory)
+                base = SimpleNamespace(
+                    workspace=workspace,
+                    platform="L20D",
+                    arch="sm_103a",
+                    notes="none",
+                    research_records=bool(modules),
+                    research_modules=modules,
+                    search_coordinate=None,
+                    module_options=SimpleNamespace(goal_episodes=False),
+                    specify_dsl=True,
+                    framework="Cuda",
+                    dsl_context="- Required final candidate DSL: `Cuda`.",
+                    plugin_directive=lambda stage: "",
+                    tool_runtime=SimpleNamespace(pause_agent_during_requests=True),
+                )
+                prompt = LongHorizonCampaign(base)._prompt(
+                    episode=1,
+                    version=1,
+                    worktree=CandidateHandle(1, "a" * 40, "work", workspace),
+                    conversion_pending=False,
+                )
+                self.assertNotIn("{{", prompt)
+                self.assertLess(len(prompt.split()), 700)
+                self.assertEqual(prompt.count("## Workflow"), 1)
+                self.assertIn(heading, prompt)
+                self.assertIn("## Handoff", prompt)
+                self.assertIn("skills/runtime-records/SKILL.md", prompt)
+                if "experiments" in modules:
+                    self.assertIn("selected_experiment_id", prompt)
+                else:
+                    self.assertIn("gateway_record_ids", prompt)
+                if modules == ("directions",):
+                    self.assertIn("omit `supporting_experiment_ids`", prompt)
+
+    def test_pooled_prompt_does_not_enable_roles_when_coordinate_omits_the_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            base = SimpleNamespace(
+                workspace=workspace,
+                platform="L20D",
+                arch="sm_103a",
+                notes="none",
+                research_records=False,
+                research_modules=(),
+                search_coordinate={"epoch": 1, "trajectory": 2, "episode": 1},
+                module_options=SimpleNamespace(goal_episodes=False),
+                specify_dsl=True,
+                framework="Cuda",
+                dsl_context="- Required final candidate DSL: `Cuda`.",
+                plugin_directive=lambda stage: "",
+                tool_runtime=SimpleNamespace(pause_agent_during_requests=True),
+            )
+            prompt = LongHorizonCampaign(base)._prompt(
+                episode=1,
+                version=1,
+                worktree=CandidateHandle(1, "a" * 40, "work", workspace),
+                conversion_pending=False,
+            )
+        self.assertIn("Search location: Epoch 1, Trajectory 2, Episode 1", prompt)
+        self.assertNotIn("T2 role:", prompt)
+
+    def test_optional_conversion_and_ppu_prompt_fragments_render_completely(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            base = SimpleNamespace(
+                workspace=workspace,
+                platform="ZW-M890P",
+                arch="ppu15",
+                notes="none",
+                research_records=True,
+                research_modules=("directions", "experiments"),
+                search_coordinate=None,
+                module_options=SimpleNamespace(goal_episodes=False),
+                specify_dsl=True,
+                framework="Gluon",
+                dsl_context="- Required final candidate DSL: `Gluon`.",
+                plugin_directive=lambda stage: "",
+                tool_runtime=SimpleNamespace(pause_agent_during_requests=True),
+            )
+            prompt = LongHorizonCampaign(base)._prompt(
+                episode=2,
+                version=3,
+                worktree=CandidateHandle(2, "a" * 40, "work", workspace),
+                conversion_pending=True,
+            )
+        self.assertNotIn("{{", prompt)
+        self.assertIn("## Required conversion", prompt)
+        self.assertIn("## PPU diagnostics", prompt)
+        self.assertIn("within 5%", prompt)
+
+    def test_framework_review_prompt_is_complete_and_dsl_neutral(self):
+        prompt_path = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "aka"
+            / "light"
+            / "workflow"
+            / "prompts"
+            / "framework_baseline_correctness_review.md"
+        )
+        rendered = render_file_prompt(
+            prompt_path,
+            REVIEWER="Codex",
+            IMPLEMENTATION_TARGET="a Kernel in an evaluator-supported GPU DSL",
+            PLATFORM="L20D",
+            ARCH="sm_103a",
+        )
+        self.assertNotIn("{{", rendered)
+        self.assertIn("TARGET_IMPLEMENTATION_RISKS:", rendered)
+        self.assertIn("PRE_VALIDATION_CHECKS:", rendered)
+        self.assertIn("context/public_shapes.json", rendered)
+        self.assertIn("eventual implementation path", rendered)
+        self.assertNotIn("CUDA_IMPLEMENTATION_RISKS:", rendered)
+        with self.assertRaisesRegex(ValueError, "IMPLEMENTATION_TARGET"):
+            render_file_prompt(
+                prompt_path,
+                REVIEWER="Codex",
+                PLATFORM="L20D",
+                ARCH="sm_103a",
+            )
+        self.assertIn(
+            "metadata.json", _FRAMEWORK_BASELINE_CORRECTNESS_CONTEXT_PATHS
+        )
+        self.assertIn(
+            "public_shapes.json", _FRAMEWORK_BASELINE_CORRECTNESS_CONTEXT_PATHS
+        )
+        self.assertIn(
+            "TARGET_IMPLEMENTATION_RISKS:",
+            _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_MARKERS,
+        )
+
+    def test_plugin_prompt_fragments_reject_unresolved_placeholders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "episode.md").write_text(
+                "Hardware {{ARCH}}; missing {{UNDECLARED}}", encoding="utf-8"
+            )
+            registry = object.__new__(PluginRegistry)
+            registry.plugins = [SimpleNamespace(
+                root=root,
+                manifest={"instructions": {"episode": "episode.md"}},
+            )]
+            with self.assertRaisesRegex(PluginError, "UNDECLARED"):
+                registry.instructions("episode", ARCH="sm_103a")
+
+            (root / "episode.md").write_text(
+                "Hardware {{ARCH}}", encoding="utf-8"
+            )
+            self.assertIn(
+                "Hardware sm_103a",
+                registry.instructions("episode", ARCH="sm_103a"),
+            )
 
     def test_optional_dsl_settings_and_cli_normalization(self):
         settings = WorkflowSettings(platform="L20D", framework="Cuda")
         self.assertTrue(settings.specify_dsl)
+        self.assertEqual(settings.public_shapes, "all")
+        self.assertEqual(settings.framework_baseline, "never")
         with self.assertRaises(TypeError):
             WorkflowSettings(platform="L20D", framework="Cuda", specify_dsl=1)
+        for public_shapes in (0, 3, "all"):
+            self.assertEqual(
+                WorkflowSettings(
+                    platform="L20D",
+                    framework="Cuda",
+                    public_shapes=public_shapes,
+                ).public_shapes,
+                public_shapes,
+            )
+        for public_shapes in (-1, True, "everything"):
+            with self.assertRaisesRegex(
+                ValueError, "non-negative integer or 'all'"
+            ):
+                WorkflowSettings(
+                    platform="L20D",
+                    framework="Cuda",
+                    public_shapes=public_shapes,
+                )
 
         launch = decode_launch(
             adapt_argv(
@@ -214,7 +701,36 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         )
         self.assertFalse(launch.request.settings.specify_dsl)
         self.assertEqual(launch.request.settings.framework, "")
+        self.assertEqual(launch.request.settings.framework_baseline, "never")
+        self.assertEqual(launch.request.settings.public_shapes, "all")
         self.assertIn("specify_dsl", launch.provided_settings)
+
+        launch = decode_launch(
+            adapt_argv(
+                [
+                    "--op-dir",
+                    str(Path.cwd()),
+                    "--platform",
+                    "L20D",
+                    "--framework",
+                    "Cuda",
+                    "--public-shapes",
+                    "all",
+                ]
+            )
+        )
+        self.assertEqual(launch.request.settings.public_shapes, "all")
+        self.assertIn("public_shapes", launch.provided_settings)
+
+    def test_campaign_skips_framework_baseline_by_default(self):
+        campaign = Campaign(
+            name="operator",
+            kernel_demo="reference.py",
+            platform="cuda",
+            framework="cuda",
+        )
+        self.assertEqual(campaign.framework_baseline, "never")
+        self.assertEqual(campaign._framework_baseline_decision(), ("skip", ""))
 
     def test_open_dsl_policy_is_neutral_and_disables_conversion(self):
         directive = optimization_mode_directive(
@@ -1036,6 +1552,24 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             5,
         )
 
+    def test_island_search_is_the_default_and_can_be_disabled_explicitly(self):
+        defaults = WorkflowOptions().search
+        self.assertIsInstance(defaults, SearchOptions)
+        self.assertEqual(defaults.trajectories, 3)
+        self.assertEqual(defaults.max_parallel_episodes, 3)
+        self.assertEqual(defaults.episodes_per_trajectory, 1)
+        self.assertEqual(defaults.synchronization, "synchronous")
+        self.assertFalse(defaults.role_specialization)
+        self.assertEqual(WORKFLOW_PLUGIN_DEFAULTS["search"], {
+            "epochs": 10,
+            "trajectories": 3,
+            "episodes_per_trajectory": 1,
+            "max_parallel_episodes": 3,
+            "synchronization": "synchronous",
+            "role_specialization": False,
+        })
+        self.assertIsNone(WorkflowOptions(search={}).search)
+
     def test_full_and_shape_selected_evaluates_use_five_cases(self):
         self.assertEqual(
             evaluation_policy(["python3", "test_kernel.py"])["num_correctness_cases"],
@@ -1062,6 +1596,175 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         schema = gateway_schema("run", parser)
         self.assertNotIn("--multi-seed", schema["cli_options"])
         self.assertNotIn("--evaluation-step-timeout", schema["cli_options"])
+        self.assertNotIn("--shape-batch-size", schema["cli_options"])
+        self.assertIn("--comparison-run-timeout", schema["cli_options"])
+        arguments = parser.parse_args(["--kind", "run", "--multi-seed", "0"])
+        with self.assertRaisesRegex(ValueError, "Runtime-owned"):
+            validate_evaluation_options(arguments)
+        help_text = " ".join(parser.format_help().split())
+        self.assertIn("Evaluate always uses 5 total correctness cases", help_text)
+        self.assertNotIn("Additional correctness seeds (Atrex-Bench default: 5", help_text)
+
+    def test_managed_env_uses_campaign_hardware_only(self):
+        parser = build_parser()
+        schema = gateway_schema("env", parser)
+        self.assertEqual(schema["cli_options"], {"--kind": {"const": "env"}})
+        parsed = parse_gateway(["--kind", "env"])
+        argv = managed_gateway_argv(["--kind", "env"], parsed, "L20D")
+        self.assertEqual(
+            argv,
+            ["--kind", "env", "--env-gpu", "L20D", "--env-capabilities"],
+        )
+        effective = parse_gateway(argv)
+        self.assertEqual(effective.env_gpu, "L20D")
+        self.assertTrue(effective.env_capabilities)
+        with self.assertRaisesRegex(ValueError, "Supervisor-owned"):
+            filter_options(
+                ["--kind", "env", "--env-gpu", "B200"],
+                frozenset(),
+                frozenset({"--env-gpu"}),
+            )
+
+    def test_managed_help_exposes_only_agent_controlled_options(self):
+        response = managed_gateway_help(["--kind", "env", "--help"])
+        self.assertIsNotNone(response)
+        payload = json.loads(response["stdout"])
+        schema = payload["managed_runtime_request_schema"]
+        self.assertEqual(schema["cli_options"], {"--kind": {"const": "env"}})
+        self.assertNotIn("--hardware", response["stdout"])
+        self.assertNotIn("--env-gpu", response["stdout"])
+        self.assertIsNone(managed_gateway_help(["--kind", "env"]))
+
+    def test_kernel_queries_name_the_git_commit_identity_explicitly(self):
+        parser = build_parser()
+        parsed = parser.parse_args([
+            "--kind", "kernel-read",
+            "--kernel-commit-id", "a" * 40,
+            "--output-path", "scratch/peer",
+        ])
+        self.assertEqual(parsed.kernel_commit_id, "a" * 40)
+        schema = gateway_schema("kernel-read", parser)
+        self.assertIn("--kernel-commit-id", schema["required_options"])
+        self.assertNotIn("--kernel-id", schema["cli_options"])
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--kind", "kernel-pareto-frontier"])
+
+    def test_command_round_trips_agent_workspace_through_scratch(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "--kind", "command", "--", "python3", "scratch/probe.py",
+        ])
+        self.assertEqual(_requested_gateway_kind(args.kind, args.command), "dev")
+        self.assertEqual(requested_sync_paths(args), ("scratch",))
+        schema = gateway_schema("command", parser)
+        self.assertEqual(schema["cli_options"]["--kind"], {"const": "command"})
+        self.assertIn("Agent-visible workspace", schema["command"])
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+            workspace = Path(temporary)
+            (workspace / "scratch").mkdir()
+            (workspace / "tools").mkdir()
+            (workspace / "scratch/probe.py").write_text("print('probe')\n")
+            (workspace / "tools/helper.py").write_text("VALUE = 1\n")
+            (workspace / "README.md").write_text("# task\n")
+            (workspace / "private.json").write_text("{}\n")
+            (workspace / COMMAND_WORKSPACE_MANIFEST).write_text(json.dumps([
+                "README.md", "scratch/probe.py", "tools/helper.py",
+            ]))
+
+            selected = _command_input_paths(
+                workspace,
+                args.command,
+                full_workspace=True,
+            )
+            self.assertIn("README.md", selected)
+            self.assertIn("scratch/probe.py", selected)
+            self.assertIn("tools/helper.py", selected)
+            self.assertNotIn("private.json", selected)
+            self.assertNotIn(COMMAND_WORKSPACE_MANIFEST, selected)
+
+            request, frozen = measurement_inputs(
+                args,
+                workspace,
+                {},
+                identity_key=b"command-test-key",
+            )
+            self.assertEqual(request["operation"], "dev")
+            self.assertEqual(request["options"]["workspace_mode"], "full_roundtrip")
+            self.assertIn("scratch/probe.py", request["inputs"])
+            self.assertIn("tools/helper.py", request["inputs"])
+            self.assertIn("README.md", frozen)
+            self.assertNotIn("private.json", request["inputs"])
+
+            encoded, _, _ = _make_input_bundle(
+                workspace,
+                16 * 1024 * 1024,
+                selected,
+                include_documentation=True,
+            )
+            with tarfile.open(fileobj=io.BytesIO(base64.b64decode(encoded)), mode="r:gz") as archive:
+                names = set(archive.getnames())
+            self.assertIn("README.md", names)
+            self.assertIn("scratch/probe.py", names)
+            self.assertIn("tools/helper.py", names)
+            self.assertNotIn("private.json", names)
+
+        args = parser.parse_args([
+            "--kind", "command", "--sync", "profiles/probe", "--", "true",
+        ])
+        self.assertEqual(requested_sync_paths(args), ("scratch", "profiles/probe"))
+        args = parser.parse_args([
+            "--kind", "command", "--no-sync", "--", "true",
+        ])
+        self.assertEqual(requested_sync_paths(args), ())
+
+    def test_gateway_request_schemas_describe_each_command_route_accurately(self):
+        parser = build_parser()
+        run = gateway_schema("run", parser)["command"]
+        profile = gateway_schema("profile", parser)["command"]
+        dev = gateway_schema("dev", parser)["command"]
+        command = gateway_schema("command", parser)["command"]
+
+        self.assertIn("test_kernel.py", run)
+        self.assertNotIn("profile_driver.py", run)
+        self.assertIn("profile_driver.py", profile)
+        self.assertNotIn("test_kernel.py", profile)
+        self.assertIn("through stateless Dev", dev)
+        self.assertIn("For a custom probe", dev)
+        self.assertIn("not official Evaluate evidence", dev)
+        self.assertIn("--input", dev)
+        self.assertIn("Required argv", command)
+        self.assertIn("synchronizes scratch/ back", command)
+        with self.assertRaisesRegex(ValueError, "requires argv after --"):
+            parse_gateway(["--kind", "command"])
+        self.assertEqual(
+            parse_gateway(["--kind", "command", "--", "true"]).command,
+            ["--", "true"],
+        )
+
+    def test_direction_only_schema_hides_experiment_association_fields(self):
+        from aka.light.runtime.request_feedback import journal_schema
+
+        proposal = journal_schema(
+            "direction_update",
+            {"action": "propose"},
+            research_records=True,
+            directions_enabled=True,
+            experiments_enabled=False,
+        )
+        self.assertNotIn(
+            "derived_from_experiment_ids", proposal["properties"]
+        )
+        closure = journal_schema(
+            "direction_update",
+            {"action": "complete"},
+            research_records=True,
+            directions_enabled=True,
+            experiments_enabled=False,
+        )
+        self.assertNotIn(
+            "supporting_experiment_ids", closure["properties"]
+        )
 
     def test_supervisor_gates_do_not_expose_multi_seed(self):
         framework = framework_baseline_validation_command(1, atrex_bench=True)
@@ -1104,9 +1807,59 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             Path(__file__).resolve().parents[1]
             / "src/aka/light/workflow/prompts/framework_baseline.md"
         ).read_text(encoding="utf-8")
-        self.assertIn("{{RUNTIME_WAIT_POLICY}}", template)
-        for removed in ("{{AGENT_RUNTIME}}", "{{SANDBOX}}", "{{EVALUATOR}}"):
+        for removed in (
+            "{{RUNTIME_WAIT_POLICY}}",
+            "{{AGENT_RUNTIME}}",
+            "{{SANDBOX}}",
+            "{{EVALUATOR}}",
+        ):
             self.assertNotIn(removed, template)
+
+        bootstrap_source = (
+            Path(__file__).resolve().parents[1]
+            / "src/aka/light/workflow/bootstrap.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("by WORKSPACE.md and the active SourceProvider", bootstrap_source)
+        self.assertNotIn("Finish the preserved V1 implementation inside kernel.py", bootstrap_source)
+        self.assertIn("run or repeat the configured authoritative gates", bootstrap_source)
+        self.assertNotIn("already run the authoritative full-workload gates", bootstrap_source)
+
+    def test_framework_baseline_workspace_contract_uses_active_sourceprovider(self):
+        from aka.light.workspace.sources import default_tree, install, pack
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            policy, files = default_tree(
+                {"kernel.py": b"def run(*args):\n    return args\n"}
+            )
+            install(workspace, pack(files, policy), bind=True)
+
+            contract = framework_baseline_workspace_contract(workspace).decode()
+
+        self.assertIn("# Framework Baseline workspace contract", contract)
+        self.assertIn("Editable kernel.py and impl/ form one Kernel", contract)
+        self.assertIn("References there to Runtime measurement or reporting", contract)
+        self.assertIn("Do not create Git commits, submit episode-report", contract)
+        self.assertNotIn("trajectory-private local Git repository", contract)
+
+    def test_dependency_recovery_preserves_sourceprovider_and_mode_contracts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prompt = dependency_policy_recovery_prompt(
+                Path(directory),
+                "Continue the task.",
+                "",
+                "session",
+                "blocked command",
+                1,
+                2,
+                stage_name="Episode",
+            )
+        self.assertIn("existing candidate source", prompt)
+        self.assertIn("current optimization-mode policy", prompt)
+        self.assertIn("candidate_source_snapshot_sha256", prompt)
+        self.assertIn('"reason": "local_execution_boundary_violation"', prompt)
+        self.assertNotIn('"reason": "dependency_policy_violation"', prompt)
+        self.assertNotIn("Use only provisioned dependencies", prompt)
 
     def test_light_policy_defers_correctness_rules_to_task_configuration(self):
         directive = optimization_mode_directive("production", "CUDA")
@@ -1117,6 +1870,16 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("benchmark correctness contract is authoritative", directive)
         self.assertIn("Do not assume, invent, or override", directive)
         self.assertIn("one passing check never overrides another reported failure", directive)
+
+    def test_light_policy_describes_disabled_numerical_validation_truthfully(self):
+        directive = optimization_mode_directive(
+            "production", "CUDA", numerical_validation_enabled=False
+        )
+        self.assertNotIn("Numerical review produces targeted", directive)
+        open_dsl = optimization_mode_directive(
+            "production", "", specify_dsl=False, numerical_validation_enabled=False
+        )
+        self.assertIn("Supplemental numerical review is disabled", open_dsl)
 
     def test_pinned_production_dsl_only_constrains_submitted_candidate(self):
         cuda = optimization_mode_directive("production", "Cuda")
@@ -1129,7 +1892,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("third-party compute libraries", cuda)
         self.assertIn("dynamically loaded external implementations", cuda)
         self.assertIn("temporary prototype", cuda)
-        self.assertIn("remove them from the submitted Kernel source tree", cuda)
+        self.assertIn("Remove them from the submitted Kernel source tree", cuda)
         self.assertIn("wrapping another DSL as the selected framework", cuda)
 
         triton = optimization_mode_directive("production", "Triton")
@@ -1189,6 +1952,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 framework="Cuda",
                 atrex_bench_root=str(root),
                 work_dir=str(root / "work"),
+                public_shapes=0,
             )
             campaign.workspace.mkdir(parents=True)
             (campaign.workspace / "agent_problem.json").write_text(
@@ -1205,6 +1969,117 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "shapes.json"):
                 campaign._assert_generalized_inputs_are_private()
+
+    def test_generalized_workspace_materializes_configured_public_shapes(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            operator = root / "operator"
+            operator.mkdir()
+            (operator / "reference.py").write_text("class Model: pass\n")
+            shapes = {
+                str(index): {
+                    "init_kwargs": {"rank": index},
+                    "input_kwargs": {"size": index},
+                }
+                for index in (8, 2, 1, 5)
+            }
+            (operator / "shapes.json").write_text(json.dumps(shapes))
+            public_problem = {
+                "schema_version": "atrex.agent_problem.v1",
+                "objective": "Optimize the operator.",
+                "evaluation": {
+                    "exact_cases": "private",
+                    "development_cases_are_evaluation_cases": False,
+                },
+                "operator_contract": {},
+                "shape_domain": {},
+                "invariants": [],
+                "coverage_regimes": [],
+            }
+            (operator / "agent_problem.json").write_text(json.dumps(public_problem))
+            campaign = Campaign(
+                name="operator",
+                kernel_demo=str(operator / "reference.py"),
+                platform="L20D",
+                framework="Cuda",
+                atrex_bench_root=str(root),
+                work_dir=str(root / "work"),
+                public_shapes=2,
+            )
+            campaign.workspace.mkdir(parents=True)
+            campaign._ensure_agent_problem()
+            campaign._ensure_public_shapes()
+            projection = json.loads(
+                (campaign.workspace / "public_shapes.json").read_text()
+            )
+            self.assertEqual(list(projection["shapes"]), ["1", "2"])
+            self.assertTrue(campaign.shape_ids_are_opaque)
+            campaign._assert_generalized_inputs_are_private()
+            self.assertIn("first 2 of 4", campaign._shape_disclosure_prompt())
+
+            campaign.public_shapes = "all"
+            with self.assertRaisesRegex(RuntimeError, "start a fresh workspace"):
+                campaign._ensure_public_shapes()
+
+    def test_generalized_workspace_can_expose_all_or_no_shapes(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            operator = root / "operator"
+            operator.mkdir()
+            (operator / "reference.py").write_text("class Model: pass\n")
+            (operator / "shapes.json").write_text(
+                json.dumps(
+                    {
+                        "2": {"init_kwargs": {}, "input_kwargs": {"x": 2}},
+                        "1": {"init_kwargs": {}, "input_kwargs": {"x": 1}},
+                    }
+                )
+            )
+            problem = {
+                "schema_version": "atrex.agent_problem.v1",
+                "objective": "Optimize.",
+                "evaluation": {
+                    "exact_cases": "private",
+                    "development_cases_are_evaluation_cases": False,
+                },
+                "operator_contract": {},
+                "shape_domain": {},
+                "invariants": [],
+                "coverage_regimes": [],
+            }
+            (operator / "agent_problem.json").write_text(json.dumps(problem))
+
+            hidden = Campaign(
+                name="hidden",
+                kernel_demo=str(operator / "reference.py"),
+                platform="L20D",
+                framework="Cuda",
+                atrex_bench_root=str(root),
+                work_dir=str(root / "hidden-work"),
+                public_shapes=0,
+            )
+            hidden.workspace.mkdir(parents=True)
+            hidden._ensure_agent_problem()
+            hidden._ensure_public_shapes()
+            self.assertFalse((hidden.workspace / "public_shapes.json").exists())
+            self.assertTrue(hidden.shape_ids_are_opaque)
+            hidden._assert_generalized_inputs_are_private()
+
+            complete = Campaign(
+                name="complete",
+                kernel_demo=str(operator / "reference.py"),
+                platform="L20D",
+                framework="Cuda",
+                atrex_bench_root=str(root),
+                work_dir=str(root / "all-work"),
+                public_shapes="all",
+            )
+            complete.workspace.mkdir(parents=True)
+            complete._ensure_agent_problem()
+            complete._ensure_public_shapes()
+            self.assertFalse(complete.shape_ids_are_opaque)
+            complete._assert_generalized_inputs_are_private()
+            self.assertIn("exposes all 2", complete._shape_disclosure_prompt())
 
     def test_typed_eval_forwards_metadata_without_light_tolerance_defaults(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

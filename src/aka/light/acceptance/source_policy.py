@@ -20,6 +20,7 @@ def optimization_mode_directive(
     *,
     source_checks_enabled: bool = True,
     specify_dsl: bool = True,
+    numerical_validation_enabled: bool = True,
 ) -> str:
     """Use the same production rules, without requiring Agent Git/private-file access."""
     if mode == "leaderboard":
@@ -38,16 +39,24 @@ def optimization_mode_directive(
         )
     if not specify_dsl and mode == "production":
         review_policy = (
-            "The Supervisor independently reviews source provenance, dependencies, loaders and "
-            "manifest consistency without imposing a selected DSL.\n"
+            "The Supervisor independently reviews a Framework Baseline candidate when that optional "
+            "stage is enabled, and each candidate_ready submission, for source provenance, "
+            "dependencies, loaders and manifest "
+            "consistency without imposing a selected DSL.\n"
             if source_checks_enabled
             else "Independent source review is disabled for this task; correctness and the open "
             "DSL policy still apply.\n"
         )
+        numerical_policy = (
+            "Supplemental numerical review is enabled; measured probe failures are returned for repair.\n"
+            if numerical_validation_enabled
+            else "Supplemental numerical review is disabled for this campaign.\n"
+        )
         return (
             "## Optimization mode: production (open DSL)\n\n"
             "No DSL is prescribed. Choose any supported GPU implementation framework, or a "
-            "compatible mixture, from evidence. Every production candidate must implement the "
+            "compatible mixture, from evidence. Every final production candidate submitted for "
+            "Framework Baseline admission or through a candidate_ready report must implement the "
             "operator's GPU computation directly with self-authored kernels. Compiler bindings, "
             "header discovery, ABI/launch plumbing and ordinary non-compute utilities are allowed; "
             "in the submitted candidate, PyTorch/ATen compute fallbacks, prebuilt "
@@ -55,30 +64,57 @@ def optimization_mode_directive(
             "and external implementation loading are forbidden. During development, these same "
             "mechanisms may be used as temporary references, probes, microbenchmarks or prototypes, "
             "but they must not remain in the submitted Kernel source tree or runtime compute path. "
-            "Keep `solution.json` "
-            "consistent with the actual implementation.\n"
+            "When the active SourceProvider declares `solution.json` as editable candidate metadata, "
+            "keep it consistent with the actual implementation; otherwise do not edit it.\n"
             "Validate correctness with the immutable evaluator over the full workload. Read "
             "`metadata.json` when present; every declared correctness condition must pass. "
-            + review_policy
+            + review_policy + numerical_policy
         )
-    return workflow_policy.optimization_mode_directive(
-        mode, framework, source_checks_enabled=source_checks_enabled,
-        correctness_instruction=(
-            "Validate correctness with the immutable evaluator over the full workload. "
-            "Before reasoning about numerical acceptance, read workspace `metadata.json` when it "
-            "is present; its benchmark correctness contract is authoritative. Do not assume, "
-            "invent, or override a tolerance formula or threshold. Treat every returned "
-            "correctness check as required for that task; one passing check never overrides "
-            "another reported failure. Use the returned per-shape and per-case diagnostics to repair the Kernel. "
-            "Never edit trusted inputs, tolerances, metadata, or evaluation records; correctness "
-            "must pass before promotion.\n"
-        ),
-        numerical_feedback_instruction=(
-            "Use the Supervisor's returned numerical feedback and Gateway Records; "
-            "fix the implementation, rerun ordinary validation and resubmit the report. "
-            "Input/reference/probe failures are validation blockers, not Kernel failures. "
-        ),
-        candidate_submission_instruction="Before submitting the report",
+    if not source_checks_enabled:
+        return workflow_policy.optimization_mode_directive(
+            mode,
+            framework,
+            source_checks_enabled=False,
+            numerical_validation_enabled=numerical_validation_enabled,
+        )
+
+    if framework_key(framework) == "triton":
+        framework_rule = (
+            "The submitted candidate's implementation framework is exactly **Triton** until the "
+            "Supervisor starts the mandatory Triton-to-Gluon phase; later submissions must use "
+            "Gluon. Do not submit a candidate that switches early, switches back, or mixes compute DSLs."
+        )
+    else:
+        framework_rule = (
+            f"The submitted candidate's implementation framework is exactly **{framework}**. "
+            "This is a hard final-candidate constraint, not a development-method restriction."
+        )
+    numerical_rule = (
+        "Numerical review produces targeted Supervisor-run probes. A measured failure is returned "
+        "for repair; fix the candidate, rerun ordinary validation, and resubmit without changing "
+        "trusted probes or thresholds."
+        if numerical_validation_enabled
+        else "Supplemental numerical review is disabled for this campaign."
+    )
+    return (
+        "## Optimization mode: production (hard gate)\n\n"
+        f"- {framework_rule}\n"
+        "- During development, you may use any language or DSL, PyTorch/ATen, prebuilt or "
+        "third-party implementations, compiler probes, and temporary prototypes. Remove them from "
+        "the submitted Kernel source tree and runtime compute path unless they satisfy the final policy.\n"
+        "- V0 is the only admitted PyTorch baseline exception. When the optional Framework Baseline "
+        "stage is enabled, its accepted V1 and every candidate_ready production candidate must "
+        "implement the GPU computation directly with self-authored Kernel code.\n"
+        "- The independent Production Review examines actual final use. Compiler, header, ABI, "
+        "launch, and non-compute support plumbing is allowed; PyTorch/ATen compute fallback, "
+        "prebuilt Kernels, third-party compute libraries performing core computation, dynamically loaded external implementations, "
+        "hidden dispatch, wrapping another DSL as the selected framework, and ambiguous provenance are rejected.\n"
+        "- Validate the immutable full workload. Before reasoning about numerical acceptance, read "
+        "workspace `metadata.json` when present; its benchmark correctness contract is authoritative. "
+        "Do not assume, invent, or override tolerances; one passing check never overrides another reported failure.\n"
+        f"- {numerical_rule}\n"
+        "- Keep editable `solution.json`, when present, consistent with the implementation. The "
+        "Supervisor returns review or validation failures for repair before accepting the report.\n"
     )
 
 
@@ -88,12 +124,14 @@ def workspace_policy_block(
     *,
     source_checks_enabled: bool = True,
     specify_dsl: bool = True,
+    numerical_validation_enabled: bool = True,
 ) -> str:
     directive = optimization_mode_directive(
         mode,
         framework,
         source_checks_enabled=source_checks_enabled,
         specify_dsl=specify_dsl,
+        numerical_validation_enabled=numerical_validation_enabled,
     ).rstrip()
     return f"{POLICY_BEGIN}\n\n{directive}\n\n{POLICY_END}\n"
 
@@ -107,6 +145,7 @@ def install_workspace_policy(
     update_tracked_files: bool = True,
     source_checks_enabled: bool = True,
     specify_dsl: bool = True,
+    numerical_validation_enabled: bool = True,
 ) -> None:
     """Persist immutable mode, framework, and optional campaign runtime identity.
 
@@ -168,6 +207,9 @@ def install_workspace_policy(
     if state.get("source_checks_enabled") != source_checks_enabled:
         state["source_checks_enabled"] = source_checks_enabled
         state_changed = True
+    if state.get("numerical_validation_enabled") != numerical_validation_enabled:
+        state["numerical_validation_enabled"] = numerical_validation_enabled
+        state_changed = True
     if state_changed:
         state_path.write_text(
             json.dumps(state, indent=2) + "\n",
@@ -186,6 +228,7 @@ def install_workspace_policy(
         policy_framework,
         source_checks_enabled=source_checks_enabled,
         specify_dsl=specify_dsl,
+        numerical_validation_enabled=numerical_validation_enabled,
     )
     if POLICY_BEGIN in current and POLICY_END in current:
         before, remainder = current.split(POLICY_BEGIN, 1)

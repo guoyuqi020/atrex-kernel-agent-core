@@ -1,8 +1,12 @@
 # Episode Report with research recording disabled
 
 Direction and research Experiment writes are disabled for this Episode. GPU measurement records
-are still saved automatically. Do not call legacy Journal append/finalize or write control handoffs.
-Do not manage Git or supply a Commit ID: the Supervisor seals the validated candidate.
+are still saved automatically. Do not invent or edit Runtime control files; use only the documented
+`episode-report` request for handoff.
+Commit the complete SourceProvider-declared candidate before a Kernel-bound measurement or `candidate_ready`
+report and keep the worktree clean. Runtime derives the Kernel commit ID from the full Git HEAD;
+do not place a Commit ID in the report. Pivot and blocked reports do not nominate the worktree and
+do not require a clean candidate commit.
 
 ## Candidate
 
@@ -12,13 +16,15 @@ Run the ordinary evaluator prescribed by the current phase:
 python3 tools/sandbox.py --kind run --no-sync
 ```
 
-Inspect the result using `record-read` if necessary. Leave the exact measured source tree in
-place as described by `WORKSPACE.md`, including the unchanged adapter and all implementation files.
+Inspect root `records/<gateway_record_id>.json`; use `record-read` only if that projection is
+unavailable. Leave the exact measured candidate paths
+committed at HEAD as declared by the SourceProvider contract in `WORKSPACE.md`.
 Save `scratch/episode-report.json`, replacing the example ID with the returned `gateway_record_id`:
 
 ```json
 {
   "status": "candidate_ready",
+  "handoff_reason": "direction_terminal",
   "summary": "The candidate passes full evaluation and is ready for independent verification",
   "gateway_record_ids": ["gateway-11111111111111111111111111111111"]
 }
@@ -33,22 +39,33 @@ must be a completed, passing standard full Evaluate for the byte-identical curre
 Matching historical results are allowed. Profile, Dev, ABBA, and correctness-only checks alone
 cannot qualify the candidate. Do not supply `selected_experiment_id`.
 
-The Supervisor performs or reuses its mandatory acceptance checks before committing. In production
-this includes the configured numerical validation. Acceptance still precedes independent ABBA
+The Supervisor performs or reuses its configured acceptance checks before accepting and sealing the committed source. In production
+this includes source-policy review and supplemental numerical validation when those modules are enabled. Acceptance still precedes independent ABBA
 verification and does not guarantee promotion. Success returns `status: "accepted"`.
 
+In pooled search, a reusable measured checkpoint uses the same candidate shape with
+`status=candidate_ready` and `handoff_reason=cross_trajectory_share`.
+
 ## Pivot or blocker
+
+Do not report the first promotable checkpoint. Continue bounded edit/measurement cycles until the
+selected optimization path is completed or exhausted, a pooled search must publish a reusable
+checkpoint backed by a passing standard full Evaluate of the exact committed source, or a concrete
+blocker prevents further work.
 
 An exhausted approach can finish with:
 
 ```json
-{"status": "pivot", "summary": "The tested approach did not provide a useful improvement"}
+{"status":"pivot","handoff_reason":"direction_terminal","summary":"The tested approach did not provide a useful improvement"}
 ```
+
+Here `direction_terminal` is a compatibility enum for a terminal optimization path; Direction
+recording is disabled and no Direction object is required.
 
 An infrastructure or authority blocker additionally requires a nonempty `blocker`:
 
 ```json
-{"status": "blocked", "summary": "Cannot validate the candidate", "blocker": "GPU service unavailable"}
+{"status":"blocked","handoff_reason":"blocked","summary":"Cannot validate the candidate","blocker":"GPU service unavailable"}
 ```
 
 Neither state accepts `gateway_record_ids`. Both allow the existing optional

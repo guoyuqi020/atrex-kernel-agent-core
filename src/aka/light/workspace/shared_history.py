@@ -1,4 +1,4 @@
-"""Filtered Epoch Git history exchange between isolated Agent repositories."""
+"""Exact candidate-source Git history exchange between isolated Agent repositories."""
 
 from __future__ import annotations
 
@@ -15,45 +15,6 @@ MAX_EXPORT_BYTES = 32 * 1024 * 1024
 MAX_EXPORT_COMMITS = 512
 
 
-def _with_sanitized_commit_messages(data: bytes) -> bytes:
-    """Strip Agent-authored commit prose while preserving the fast-export graph."""
-    output: list[bytes] = []
-    offset = 0
-    record = b""
-    commit_message_pending = False
-    while offset < len(data):
-        end = data.find(b"\n", offset)
-        if end < 0:
-            output.append(data[offset:])
-            break
-        line = data[offset:end + 1]
-        offset = end + 1
-        if line.startswith(b"commit "):
-            record = b"commit"
-            commit_message_pending = True
-        elif line == b"blob\n":
-            record = b"blob"
-            commit_message_pending = False
-        if line.startswith(b"data "):
-            try:
-                length = int(line[5:].strip())
-            except ValueError as error:
-                raise ValueError("Git export contains an unsupported data record") from error
-            if length < 0 or offset + length > len(data):
-                raise ValueError("Git export contains a truncated data record")
-            payload = data[offset:offset + length]
-            offset += length
-            replacement = payload
-            if record == b"commit" and commit_message_pending:
-                replacement = b"Agent source checkpoint (message withheld by Runtime)\n"
-                commit_message_pending = False
-            output.append(b"data " + str(len(replacement)).encode() + b"\n")
-            output.append(replacement)
-            continue
-        output.append(line)
-    return b"".join(output)
-
-
 def _run(workspace: Path, *args: str, input_bytes: bytes | None = None,
          check: bool = True) -> subprocess.CompletedProcess[bytes]:
     environment = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
@@ -61,6 +22,30 @@ def _run(workspace: Path, *args: str, input_bytes: bytes | None = None,
         ["git", *args], cwd=workspace, env=environment, input=input_bytes,
         capture_output=True, check=check,
     )
+
+
+def _validate_source_history(workspace: Path, ref: str) -> int:
+    """Ensure an exact-ID bundle contains only valid candidate-source commits."""
+    from aka.light.workspace.sources import Artifact, from_git
+
+    commits = _run(workspace, "rev-list", ref).stdout.decode().splitlines()
+    if len(commits) > MAX_EXPORT_COMMITS:
+        raise ValueError(f"Shared Git history exceeds {MAX_EXPORT_COMMITS} commits")
+    for commit in commits:
+        artifact = Artifact(from_git(workspace, commit))
+        allowed = {*artifact.materialized_files, ".gitignore"}
+        tree = set(
+            _run(workspace, "ls-tree", "-r", "--name-only", commit)
+            .stdout.decode()
+            .splitlines()
+        )
+        unexpected = sorted(tree - allowed)
+        if unexpected:
+            raise ValueError(
+                "Shared Git history contains non-Kernel paths: "
+                + ", ".join(unexpected[:8])
+            )
+    return len(commits)
 
 
 def export_epoch(
@@ -71,32 +56,21 @@ def export_epoch(
     epoch: int,
     audit_path: Path,
 ) -> dict:
-    """Export only candidate-source history under a namespaced peer ref."""
+    """Export exact Git objects so peer kernel_commit_id values remain valid."""
     head = _run(workspace, "rev-parse", "HEAD").stdout.decode().strip()
     ref = f"refs/atrex/shared/T{trajectory}/e{epoch:04d}/head"
     _run(workspace, "update-ref", ref, head)
-    process = _run(
-        workspace,
-        "fast-export",
-        "--signed-tags=strip",
-        "--tag-of-filtered-object=drop",
-        ref,
-        "--",
-        "kernel.py",
-        "impl",
-        check=False,
-    )
-    if process.returncode != 0:
-        raise RuntimeError(process.stderr.decode(errors="replace").strip())
-    data = _with_sanitized_commit_messages(process.stdout)
-    commits = data.count(b"\ncommit ") + (1 if data.startswith(b"commit ") else 0)
-    if len(data) > MAX_EXPORT_BYTES or commits > MAX_EXPORT_COMMITS:
-        raise ValueError(
-            f"Shared Git history exceeds {MAX_EXPORT_BYTES} bytes / {MAX_EXPORT_COMMITS} commits"
-        )
+    commits = _validate_source_history(workspace, ref)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(".tmp")
-    temporary.write_bytes(data)
+    temporary.unlink(missing_ok=True)
+    result = _run(workspace, "bundle", "create", str(temporary), ref, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode(errors="replace").strip())
+    size = temporary.stat().st_size
+    if size > MAX_EXPORT_BYTES:
+        temporary.unlink(missing_ok=True)
+        raise ValueError(f"Shared Git history exceeds {MAX_EXPORT_BYTES} bytes")
     os.replace(temporary, destination)
     receipt = {
         "schema_version": 1,
@@ -104,7 +78,7 @@ def export_epoch(
         "epoch": epoch,
         "source_ref": ref,
         "original_agent_commit": head,
-        "bytes": len(data),
+        "bytes": size,
         "commit_count": commits,
     }
     durable_write_json(audit_path, receipt)
@@ -118,7 +92,7 @@ def import_exports(
     notes: Mapping[str, Mapping[str, object]] | None = None,
     audit_path: Path,
 ) -> dict:
-    """Import filtered streams into a trajectory bundle without exposing peer repos."""
+    """Import exact, source-scoped peer commits without exposing peer repositories."""
     exports = tuple(exports)
     if not exports:
         return {"schema_version": 1, "imports": []}
@@ -151,13 +125,8 @@ def import_exports(
         imported = []
         mappings = []
         for path in exports:
-            data = path.read_bytes()
-            if len(data) > MAX_EXPORT_BYTES:
+            if path.stat().st_size > MAX_EXPORT_BYTES:
                 raise ValueError("Shared Git export exceeds its size limit")
-            result = _run(workspace, "fast-import", "--force", input_bytes=data, check=False)
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr.decode(errors="replace").strip())
-            imported.append(path.name)
             audit = path.with_suffix(".json")
             try:
                 metadata = json.loads(audit.read_text(encoding="utf-8"))
@@ -165,11 +134,28 @@ def import_exports(
                 metadata = {}
             source_ref = metadata.get("source_ref")
             original = metadata.get("original_agent_commit")
-            imported_commit = None
-            if isinstance(source_ref, str):
-                resolved = _run(workspace, "rev-parse", source_ref, check=False)
-                if resolved.returncode == 0:
-                    imported_commit = resolved.stdout.decode().strip()
+            if not isinstance(source_ref, str) or not source_ref.startswith("refs/atrex/shared/"):
+                raise ValueError("Shared Git bundle has no valid namespaced source ref")
+            result = _run(
+                workspace,
+                "-c",
+                "protocol.file.allow=always",
+                "fetch",
+                str(path),
+                f"+{source_ref}:{source_ref}",
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.decode(errors="replace").strip())
+            imported.append(path.name)
+            resolved = _run(workspace, "rev-parse", source_ref, check=False)
+            imported_commit = (
+                resolved.stdout.decode().strip() if resolved.returncode == 0 else None
+            )
+            if imported_commit != original:
+                raise ValueError(
+                    "Shared Git import changed the peer commit ID; Kernel identity is invalid"
+                )
             mappings.append({
                 "export": path.name,
                 "source_ref": source_ref,

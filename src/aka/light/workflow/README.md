@@ -10,8 +10,9 @@ Workspace operations are delegated to the selected CandidateWorkspace implementa
 `journal.py` and `protocol.py` consume controller projections of the private Runtime Journal.
 `recorded_verifier.py` requests or reuses evidence through the selected Tool Runtime.
 
-The Agent receives a Git-free draft and submits `episode-report`. A passing report seals exact
-measured source; subsequent draft edits cannot change that commit. Acceptance remains separate
+The Agent receives one trajectory-persistent local Git repository and submits `episode-report`.
+The repository is an untrusted engineering aid; a passing report still seals exact measured source
+in an Episode-scoped Supervisor worktree, so subsequent edits cannot change that candidate. Acceptance remains separate
 from promotion. Failed, pivoted or blocked Episodes preserve their research evidence without
 replacing the incumbent Kernel. Private checkpoints and promotion audits support restart and
 operator repair; canonical `memory/vN.json` records remain Supervisor-owned.

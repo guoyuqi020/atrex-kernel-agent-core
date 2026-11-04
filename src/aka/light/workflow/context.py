@@ -72,6 +72,7 @@ def link_episode_runtime(campaign: Campaign, workspace: Path) -> None:
         update_tracked_files=False,
         source_checks_enabled=campaign.source_checks_enabled,
         specify_dsl=campaign.specify_dsl,
+        numerical_validation_enabled=campaign.module_options.numerical_validation,
     )
 
 

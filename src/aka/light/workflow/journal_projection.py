@@ -662,13 +662,13 @@ def validate_terminal(
     try:
         value = load(path)
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-        return f"episode journal is missing or invalid: {exc}"
+        return f"published Episode handoff state is missing or invalid: {exc}"
     if value.get("episode") != expected_episode:
-        return "episode journal identity does not match the active episode"
+        return "published Episode handoff identity does not match the active Episode"
     if value.get("base_commit") != base_commit or value.get("episode_branch") != branch:
-        return "episode journal base commit or branch does not match"
+        return "published Episode handoff base commit or branch does not match"
     if value.get("state") != state:
-        return "episode journal state does not match handoff"
+        return "published Episode handoff status does not match"
     verified_runtime_projection = False
     research_records = True
     experiments_enabled = True
@@ -676,17 +676,17 @@ def validate_terminal(
         # This flag is Agent-writable: it requests verification, never grants
         # an exception. Only the controller can supply the private-state reader.
         if runtime_journal_loader is None:
-            return "runtime journal projection requires private controller verification"
+            return "published Episode handoff state requires private Runtime verification"
         try:
             private = runtime_journal_loader()
         except (OSError, ValueError, RuntimeError) as exc:
-            return f"cannot verify private runtime journal: {exc}"
+            return f"cannot verify private Runtime Episode state: {exc}"
         if (
             not isinstance(private, dict)
             or private.get("schema_version") != 2
             or private.get("runtime_managed") is not True
         ):
-            return "private runtime journal is missing or invalid"
+            return "private Runtime Episode state is missing or invalid"
         expected = {
             "episode": expected_episode,
             "base_commit": base_commit,
@@ -694,16 +694,21 @@ def validate_terminal(
             "state": state,
         }
         if any(private.get(key) != item for key, item in expected.items()):
-            return "private runtime journal identity or state does not match handoff"
+            return "private Runtime Episode identity or status does not match the handoff"
         if not private.get("finalized_at") or private.get("state") not in TERMINAL_STATUSES:
-            return "private runtime journal is not finalized"
+            return "private Runtime Episode state is not finalized"
         if private["finalized_at"] != value.get("finalized_at"):
-            return "episode journal finalization does not match private runtime journal"
+            return "published handoff finalization does not match private Runtime Episode state"
         if private.get("candidate_commit") != value.get("candidate_commit"):
-            return "episode journal candidate_commit does not match private runtime journal"
+            return "published handoff candidate_commit does not match private Runtime Episode state"
+        if private.get("candidate_kernel_id") != value.get("candidate_kernel_commit_id"):
+            return (
+                "published handoff candidate_kernel_commit_id does not match "
+                "private Runtime Episode state"
+            )
         research_records = private.get("research_records", True)
         if type(research_records) is not bool or value.get("research_records", True) is not research_records:
-            return "episode journal research-recording policy does not match private runtime journal"
+            return "published handoff research policy does not match private Runtime Episode state"
         raw_modules = private.get("tool_modules")
         if raw_modules is None:
             # Runtime Journals created before module-specific recording treated
@@ -715,22 +720,35 @@ def validate_terminal(
             or len(set(raw_modules)) != len(raw_modules)
             or set(raw_modules) - {"directions", "experiments"}
         ):
-            return "private runtime journal has invalid tool_modules"
+            return "private Runtime Episode state has invalid tool_modules"
         else:
             modules = tuple(raw_modules)
         if bool(modules) is not research_records:
-            return "private runtime journal research policy disagrees with tool_modules"
+            return "private Runtime Episode research policy disagrees with tool_modules"
         experiments_enabled = "experiments" in modules
         if not research_records:
             if private.get("direction_events") or private.get("experiments"):
-                return "private runtime journal contains disabled research records"
+                return "private Runtime Episode state contains disabled research records"
             # Direct citations replace Experiment selection, not the trusted
             # report. Never let the writable projection substitute evidence.
-            for key in ("outcome", "candidate_kernel_digest", "acceptance_checks", "direction_events"):
+            for key in (
+                "outcome",
+                "candidate_kernel_digest",
+                "acceptance_checks",
+                "direction_events",
+            ):
                 if value.get(key) != private.get(key):
-                    return f"episode journal {key} does not match private runtime journal"
+                    return f"published handoff {key} does not match private Runtime Episode state"
+            if value.get("candidate_kernel_commit_id") != private.get("candidate_kernel_id"):
+                return (
+                    "published handoff candidate_kernel_commit_id does not match "
+                    "private Runtime Episode state"
+                )
         experiment_ids = []
-        for label, journal in (("private runtime journal", private), ("episode journal", value)):
+        for label, journal in (
+            ("private Runtime Episode state", private),
+            ("published Episode handoff state", value),
+        ):
             rows = journal.get("experiments")
             if not isinstance(rows, list):
                 return f"{label} has invalid experiments"
@@ -747,9 +765,9 @@ def validate_terminal(
             experiment_ids.append(ids)
         private_ids, projected_ids = experiment_ids
         if private_ids - projected_ids:
-            return "episode journal omits private runtime experiments"
+            return "published Episode handoff omits private Runtime Experiments"
         if projected_ids - private_ids:
-            return "episode journal contains unknown runtime experiments"
+            return "published Episode handoff contains unknown Runtime Experiments"
         verified_runtime_projection = True
     experiments = value.get("experiments")
     if not isinstance(experiments, list) or (
@@ -761,13 +779,13 @@ def validate_terminal(
             )
         )
     ):
-        return "episode journal has no structured experiments"
+        return "published Episode handoff has no structured Experiments"
     outcome = value.get("outcome")
     if not isinstance(outcome, dict) or not str(outcome.get("summary", "")).strip():
-        return "episode journal has no terminal outcome summary"
+        return "published Episode handoff has no terminal outcome summary"
     directions = outcome.get("next_directions", [])
     if not isinstance(directions, list) or any(not isinstance(item, str) for item in directions):
-        return "episode journal next_directions is invalid"
+        return "published Episode handoff next_directions is invalid"
     if "accepted_ppu_diagnostics" in outcome:
         normalized, errors = normalize_accepted_ppu_diagnostics(
             outcome["accepted_ppu_diagnostics"]
@@ -779,9 +797,18 @@ def validate_terminal(
         if errors:
             return "; ".join(errors)
     if not value.get("finalized_at"):
-        return "episode journal is not finalized"
+        return "published Episode handoff is not finalized"
     if state == "candidate_ready" and value.get("candidate_commit") != candidate_commit:
-        return "episode journal candidate_commit does not match handoff"
+        return "published Episode handoff candidate_commit does not match"
+    if verified_runtime_projection and state == "candidate_ready" and (
+        not isinstance(value.get("candidate_kernel_commit_id"), str)
+        or re.fullmatch(
+            r"[0-9a-f]{40}(?:[0-9a-f]{24})?",
+            value["candidate_kernel_commit_id"],
+        )
+        is None
+    ):
+        return "published Episode handoff has no valid candidate_kernel_commit_id"
     return ""
 
 

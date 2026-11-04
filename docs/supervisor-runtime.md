@@ -36,12 +36,13 @@ python3 tools/sandbox.py --kind run --no-sync
 python3 tools/sandbox.py --kind run --mode correctness_only --no-sync
 python3 tools/sandbox.py --kind profile --profile-shape-id SHAPE_ID --no-sync
 python3 tools/sandbox.py --kind dev --input scratch/probe.py --no-sync -- python3 scratch/probe.py
+python3 tools/sandbox.py --kind command -- python3 scratch/experiment.py
 python3 tools/sandbox.py --kind env
 ```
 
 | Operation | Meaning |
 | --- | --- |
-| Evaluate (`run`) | Full or correctness-only evaluator request; native candidate checks default to six cases per shape |
+| Evaluate (`run`) | Full or correctness-only evaluator request; native candidate checks use five cases per Shape |
 | ABBA (`run --baseline-path ...`) | Native comparison against an exact baseline source snapshot |
 | Profile | Profiler evidence for a selected shape; not correctness or promotion evidence |
 | Dev | Bounded exploratory commands; a source-bound record does not prove the command measured that source |
@@ -64,8 +65,8 @@ a Python file or that any exploratory comparison can be reused for promotion.
 ## Public results and original GPU errors
 
 GPU calls and `record-read` return a single JSON object containing `operation`,
-`status`, `result`, `gateway_record_id`, and `kernel_id` when source-bound.
-ABBA is an Evaluate result with `result.comparison` and `baseline_kernel_id`.
+`status`, `result`, `gateway_record_id`, and `kernel_commit_id` when source-bound.
+ABBA is an Evaluate result with `result.comparison` and `baseline_kernel_commit_id`.
 Dev output lives inside `result.stdout`, `result.stderr`, and its exit code.
 
 A successful historical read exits zero even if the saved evaluator rejected the candidate.

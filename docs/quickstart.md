@@ -45,9 +45,10 @@ The operator directory and AKA's `--repo-root` are separate inputs.
 
 In production mode, a supplied `agent_problem.json` provides the generalized public contract.
 Otherwise a trusted preprocessing session derives it from the evaluator-owned inputs.
-Optimization sessions receive the public contract; detailed shapes and generators stay private
-and are injected by the Supervisor during evaluation. Diagnostic feedback retains useful
-case identifiers and errors with private dimensions redacted.
+`public_shapes` independently controls exact Shape disclosure in both optimization modes: `0`
+exposes none, a positive integer exposes the canonical prefix, and `all` exposes every Shape
+(the current default). Evaluator generators remain Supervisor-owned. Diagnostic feedback retains
+useful case identifiers and errors while redacting inputs not selected for public disclosure.
 
 The default `--optimization-mode leaderboard` exposes the benchmark contract and allows
 the permissive optimization policy. Select `production` explicitly for production review.
@@ -95,11 +96,13 @@ Version and token budgets apply per dispatched campaign.
 
 1. Resolve the selected providers, freeze the problem/runtime inputs, and create or resume
    a campaign below `--workspace`.
-2. Evaluate V0 from the selected initial source. Production normally enables a framework
-   baseline V1 through `--framework-baseline auto`; an imported source tree uses its
-   pinned seed. `always` and `never` explicitly select baseline behavior.
-3. Start an Episode in a managed Git-free draft. The agent researches, edits, profiles,
-   evaluates, and submits an `episode-report` citing measurement record IDs.
+2. Evaluate V0 from the selected initial source. By default, optimization Episodes start
+   directly from that measured V0. Use `--framework-baseline auto` or `always` only when
+   a separate framework bring-up Session and pinned V1 are required.
+3. Start an Episode in the trajectory's stable Agent Git repository. The agent researches,
+   edits, profiles, evaluates, and submits an `episode-report` citing measurement record
+   IDs. Local Git history, uncommitted work, `scratch/`, tools, and Skills continue across
+   Episodes; Runtime capabilities and shared evidence are refreshed in place.
 4. Validate the exact source and required correctness/production evidence, seal it, and
    compare it to the incumbent through native same-allocation ABBA.
 5. Promote only a geometric-mean latency reduction strictly above
@@ -123,14 +126,15 @@ Save a composition patch, then pass `--patch /path/to/options.json` before `--`:
       "generate_memory": true,
       "episode_timeout_seconds": 14400
     }},
-    {"id": "light_journal", "config": {"research_records": true}}
+    {"id": "light_journal", "config": {"tool_modules": ["directions"]}}
   ]
 }
 ```
 
-This example enables supplemental numerical probes, generated memory, and research
-annotations. All three are disabled by default. Standard evaluator correctness,
-measurement records, report validation, and ABBA remain required with them disabled.
+This example keeps the default supplemental numerical probes, enables generated memory, adds a
+four-hour Episode limit, and selects Direction-only research recording. Direction and Experiment
+modules are both enabled by default; use `[]` for report-only mode. Standard evaluator correctness,
+measurement records, report validation, and ABBA remain required regardless of these options.
 
 A patch replaces the provider's **whole configuration**; omitted values take provider
 defaults. A Workflow patch used by `aka optimize` must retain `"startup": true` to
@@ -170,7 +174,9 @@ Use [Legacy](legacy-workflow.md) for campaigns needing that verification path.
 - Resume with the original workspace, composition, source layout, and frozen resources.
   Accepted job IDs and completed ABBA batches are reconciled before further GPU execution.
 
-Use a new workspace when switching Legacy/Light or serial/pooled search. Do not edit
+Light uses three persistent search islands by default; set the Workflow plugin's `search`
+configuration to `{}` for an explicit serial run. Use a new workspace when switching
+Legacy/Light or serial/island search. Do not edit
 locks, private records, or job checkpoints to bypass an identity failure.
 See [execution recovery](measurement-records.md#failure-and-recovery-policy) and
 [promotion repair](supervisor-promotion.md#promotion-evidence-and-recovery).

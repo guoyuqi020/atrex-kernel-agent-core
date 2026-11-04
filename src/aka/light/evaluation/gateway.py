@@ -180,6 +180,8 @@ from aka.light.evaluation.evaluation_feedback import (
 )
 
 DEFAULT_SYNC_PATHS = ("profiles",)
+COMMAND_SYNC_PATHS = ("scratch",)
+COMMAND_WORKSPACE_MANIFEST = ".atrex_command_workspace.json"
 INPUT_SKIP_DIRS = {
     ".git",
     "__pycache__",
@@ -605,6 +607,8 @@ def _make_input_bundle(
     input_paths: Iterable[str] = (),
     injected_inputs: dict[str, Path] | None = None,
     injected_payloads: dict[str, bytes] | None = None,
+    *,
+    include_documentation: bool = False,
 ) -> tuple[str, int, list[str]]:
     """Return a base64 tarball containing only explicitly selected inputs."""
     from aka.light.workspace.sources import collect, policy_at
@@ -627,7 +631,10 @@ def _make_input_bundle(
         if (
             arcname in seen
             or arcname in INPUT_SKIP_PATHS
-            or path.suffix in INPUT_SKIP_SUFFIXES
+            or (
+                path.suffix in INPUT_SKIP_SUFFIXES
+                and not (include_documentation and path.suffix == ".md")
+            )
             or arcname not in selected_inputs
         ):
             return
@@ -681,13 +688,12 @@ def _make_input_bundle(
         for arcname, payload in tree_sources.items():
             add_payload(tf, payload, arcname)
         add_tree(tf, workspace)
-        # Optimization workspaces receive tools/ as a symlink.  Materialize the
-        # small tool directory so remote profile commands are self-contained.
-        workspace_tools = workspace / "tools"
-        if workspace_tools.is_symlink() or not workspace_tools.exists():
-            from aka.light.workspace.resource_catalog import resources
-            for name, source in resources("tools"):
-                add_file(tf, source, name)
+        # Materialize selected Runtime-owned tools even when tools/ also contains
+        # Agent-authored helpers. add_file keeps an Agent file with the same
+        # already-added path and the control clients remain in INPUT_SKIP_PATHS.
+        from aka.light.workspace.resource_catalog import resources
+        for name, source in resources("tools"):
+            add_file(tf, source, name)
         # ``skills/`` is normally a runtime symlink and is intentionally skipped during the
         # workspace walk.  Materialize only explicitly selected skill files so a profiling
         # snapshot can use its backend on the worker without uploading every installed skill.
@@ -789,6 +795,8 @@ def _command_input_paths(
     workspace: Path,
     command: list[str],
     explicit_inputs: Iterable[str] = (),
+    *,
+    full_workspace: bool = False,
 ) -> frozenset[str]:
     """Build the minimal allowlist for a non-evaluator sandbox command.
 
@@ -799,6 +807,36 @@ def _command_input_paths(
     """
     parts = _command_parts(command)
     selected: set[str] = set()
+    if full_workspace:
+        manifest = workspace / COMMAND_WORKSPACE_MANIFEST
+        if manifest.is_file():
+            try:
+                values = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                raise ValueError(f"invalid command workspace manifest: {error}") from error
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                raise ValueError("invalid command workspace manifest: expected a path array")
+            for value in values:
+                normalized = _safe_relative(value)
+                if (workspace / normalized).is_file():
+                    selected.add(normalized)
+        else:
+            # Standalone use has no Supervisor staging manifest. Apply the same
+            # bounded/no-follow traversal used by the transport and let its
+            # skip lists remove local control state.
+            selected.update(
+                path.relative_to(workspace).as_posix()
+                for path in _walk_files(workspace)
+            )
+
+        # Built-in tools are normally exposed through a local symlink and are
+        # therefore absent from the staged Agent snapshot. Select their names so
+        # _make_input_bundle can materialize the safe Runtime-owned copies.
+        from aka.light.workspace.resource_catalog import resources
+        selected.update(
+            name for name, _ in resources("tools")
+            if name not in INPUT_SKIP_PATHS
+        )
     from aka.light.workspace.sources import policy_at
     if policy_at(workspace) is not None:
         selected.update(_declared_candidate_sources(workspace))
@@ -840,6 +878,19 @@ def _command_input_paths(
         if (workspace / harness_dir).is_dir():
             selected.update(_expand_workspace_input(workspace, harness_dir))
     return frozenset(selected)
+
+
+def requested_sync_paths(args) -> tuple[str, ...]:
+    """Resolve Agent-visible output roots for one sandbox request."""
+    if args.no_sync:
+        return ()
+    values = list(args.sync or ())
+    if args.kind == "command":
+        values = [*COMMAND_SYNC_PATHS, *values]
+    elif not values:
+        values = list(DEFAULT_SYNC_PATHS)
+    # Preserve order while avoiding duplicate archive extraction/publication.
+    return tuple(dict.fromkeys(_safe_relative(value) for value in values))
 
 
 def _standard_command_name(value: str, names: set[str]) -> str | None:
@@ -1171,6 +1222,8 @@ def _typed_workspace_limitation(
 
 
 def _requested_gateway_kind(requested: str, command: list[str]) -> str:
+    if requested == "command":
+        return "dev"
     if requested != "auto":
         return requested
     if _is_test_kernel_command(command):
@@ -1631,6 +1684,7 @@ if [[ -e "${runtime_parts[0]}" ]]; then
     fi
 fi
 cd workspace
+mkdir -p scratch profiles
 set +e
 bash ../__atrex_command.sh
 command_status=$?
@@ -1821,17 +1875,21 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
     )
     parser.add_argument(
         "--kind",
-        choices=("auto", "run", "profile", "dev", "check", "disassemble", "env",
-                 "record-read", "kernel-read", "kernel-records", "kernel-pareto-frontier"),
+        choices=("auto", "run", "profile", "dev", "command", "check", "disassemble", "env",
+                 "record-read", "kernel-read", "kernel-records"),
         default="auto",
         help=(
             "Gateway interface to use. auto routes test_kernel.py to run, profiler "
             "wrappers to profile, and other commands to dev (default: auto). Typed "
-            "jobs fall back to dev only when their source contract is unsupported."
+            "jobs fall back to dev only when their source contract is unsupported. "
+            "command uploads a bounded engineering projection of the Agent workspace and returns scratch/."
         ),
     )
     parser.add_argument("--record-id", help="Recorded Gateway result to read (no GPU submission)")
-    parser.add_argument("--kernel-id", help="Kernel identity to read or list measurements for")
+    parser.add_argument(
+        "--kernel-commit-id",
+        help="Full Agent Git commit ID whose Kernel source or measurements should be read",
+    )
     parser.add_argument("--output-path", help="Write Kernel source to a workspace-relative scratch/ file")
     parser.add_argument(
         "--gateway-profile",
@@ -1932,7 +1990,7 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
                 "ATREX_EVAL_SHAPE_BATCH_SIZE", str(DEFAULT_EVAL_SHAPE_BATCH_SIZE)
             )
         ),
-        help="Maximum Atrex-Bench shapes per concurrent eval job (default: 4).",
+        help=f"Maximum Atrex-Bench shapes per concurrent eval job (default: {DEFAULT_EVAL_SHAPE_BATCH_SIZE}).",
     )
     parser.add_argument(
         "--evaluation-step-timeout",
@@ -2009,8 +2067,8 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
         metavar="PATH",
         help=(
             "Additional required workspace file or directory for a non-evaluator command "
-            "(repeatable). Commands receive referenced paths and any contracted candidate "
-            "source tree; the full workspace is never uploaded implicitly."
+            "(repeatable). Dev receives referenced paths and the contracted candidate; "
+            "command already receives the bounded engineering workspace projection."
         ),
     )
     parser.add_argument(
@@ -2051,7 +2109,11 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
                         help="Evaluation version label, e.g. v3 (--kind run, no explicit command).")
     parser.add_argument(
             "--multi-seed", type=int, default=None,
-            help="Additional correctness seeds (Atrex-Bench default: 5, targeted Shape smoke: 0); shorthand --kind run only.",
+            help=(
+                "Reserved Runtime control; Agent Evaluate requests cannot set it. "
+                f"Atrex-Bench Evaluate always uses {CORRECTNESS_CASES} total correctness cases "
+                "(one base case plus four additional cases)."
+            ),
         )
     parser.add_argument(
             "--shape-id", action="append", default=[],
@@ -3820,6 +3882,11 @@ def validate_evaluation_options(args: argparse.Namespace) -> None:
             raise ValueError("--profile-shape-id must be a non-empty opaque ID from a saved evaluation")
     if getattr(args, "comparison_run_timeout", None) is not None and not args.baseline_path:
         raise ValueError("--comparison-run-timeout requires --baseline-path")
+    if args.multi_seed is not None:
+        raise ValueError(
+            "--multi-seed is Runtime-owned and cannot be set by the Agent; "
+            f"Evaluate always uses {CORRECTNESS_CASES} correctness cases"
+        )
     options = _top_level_evaluation_options(args)
     if not options:
         return
@@ -3832,7 +3899,7 @@ def validate_evaluation_options(args: argparse.Namespace) -> None:
             f"Top-level {names} cannot be combined with an explicit command. "
             "Omit the command to use the evaluator shorthand, or move these options "
             "after test_kernel.py in the explicit command, e.g. "
-            "--kind run -- python3 test_kernel.py --multi-seed 3. "
+            "--kind run -- python3 test_kernel.py --timed-runs 100 --no-memory. "
             "Do not specify evaluator controls in both places."
         )
 
@@ -4202,7 +4269,7 @@ def _run_typed_gateway(
 
 def _main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.kind in {"record-read", "kernel-read", "kernel-records", "kernel-pareto-frontier"}:
+    if args.kind in {"record-read", "kernel-read", "kernel-records"}:
         raise SystemExit("sandbox: record queries require tools/sandbox.py inside a live Campaign Session")
     try:
         validate_evaluation_options(args)
@@ -4329,13 +4396,7 @@ def _main(argv: list[str] | None = None) -> int:
         return health.returncode
     try:
         command = _command_text(args.command)
-        sync_paths = (
-            []
-            if args.no_sync
-            else [
-                _safe_relative(path) for path in (args.sync or list(DEFAULT_SYNC_PATHS))
-            ]
-        )
+        sync_paths = list(requested_sync_paths(args))
         if any(PurePosixPath(path).parts[0] not in {"profiles", "scratch"} for path in sync_paths):
             raise ValueError("--sync must be inside profiles/ or scratch/")
     except ValueError as exc:
@@ -4472,6 +4533,7 @@ def _main(argv: list[str] | None = None) -> int:
                 workspace,
                 args.command,
                 args.input,
+                full_workspace=args.kind == "command",
             )
         except ValueError as exc:
             raise SystemExit(f"sandbox: {exc}") from exc
@@ -4492,6 +4554,7 @@ def _main(argv: list[str] | None = None) -> int:
             selected_inputs,
             injected_inputs,
             injected_payloads,
+            include_documentation=args.kind == "command",
         )
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise SystemExit(f"sandbox: cannot prepare evaluator inputs: {exc}") from exc
@@ -4968,7 +5031,12 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
         validate_comparison(args)
     evaluator = kind == "run" or bool(baseline_path) or _is_numerical_probe_command(command)
     selected = set(_evaluation_input_paths(workspace, command) if evaluator else
-                   _command_input_paths(workspace, command, args.input))
+                   _command_input_paths(
+                       workspace,
+                       command,
+                       args.input,
+                       full_workspace=args.kind == "command",
+                   ))
     from aka.light.workspace.sources import measurement_paths
     candidate_paths, source_snapshots = measurement_paths(workspace, baseline_path)
     selected.update(candidate_paths)
@@ -4977,9 +5045,14 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
     for value in (args.evaluation_input_path, args.evaluation_shapes_path):
         if value:
             selected.add(_safe_relative(value))
-    # Typed Check/Profile/Disassemble also depend on the exact construction/input
-    # contract even when their command does not name the evaluator.
-    private = _private_evaluator_inputs(workspace, environment=environment)
+    # Evaluations and Typed Check/Profile/Disassemble depend on the exact private
+    # construction/input contract. Ad-hoc Dev/Command jobs must neither upload it
+    # nor let hidden inputs affect their task identity.
+    private = (
+        _private_evaluator_inputs(workspace, environment=environment)
+        if evaluator or kind in TYPED_KINDS
+        else {}
+    )
     selected.update(private)
     for name in ("reference.py", "input.py", "shapes.json", "metadata.json", "roofline.json",
                  "definition.json", "workload.jsonl", "solution.json", "config.json"):
@@ -4988,9 +5061,24 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
     files = {}
     for name in sorted(selected):
         path = private.get(name, workspace / name)
+        trusted_resource = False
+        if not path.is_file() and name.startswith("tools/"):
+            # Full-workspace Command materializes safe Runtime-owned tools that
+            # are intentionally not copied into the staged Agent snapshot. Bind
+            # their exact bytes into the task identity as well as the upload.
+            try:
+                from aka.light.workspace.resource_catalog import resource
+                path = resource(name)
+                trusted_resource = True
+            except ValueError:
+                pass
         if not path.is_file():
             continue
-        data = read_regular_bytes(path, limit=16 * 1024 * 1024 + 1)
+        data = (
+            path.read_bytes()
+            if trusted_resource
+            else read_regular_bytes(path, limit=16 * 1024 * 1024 + 1)
+        )
         if len(data) > 16 * 1024 * 1024 or sum(map(len, files.values())) + len(data) > 64 * 1024 * 1024:
             raise ValueError("Measurement inputs exceed the snapshot limit")
         files[name] = data
@@ -5023,7 +5111,8 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
             normalized.append(item)
         index += 1
     options = {key: value for key, value in vars(args).items() if key not in {
-        "workspace", "command", "version", "sync", "no_sync", "dry_run", "output_path", "record_id", "kernel_id",
+        "workspace", "command", "version", "sync", "no_sync", "dry_run", "output_path", "record_id",
+        "kernel_commit_id",
         "multi_seed", "timed_runs", "shape_id", "env", "ssh_init", "url",
     }}
     # Values may be secrets. Requests with custom environment are non-cacheable.
@@ -5031,6 +5120,7 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
     options["custom_environment_names"] = sorted(item.split("=", 1)[0] for item in args.env or [])
     options["ssh_init_present"] = bool(args.ssh_init)
     options["kind"] = kind
+    options["workspace_mode"] = "full_roundtrip" if args.kind == "command" else "minimal"
     options["command"] = normalized
     if operation in {"evaluate", "same_allocation_abba"}:
         options["measurement_defaults"] = measurement_defaults()

@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """Session-scoped HTTP client; GPU/Wiki authority stays in the Supervisor.
 
-Existing GPU command syntax is preserved, for example:
-  python3 tools/sandbox.py --kind run --no-sync -- python3 test_kernel.py --no-memory
-  python3 tools/sandbox.py --kind profile --no-sync -- python3 profile_driver.py
+Preferred typed GPU commands select their managed evaluator inputs automatically:
+  python3 tools/sandbox.py --kind run --no-sync
+  python3 tools/sandbox.py --kind profile --no-sync
+An explicit command after ``--`` is an operation-specific override; use it only when the installed
+GPU-measurement Skill documents that exact form.
+Custom execution examples:
   python3 tools/sandbox.py --kind dev --input scratch/probe.py -- python3 scratch/probe.py
+  python3 tools/sandbox.py --kind command -- python3 scratch/probe.py
 Additional typed operations: check, disassemble, env; Wiki: wiki-query, wiki-search,
 wiki-hardware. Use --kind OPERATION --help for the operation's request options.
-Read saved results with --kind record-read --record-id gateway-...;
-copy source with --kind kernel-read --kernel-id kernel-... --output-path scratch/kernel-tree;
-list a Kernel's measurements with --kind kernel-records --kernel-id kernel-....
-Find each Shape's fastest measured Kernel with --kind kernel-pareto-frontier (no GPU job).
-Journal writes: update-direction, progress-direction, prioritize-direction, adopt-kernel,
-record-experiment, episode-report --request-file FILE.
-Journal indexes: list-directions, list-experiments --output-path scratch/FILE.
-Journal reads: load-direction, load-experiment --record-id ID.
-Research overview: research-board.
-Journal tools require a registered Long Horizon Episode; see skills/runtime-records/.
+Read saved results from records/<gateway_record_id>.json; compatibility query:
+--kind record-read --record-id gateway-...;
+copy source with --kind kernel-read --kernel-commit-id FULL_GIT_COMMIT --output-path scratch/kernel-tree;
+list a Kernel's measurements with --kind kernel-records --kernel-commit-id FULL_GIT_COMMIT.
+Root PROGRESS.md includes enabled Direction state and each Shape's fastest measured Kernel;
+complete Experiments are normal files under experiments/ when that module is enabled.
+Possible Runtime mutations include update-direction, progress-direction, prioritize-direction,
+adopt-kernel, record-experiment, and episode-report --request-file FILE. The installed
+runtime-records Skill lists the module-specific subset available in this Episode; disabled calls
+are rejected. Research/report mutation tools require a registered Long Horizon Episode.
 No direct Agate fallback is performed when the Runtime is unavailable.
 """
 from __future__ import annotations
@@ -45,9 +49,6 @@ REQUEST_KINDS = {
     "record-experiment": "experiment_record",
     "episode-report": "episode_report",
 }
-LIST_KINDS = {"list-directions": "directions_list", "list-experiments": "experiments_list"}
-LOAD_KINDS = {"load-direction": ("direction_load", "direction_id"), "load-experiment": ("experiment_load", "experiment_id")}
-READ_KINDS = {"research-board": "research_board"}
 
 
 def client_error(code: str, message: str, instruction: str, *, repairable=False, path="$", **details) -> None:
@@ -70,44 +71,32 @@ class _ClientParser(argparse.ArgumentParser):
 
 
 def journal_request(kind: str, argv: list[str]) -> dict:
-    parser = _ClientParser(allow_abbrev=False, description="Runtime Journal; request schemas: skills/runtime-records/references/journal.md")
-    parser.add_argument("--kind", choices=[*REQUEST_KINDS, *LIST_KINDS, *LOAD_KINDS, *READ_KINDS], required=True)
-    if kind in REQUEST_KINDS:
-        parser.add_argument(
-            "--request-file",
-            required=True,
-            help=(
-                f"JSON object; at most {MAX_REQUEST_FILE_BYTES} bytes "
-                "(2 MiB minus 4 KiB envelope reserve)"
-            ),
-        )
-    elif kind in LIST_KINDS:
-        parser.add_argument("--output-path", required=True, help="Workspace-relative scratch/ destination")
-    elif kind in LOAD_KINDS:
-        parser.add_argument("--record-id", required=True)
+    parser = _ClientParser(allow_abbrev=False, description="Runtime research/report mutations; request schemas: skills/runtime-records/references/journal.md")
+    parser.add_argument("--kind", choices=[*REQUEST_KINDS], required=True)
+    parser.add_argument(
+        "--request-file",
+        required=True,
+        help=(
+            f"JSON object; at most {MAX_REQUEST_FILE_BYTES} bytes "
+            "(2 MiB minus 4 KiB envelope reserve)"
+        ),
+    )
     args = parser.parse_args(argv)
-    if kind in REQUEST_KINDS:
-        try:
-            with Path(args.request_file).open("rb") as source:
-                raw = source.read(MAX_REQUEST_FILE_BYTES + 1)
-            if len(raw) > MAX_REQUEST_FILE_BYTES:
-                raise ValueError(
-                    f"request file exceeds {MAX_REQUEST_FILE_BYTES} bytes "
-                    "(2 MiB minus 4 KiB reserved for the request envelope). "
-                    "Shorten request text or lists before retrying; no request was sent"
-                )
-            value = json.loads(raw)
-            if not isinstance(value, dict):
-                raise ValueError("request file must contain one JSON object")
-        except (OSError, ValueError) as error:
-            parser.error(str(error))
-        return {"operation": REQUEST_KINDS[kind], "request": value}
-    if kind in LIST_KINDS:
-        return {"operation": LIST_KINDS[kind], "file": args.output_path}
-    if kind in READ_KINDS:
-        return {"operation": READ_KINDS[kind]}
-    operation, field = LOAD_KINDS[kind]
-    return {"operation": operation, field: args.record_id}
+    try:
+        with Path(args.request_file).open("rb") as source:
+            raw = source.read(MAX_REQUEST_FILE_BYTES + 1)
+        if len(raw) > MAX_REQUEST_FILE_BYTES:
+            raise ValueError(
+                f"request file exceeds {MAX_REQUEST_FILE_BYTES} bytes "
+                "(2 MiB minus 4 KiB reserved for the request envelope). "
+                "Shorten request text or lists before retrying; no request was sent"
+            )
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("request file must contain one JSON object")
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    return {"operation": REQUEST_KINDS[kind], "request": value}
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -236,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if kind is not None:
             record_read = kind == "record-read"
-        if kind in {*REQUEST_KINDS, *LIST_KINDS, *LOAD_KINDS, *READ_KINDS}:
+        if kind in REQUEST_KINDS:
             return proxy_command("/v1/journal/execute", journal_request(kind, args))
         if kind in WIKI_KINDS:
             count = 2 if value == "--kind" else 1

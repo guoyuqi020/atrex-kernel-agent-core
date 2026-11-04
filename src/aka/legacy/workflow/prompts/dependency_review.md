@@ -31,35 +31,35 @@ Write exactly one file, `dependency_review.json`, with this schema:
       "decision": "allow | reject",
       "category": "framework_compliant | alternate_framework | unresolved",
       "reason": "concise evidence-based reason",
-      "evidence": ["candidate/kernel.py:line"]
+      "evidence": ["candidate/<replace-with-an-actual-file>:line-or-field"]
     },
     {
       "id": "compute_provenance",
       "decision": "allow | reject",
       "category": "self_authored_compute | prebuilt_compute | torch_compute | hidden_dispatch | external_code | unresolved",
       "reason": "concise evidence-based reason",
-      "evidence": ["candidate/kernel.py:line"]
+      "evidence": ["candidate/<replace-with-an-actual-file>:line-or-field"]
     },
     {
       "id": "dependency_inventory",
       "decision": "allow | reject",
       "category": "inventory_complete | unresolved",
       "reason": "explain why the inventory below is complete",
-      "evidence": ["candidate/kernel.py:line", "candidate/solution.json:field"]
+      "evidence": ["candidate/<replace-with-an-actual-file>:line-or-field"]
     },
     {
       "id": "external_code_loading",
       "decision": "allow | reject",
       "category": "no_external_code | external_code | hidden_dispatch | unresolved",
       "reason": "trace any loader to its implementation source",
-      "evidence": ["candidate/kernel.py:line"]
+      "evidence": ["candidate/<replace-with-an-actual-file>:line-or-field"]
     },
     {
       "id": "solution_manifest",
       "decision": "allow | reject",
       "category": "manifest_consistent | not_applicable | manifest_mismatch | unresolved",
       "reason": "compare the manifest with the implementation",
-      "evidence": ["candidate/solution.json:field or candidate/kernel.py:line"]
+      "evidence": ["candidate/<replace-with-an-actual-file>:line-or-field"]
     }
   ],
   "dependencies": [
@@ -68,7 +68,7 @@ Write exactly one file, `dependency_review.json`, with this schema:
       "decision": "allow | reject",
       "category": "toolchain_plumbing | framework_runtime | support_utility | prebuilt_compute | alternate_framework | hidden_dispatch | external_code | unresolved",
       "reason": "how this dependency is actually used",
-      "evidence": ["candidate/kernel.py:line or candidate/solution.json:field"]
+      "evidence": ["candidate/<replace-with-an-actual-file>:line-or-field"]
     }
   ],
   "summary": "concise overall explanation"
@@ -81,6 +81,9 @@ Rules:
 - List every discovered non-stdlib dependency exactly once.
 - `verdict` is `allow` only when every check and dependency is allowed; otherwise it is `reject`.
 - Every reason must explain actual use, not rely on package reputation.
+- Replace every angle-bracket path in the schema example with a real supplied candidate file. A
+  source-tree candidate normally has `candidate/kernel.py`; a native manifest candidate may instead
+  require `candidate/solution.json` and one of its declared `.cu`, `.cpp`, or header files.
 - Every check and dependency must cite at least one candidate-file location using exactly `candidate/<file>:...` for a file in the supplied candidate (including package sources in a tree task). `review_request.json` is trusted context, not candidate evidence: use it to understand the requested framework and phase, but never include it in an `evidence` array.
 - Do not relax structural policy errors reported by the supervisor; this review decides semantic framework, compute-provenance, dependency and manifest questions only.
 - Do not write any other file.

@@ -16,8 +16,9 @@ PROTECTED = {"atrex_bench", "torch", "cutlass", "cuda", "triton", "site", "sitec
              "usercustomize", "importlib", "packaging", "json", "subprocess", "os", "sys"}
 # Controller/public inputs and runtime state are not Candidate source files.
 WORKSPACE_ONLY = {"tools", "skills", "scratch", "memory", "input", "profiles", "eval", "plans",
+    "directions", "experiments", "records",
     "reference", "reference-projects", "gpu-wiki", "atrex-bench", "verification_artifacts",
-    "README.md", "CLAUDE.md", "WORKSPACE.md", "agent_problem.json", "reference.py", "input.py",
+    "README.md", "CLAUDE.md", "WORKSPACE.md", "PROGRESS.md", "agent_problem.json", "reference.py", "input.py",
     "shapes.json", "metadata.json", "roofline.json", "valid.py", "definition.json", "workload.jsonl",
     "solution.json", "config.json", "test_kernel.py", "profile_driver.py", "evaluations.jsonl",
     "numerical_probe.py", "numerical_inputs.py", "probe-request.json", "policy_review_request.json",

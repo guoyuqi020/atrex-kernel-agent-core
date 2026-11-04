@@ -23,7 +23,7 @@ from aka.light.agent.session_tail import read_regular_bytes
 from aka.light.workspace.sources import MAX_SNAPSHOT, Artifact
 
 RECORD_ID = re.compile(r"gateway-[0-9a-f]{32}")
-KERNEL_ID = re.compile(r"kernel-[0-9a-f]{32}")
+KERNEL_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 JOB_ROOT_ENV = "ATREX_AKA_MEASUREMENT_JOB_ROOT"
 ABBA_BATCH_ROOT_ENV = "ATREX_AKA_ABBA_BATCH_ROOT"
 BATCH_ROOT_ENV = "ATREX_AKA_SHAPE_BATCH_ROOT"
@@ -37,10 +37,11 @@ def digest(value: object) -> str:
                                      allow_nan=False).encode()).hexdigest()
 
 
-def source_identity(source: bytes) -> dict:
+def source_identity(source: bytes, kernel_id: str) -> dict:
+    if not isinstance(kernel_id, str) or KERNEL_ID.fullmatch(kernel_id) is None:
+        raise ValueError("kernel_commit_id must be a complete Git commit ID")
     checksum = "sha256:" + hashlib.sha256(source).hexdigest()
-    return {"kernel_id": "kernel-" + uuid.uuid5(uuid.NAMESPACE_URL, f"urn:atrex:kernel-source:{checksum}").hex,
-            "kernel_artifact_digest": checksum}
+    return {"kernel_id": kernel_id, "kernel_artifact_digest": checksum}
 
 
 def read_json(path: Path, *, limit: int = MAX_RECORD_BYTES) -> dict:
@@ -222,8 +223,8 @@ class MeasurementStore:
         if len(self.identity_key) != 32:
             raise ValueError("Measurement identity key is invalid; restore its private state")
 
-    def kernel(self, source: bytes) -> dict:
-        identity = source_identity(source)
+    def kernel(self, source: bytes, kernel_id: str) -> dict:
+        identity = source_identity(source, kernel_id)
         directory = self.root / "kernels" / identity["kernel_id"]
         with open_private_directory(directory):
             pass
@@ -236,19 +237,56 @@ class MeasurementStore:
             durable_write_text(path, source.decode("utf-8"))
         else:
             if existing != source:
-                raise ValueError("Kernel artifact does not match its content identity")
+                raise ValueError("Git commit ID is already bound to different Kernel source")
+        digest_directory = (
+            self.root
+            / "source-index"
+            / identity["kernel_artifact_digest"].removeprefix("sha256:")
+        )
+        with open_private_directory(digest_directory):
+            pass
+        marker = digest_directory / kernel_id
+        try:
+            value = read_regular_bytes(marker, limit=65).decode()
+        except FileNotFoundError:
+            durable_write_text(marker, kernel_id)
+        else:
+            if value != kernel_id:
+                raise ValueError("Kernel source index is inconsistent")
         return identity
+
+    def find_kernel_id(self, source: bytes) -> str:
+        """Resolve an already recorded source to one preserved Git commit ID."""
+        digest_directory = self.root / "source-index" / hashlib.sha256(source).hexdigest()
+        matches = []
+        for marker in digest_directory.glob("*"):
+            if not marker.is_file() or KERNEL_ID.fullmatch(marker.name) is None:
+                continue
+            try:
+                existing = read_regular_bytes(
+                    self.root / "kernels" / marker.name / "kernel.py",
+                    limit=MAX_SNAPSHOT + 1,
+                )
+            except (OSError, ValueError):
+                continue
+            if existing == source:
+                matches.append(marker.name)
+        if not matches:
+            raise RecordNotFound(
+                "Kernel source has no recorded Git commit ID; commit and evaluate it first"
+            )
+        return sorted(matches)[0]
 
     def read_kernel(self, kernel_id: str) -> bytes:
         if not KERNEL_ID.fullmatch(kernel_id):
-            raise ValueError("Use a kernel- ID returned by a Gateway measurement")
+            raise ValueError("Use a Git commit ID returned by a Gateway measurement")
         try:
             source = read_regular_bytes(self.root / "kernels" / kernel_id / "kernel.py",
                                         limit=MAX_SNAPSHOT + 1)
         except FileNotFoundError as error:
             raise RecordNotFound("Kernel is not available in this Campaign; use an ID returned here") from error
-        if len(source) > MAX_SNAPSHOT or source_identity(source)["kernel_id"] != kernel_id:
-            raise ValueError("Kernel artifact identity or size is invalid")
+        if len(source) > MAX_SNAPSHOT:
+            raise ValueError("Kernel artifact size is invalid")
         return source
 
     def read(self, record_id: str) -> dict:
@@ -263,7 +301,7 @@ class MeasurementStore:
             raise ValueError("Gateway record result integrity check failed")
         for side, identity in record["kernels"].items():
             source = self.read_kernel(identity["kernel_id"])
-            if source_identity(source) != identity or not Artifact(source).verify_measurement_inputs(record["request"], side):
+            if source_identity(source, identity["kernel_id"]) != identity or not Artifact(source).verify_measurement_inputs(record["request"], side):
                 raise ValueError("Gateway record omits or changes candidate source evidence")
         return record
 
@@ -291,7 +329,7 @@ class MeasurementStore:
         record = source.read(record_id)
         for identity in record["kernels"].values():
             kernel_source = source.read_kernel(identity["kernel_id"])
-            if self.kernel(kernel_source) != identity:
+            if self.kernel(kernel_source, identity["kernel_id"]) != identity:
                 raise ValueError("Imported Kernel identity differs from the Gateway Record")
         destination = self.root / "records" / record_id / "record.json"
         try:

@@ -95,13 +95,16 @@ def _shape_sort_key(shape_id: str) -> tuple[int, object]:
 
 
 def public_shapes_payload(
-    private_shapes_path: Path, *, count: int = 5
+    private_shapes_path: Path, *, count: int | str = "all"
 ) -> dict[str, Any]:
     """Project the canonical prefix without exposing any remaining case."""
-    if type(count) is not int or count < 1:
-        raise ValueError("public Shape count must be a positive integer")
+    if not ((type(count) is int and count >= 0) or count == "all"):
+        raise ValueError(
+            "public Shape count must be a non-negative integer or 'all'"
+        )
     shapes = validate_private_shapes(private_shapes_path)
-    selected = sorted((str(shape_id) for shape_id in shapes), key=_shape_sort_key)[:count]
+    ordered = sorted((str(shape_id) for shape_id in shapes), key=_shape_sort_key)
+    selected = ordered if count == "all" else ordered[:count]
     return {
         "schema_version": PUBLIC_SHAPES_SCHEMA_VERSION,
         "selection": {
@@ -114,10 +117,10 @@ def public_shapes_payload(
 
 
 def validate_public_shapes(
-    path: Path, *, private_shapes_path: Path
+    path: Path, *, private_shapes_path: Path, count: int | str = "all"
 ) -> dict[str, Any]:
     payload = _load_json_object(path, label=PUBLIC_SHAPES_FILENAME)
-    expected = public_shapes_payload(private_shapes_path)
+    expected = public_shapes_payload(private_shapes_path, count=count)
     if payload != expected:
         raise ValueError(
             f"{path} must be the exact deterministic canonical-prefix projection of shapes.json"

@@ -20,6 +20,7 @@ class MeasurementEffects:
     publish_outputs: Callable[[Path, object], None]
     deadline: float | None = None
     request_id: str = ""
+    kernel_ids: dict[str, str] | None = None
 
 
 class RecordedExperiments:
@@ -31,13 +32,18 @@ class RecordedExperiments:
         from .records import query
         return query(self.store, args, workspace)
 
-    def task_identity(self, staged, args, environment, *, mode, repetitions):
+    def task_identity(
+        self, staged, args, environment, *, mode, repetitions, kernel_ids=None
+    ):
         from aka.light.runtime.request_errors import AgentRequestError
         try:
-            return self.evaluation.prepare(
+            request = self.evaluation.prepare(
                 args, staged, environment, identity_key=self.store.identity_key,
                 mode=mode, repetitions=repetitions,
             ).request
+            if kernel_ids:
+                request = dict(request, kernel_ids=dict(sorted(kernel_ids.items())))
+            return request
         except ValueError as error:
             raise AgentRequestError(str(error)) from error
 

@@ -23,11 +23,13 @@ structure remain comparable. Collect new evidence only when a change invalidates
 for the current decision, or when clean results expose a new ambiguity. Timeline is an escalation for
 a kernel-internal timing question, never a required per-round validation step.
 
-Across long-horizon episodes, read reusable evidence from
-`memory/vN.json.profile_evidence.accepted_ppu_diagnostics`; the raw episode archive is not a
-prerequisite. Compare every recorded identity and `invalidation_conditions` entry with the current clean
-kernel before reuse. A canonical evidence reference identifies the prior conclusion, but does not
-make it valid after specialization, workload, device, topology, or pipeline changes.
+Across long-horizon Episodes, prefer the hash-bound artifacts retained under trajectory-local
+`scratch/` and any Experiment that archives or cites them. When optional memory generation is
+enabled, `memory/vN.json.profile_evidence.accepted_ppu_diagnostics` is an additional compact index;
+it is not guaranteed to exist and does not replace the artifacts. Compare every recorded identity
+and `invalidation_conditions` entry with the current clean Kernel before reuse. A prior reference
+identifies the conclusion, but does not make it valid after specialization, workload, device,
+topology, or pipeline changes.
 
 ## Choose the evidence route
 
@@ -58,7 +60,7 @@ top-level `profiles/` evidence will be missing during the controller's terminal 
 
 ## Persist only terminal-reusable evidence
 
-In a long-horizon episode, add `accepted_ppu_diagnostics` to the terminal journal outcome only for
+In a long-horizon Episode, add `accepted_ppu_diagnostics` to the terminal `episode-report` only for
 ACU, timeline, joint, comparison, or envelope conclusions that still apply to the terminal probe-free kernel. Omit an
 invalidated intermediate capture. Each row records the question and finding, the exact comparison
 identity, how it affected the optimization decision, and the conditions that require collection of

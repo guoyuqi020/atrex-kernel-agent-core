@@ -1,6 +1,9 @@
 """Select the managed light Workflow without changing legacy behavior."""
+from dataclasses import asdict
+
 from aka.legacy.workflow.plugin import WORKFLOW
 from aka.light.workflow.constants import DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES
+from aka.light.workflow.search import SearchOptions
 
 name = "workflow"
 provide = ("workflow",)
@@ -38,7 +41,7 @@ Config = {"type": "object", "properties": {
 Defaults = {"startup": False, "numerical_validation": True, "goal_episodes": False, "generate_memory": False,
             "output_limit_recovery_retries": DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES,
             "dependency_policy_recovery_retries": 2,
-            "search": {}}
+            "search": asdict(SearchOptions())}
 
 
 def validate_config(config):

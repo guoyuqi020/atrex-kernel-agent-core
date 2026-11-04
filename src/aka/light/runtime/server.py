@@ -24,12 +24,15 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT, derived_evaluation_timeout
+from aka.light.evaluation.policy import SHAPE_BATCH_SIZE
 
 from aka.light.evaluation.gateway import (
+    COMMAND_WORKSPACE_MANIFEST,
     EPISODE_EVALUATIONS_PATH,
     build_parser,
     configured_queue_wait_grace,
     find_agate,
+    requested_sync_paths,
     validate_evaluation_options,
 )
 from aka.light.workspace.files import (
@@ -77,11 +80,36 @@ _RUNTIME_LOCK = threading.RLock()
 AUTHORITY = frozenset({
     "--workspace", "--hardware", "--url", "--gateway-profile", "--ssh", "--ssh-init",
     "--ssh-gpu", "--ssh-runtime-bind", "--health-command", "--runtime-health-command",
-    "--timeout", "--max-input-file-mb", "--max-output-file-mb",
+    "--timeout", "--shape-batch-size", "--max-input-file-mb", "--max-output-file-mb",
 })
-FORBIDDEN = frozenset({"--preflight", "--check-health"})
+FORBIDDEN = frozenset({
+    "--preflight",
+    "--check-health",
+    # Managed Sessions query the Campaign's assigned target. Letting an Agent
+    # choose another product or force a shared refresh would make the returned
+    # facts disagree with the Kernel execution target.
+    "--env-gpu",
+    "--env-capabilities",
+    "--env-force",
+})
 WIKI_STORES = {"query_nl": "--store-root", "query_wiki": "--json-store", "query_hardware": "--store"}
 WIKI_RUNTIME_TOOLS = frozenset({"wiki-query", "wiki"})
+
+
+def _journal_evidence_hint(modules: tuple[str, ...] | list[str]) -> str:
+    enabled = set(modules)
+    locations = ["PROGRESS.md"]
+    if "directions" in enabled:
+        locations.append("directions/<status>/*.json")
+    if "experiments" in enabled:
+        locations.append("experiments/*/experiment.json")
+    locations.append("records/<gateway_record_id>.json")
+    if enabled:
+        return "Read " + ", ".join(locations) + " for visible IDs and evidence. "
+    return (
+        "Inspect PROGRESS.md and records/<gateway_record_id>.json to check citations; "
+        "candidate_ready must cite a passing full Evaluate for the current candidate. "
+    )
 
 
 def sol_evaluation_config(workspace: Path) -> bytes | None:
@@ -140,8 +168,59 @@ def parse_gateway(argv):
     if "--help" in options or "-h" in options:
         return None
     args = build_parser(_RequestParser).parse_args(argv)
+    if args.kind == "command" and args.command in ([], ["--"]):
+        raise ValueError(
+            "--kind command requires argv after --; use --kind command -- <command>"
+        )
     validate_evaluation_options(args)
     return args
+
+
+def managed_gateway_help(argv: list[str]) -> dict | None:
+    """Return the Agent-visible managed contract instead of low-level CLI help.
+
+    The underlying parser also owns Supervisor-only endpoint, target, timeout and
+    evaluator controls.  Showing that raw help would invite requests that this
+    HTTP boundary intentionally rejects, so ``--kind OPERATION --help`` exposes
+    the same filtered schema attached to validation errors.
+    """
+    options = argv[:argv.index("--")] if "--" in argv else argv
+    if "--help" not in options and "-h" not in options:
+        return None
+    kind = None
+    for index, word in enumerate(options):
+        if word == "--kind" and index + 1 < len(options):
+            kind = options[index + 1]
+        elif word.startswith("--kind="):
+            kind = word.split("=", 1)[1]
+    from aka.light.runtime.request_feedback import gateway_schema
+    schema = gateway_schema(kind, build_parser(_RequestParser))
+    return {
+        "exit_code": 0,
+        "stdout": json.dumps(
+            {
+                "managed_runtime_request_schema": schema,
+                "instruction": (
+                    "Use only these Agent-controlled options. The Supervisor supplies target, "
+                    "endpoint, credentials, evaluator policy, batching and request deadlines."
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        "stderr": "",
+    }
+
+
+def managed_gateway_argv(
+    argv: list[str], parsed: argparse.Namespace | None, hardware: str
+) -> list[str]:
+    """Inject Supervisor-owned target selection for managed environment reads."""
+    if parsed is None or parsed.kind != "env":
+        return argv
+    if not isinstance(hardware, str) or not hardware.strip():
+        raise ValueError("Managed env query requires the Campaign hardware identity")
+    return [*argv, "--env-gpu", hardware.strip(), "--env-capabilities"]
 
 
 def validate_gateway_transport(
@@ -223,6 +302,7 @@ class RuntimeConfig:
     hardware: str
     timeout: int = derived_evaluation_timeout()
     evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT
+    shape_batch_size: int = SHAPE_BATCH_SIZE
     url: str = ""
     profile: str = ""
     ssh: str = ""
@@ -253,6 +333,8 @@ class RuntimeConfig:
             raise TypeError("Runtime pause_agent_during_requests must be a boolean")
         if type(self.evaluation_step_timeout) is not int or self.evaluation_step_timeout <= 0:
             raise ValueError("Runtime evaluation_step_timeout must be a positive integer")
+        if type(self.shape_batch_size) is not int or self.shape_batch_size <= 0:
+            raise ValueError("Runtime shape_batch_size must be a positive integer")
         for name in ("request_timeout", "queue_timeout"):
             value = getattr(self, name)
             if name == "request_timeout" and value is None:
@@ -264,7 +346,8 @@ class RuntimeConfig:
         result = [sys.executable, str(ROOT / "evaluation/gateway.py"),
                   "--workspace", str(workspace), "--hardware", self.hardware,
                   "--timeout", str(self.timeout),
-                  "--evaluation-step-timeout", str(self.evaluation_step_timeout)]
+                  "--evaluation-step-timeout", str(self.evaluation_step_timeout),
+                  "--shape-batch-size", str(self.shape_batch_size)]
         for flag, value in (("--url", self.url), ("--gateway-profile", self.profile), ("--ssh", self.ssh)):
             if value:
                 result += [flag, value]
@@ -679,31 +762,6 @@ class SupervisorRuntime:
         """
         return load_journal(self.episode_journal_path(episode))
 
-    def research_board(self, *, trajectory: int = 1) -> dict:
-        """Reconcile durable Episode journals into the Campaign research board."""
-        from aka.light.workflow.journal_service import (
-            research_projection,
-            shared_research_queue,
-        )
-
-        for path in sorted((self.journals_root / "episodes").glob("e*/journal.json")):
-            try:
-                projection = research_projection(path, self.journals_root)
-            except (OSError, ValueError, RuntimeStateError):
-                continue
-            origin = {
-                "trajectory": trajectory,
-                "episode": projection.get("episode", 0),
-            }
-            for direction in projection.get("directions", {}).values():
-                self.research.observe_direction(direction, origin=origin)
-            for experiment in projection.get("experiments", []):
-                self.research.observe_experiment(experiment, origin=origin)
-        queue = shared_research_queue(self.journals_root)
-        if queue:
-            self.research.synchronize_queue(queue, origin={"trajectory": trajectory})
-        return self.research.board(trajectory=trajectory)
-
     def register_episode(self, workspace: Path, *, episode: int, base_commit: str,
                          branch: str, memory_version: int,
                          supervisor_git: bool = False,
@@ -741,18 +799,21 @@ class SupervisorRuntime:
                     episode=episode,
                     episodes_root=self.config.workspace.resolve() / ".atrex_long_horizon/episodes",
                 ) if self.config.workspace else None)
+                persistent_root = (
+                    (self.audit_root or self.root) / "agent-workspace"
+                    if self.workspace_provider is None
+                    or getattr(self.workspace_provider, "inherit_state", True)
+                    else None
+                )
                 view = (self.workspace_provider.open_draft if self.workspace_provider else EpisodeWorkspace)(workspace, evidence / "agent",
                                         is_ppu=hardware_vendor(self.config.hardware) == "ppu",
                                         research_records=self.journal_factory.research_records,
-                                        research_modules=getattr(
-                                            self.journal_factory,
-                                            "research_modules",
-                                            ("directions", "experiments"),
-                                        ),
+                                        research_modules=self.journal_factory.tool_modules,
                                         plugin_registry=self.plugins,
                                         adaptive_root=(self.audit_root or self.root) / "adaptive-state",
                                         episode=episode, history=history,
-                                        workspace_policy=self.config.workspace_policy)
+                                        workspace_policy=self.config.workspace_policy,
+                                        persistent_root=persistent_root)
                 agent_workspace = view.prepare()
                 trajectory = (
                     origin.get("trajectory", 1) if isinstance(origin, Mapping) else 1
@@ -761,13 +822,13 @@ class SupervisorRuntime:
                 board = self.research.board(trajectory=trajectory)
                 incumbent = board.get("incumbent")
                 incumbent_id = (
-                    incumbent.get("kernel_id")
+                    incumbent.get("kernel_commit_id")
                     if isinstance(incumbent, Mapping)
                     else None
                 )
                 lineage = board.get("lineages", {}).get(f"T{trajectory}", {})
                 lineage_id = (
-                    lineage.get("lineage_best_kernel_id")
+                    lineage.get("lineage_best_kernel_commit_id")
                     if isinstance(lineage, Mapping)
                     else None
                 )
@@ -786,15 +847,33 @@ class SupervisorRuntime:
                         ref,
                         source,
                         message=f"Runtime: {label} Kernel {kernel_id}",
+                        commit_id=kernel_id,
                     )
             binding = JournalBinding(self.journal_factory.open(
                 workspace=agent_workspace, git_workspace=workspace,
                 campaign_root=self.journals_root, evidence_root=evidence,
                 supervisor_git=supervisor_git,
                 research_root=(self.audit_root or self.root) / "research",
-                origin=origin), view=view, require_gluon=require_gluon)
-            self.journals[workspace] = binding
-            self.journals[agent_workspace] = binding
+                origin=origin,
+                claim_reviewer=getattr(self, "research_claim_reviewer", None),
+            ), view=view, require_gluon=require_gluon)
+            # Rebuild normal-file research projections at every Episode bind,
+            # including recovery and Epoch-shared history import.
+            binding.service.publish_research_files()
+            with self.lock:
+                previous = self.journals.get(agent_workspace)
+                if previous is not None and previous.service.path != path:
+                    if any(
+                        capability.workspace == agent_workspace
+                        for capability in self.capabilities.values()
+                    ):
+                        raise RuntimeError(
+                            "Cannot rebind the persistent Agent workspace while its prior "
+                            "Episode Session is still active"
+                        )
+                    self.journals.pop(agent_workspace, None)
+                self.journals[workspace] = binding
+                self.journals[agent_workspace] = binding
             return agent_workspace
 
     @contextmanager
@@ -902,7 +981,8 @@ class SupervisorRuntime:
 
     def execute_trusted(self, workspace: Path, argv: list[str], *, execution_timeout: int | None = None,
                         parent=None, reference_snapshot: Path | None = None,
-                        terminal_validation: bool = False) -> dict:
+                        terminal_validation: bool = False,
+                        kernel_ids: Mapping[str, str] | None = None) -> dict:
         """Controller-only execution/reuse; no Session, draft publication or HTTP switch."""
         capability = Capability(workspace.resolve(strict=True), {}, parent=parent)
         token = secrets.token_urlsafe(32)
@@ -922,7 +1002,8 @@ class SupervisorRuntime:
                 return self.execute(capability, "/v1/gateway/execute", {"argv": argv}, reuse_completed=True,
                                     execution_timeout=execution_timeout,
                                     reference_snapshot=reference_snapshot,
-                                    terminal_validation=terminal_validation)
+                                    terminal_validation=terminal_validation,
+                                    trusted_kernel_ids=kernel_ids)
         finally:
             self.revoke(token)
 
@@ -930,7 +1011,8 @@ class SupervisorRuntime:
                 reuse_completed=False, reuse_correctness=False, candidate_source: bytes | None = None,
                 execution_timeout: int | None = None, reference_snapshot: Path | None = None,
                 prepare_identity_only: bool = False,
-                terminal_validation: bool = False) -> dict | None:
+                terminal_validation: bool = False,
+                trusted_kernel_ids: Mapping[str, str] | None = None) -> dict | None:
         if prepare_identity_only and route != "/v1/gateway/execute":
             return None
         if route == "/v1/plugins/execute":
@@ -950,6 +1032,7 @@ class SupervisorRuntime:
             environment[TERMINAL_VALIDATION_ENV] = "1"
         for key in (OWNER_ENV, URL_ENV, TOKEN_ENV, "ATREX_PRIVATE_REFERENCE_DIR"):
             environment.pop(key, None)
+        kernel_ids: dict[str, str] = dict(trusted_kernel_ids or {})
         with tempfile.TemporaryDirectory(dir=self.root, prefix="request-") as temporary:
             staged = Path(temporary)
             with _validating_request():
@@ -958,7 +1041,13 @@ class SupervisorRuntime:
                     kind = "wiki"
                 else:
                     argv = filter_options(argv, AUTHORITY, FORBIDDEN)
+                    managed_help = managed_gateway_help(argv)
+                    if managed_help is not None:
+                        return None if prepare_identity_only else managed_help
                     parsed = parse_gateway(argv)
+                    argv = managed_gateway_argv(argv, parsed, self.config.hardware)
+                    if parsed is not None and parsed.kind == "env":
+                        parsed = parse_gateway(argv)
                     if prepare_identity_only and (parsed is None or parsed.kind in QUERY_KINDS
                                                   or parsed.kind == "env" or parsed.dry_run):
                         return None
@@ -980,10 +1069,29 @@ class SupervisorRuntime:
                         authority = (capability.journal.view.worktree if capability.journal and capability.journal.view
                                      else self.config.workspace or capability.workspace)
                         frozen_source = freeze_for_execution(authority, capability.workspace, candidate_source)
-                        snapshot(capability.workspace, staged,
-                                 custom_tools=bool(capability.journal and capability.journal.view))
+                        snapshot(
+                            capability.workspace,
+                            staged,
+                            custom_tools=(
+                                parsed.kind == "command"
+                                or bool(capability.journal and capability.journal.view)
+                            ),
+                        )
                         if frozen_source is not None:
                             stage_frozen(staged, frozen_source)
+                        # Freeze the exact Agent-visible files before trusted
+                        # evaluator inputs and Runtime control files are added.
+                        # --kind command consumes this allowlist instead of
+                        # traversing the later, privileged staging directory.
+                        if parsed.kind == "command":
+                            command_workspace = sorted(
+                                path.relative_to(staged).as_posix()
+                                for path in staged.rglob("*")
+                                if path.is_file() and not path.is_symlink()
+                            )
+                            (staged / COMMAND_WORKSPACE_MANIFEST).write_text(
+                                json.dumps(command_workspace), encoding="utf-8"
+                            )
                         if capability.journal and capability.journal.view:
                             from aka.light.workspace.episode import PUBLIC_FILES
                             # An Agent draft is never the authority for evaluator inputs.
@@ -1003,8 +1111,42 @@ class SupervisorRuntime:
                                 # operations enforce their inputs in measurement_inputs.
                                 pass
                             else:
+                                kernel_id = kernel_ids.get("candidate")
+                                if kernel_id is None:
+                                    from aka.light.workspace.agent_git import (
+                                        AgentGit,
+                                        DirtyKernelWorktree,
+                                    )
+                                    git = (
+                                        capability.journal.view.agent_git
+                                        if capability.journal and capability.journal.view
+                                        else AgentGit(
+                                            capability.workspace,
+                                            (self.audit_root or self.root) / "agent-git.bundle",
+                                        )
+                                    )
+                                    try:
+                                        kernel_id = git.kernel_commit(source)
+                                    except DirtyKernelWorktree as error:
+                                        raise AgentRequestError(
+                                            str(error),
+                                            code="dirty_kernel_worktree",
+                                            changed_paths=list(error.paths),
+                                            next_action=(
+                                                "Review git diff, then commit the complete Kernel source "
+                                                "tree. Retry the same Runtime request only after git status "
+                                                "is clean; the HEAD commit is kernel_commit_id."
+                                            ),
+                                        ) from error
+                                else:
+                                    from aka.light.experiment.identifiers import KERNEL_RECORD_ID_RE
+                                    if KERNEL_RECORD_ID_RE.fullmatch(kernel_id) is None:
+                                        raise RuntimeStateError(
+                                            "Trusted Kernel identity is not a complete Git commit ID"
+                                        )
+                                kernel_ids["candidate"] = kernel_id
                                 if not prepare_identity_only:
-                                    kernel = self.measurements.kernel(source)
+                                    kernel = self.measurements.kernel(source, kernel_id)
                                     publish(capability.journal.view.worktree,
                                             ".atrex_long_horizon/policy_review_request.json",
                                             json.dumps({"schema_version": 1, "kernel_id": kernel["kernel_id"]}).encode())
@@ -1039,7 +1181,7 @@ class SupervisorRuntime:
                     (staged / ".atrex_long_horizon").mkdir()
                     (staged / ".atrex_long_horizon/journal.json").write_text("{}")
                     if parsed is not None:
-                        for value in ([] if parsed.no_sync else parsed.sync or ["profiles"]):
+                        for value in requested_sync_paths(parsed):
                             if relative_path(value).parts[0] not in {"profiles", "scratch"}:
                                 raise ValueError("--sync must be inside profiles/ or scratch/")
                     command = self.config.command(staged) + argv
@@ -1053,10 +1195,41 @@ class SupervisorRuntime:
                 # Parse the Supervisor's authority flags too, so the exact target,
                 # execution timeout and transport enter the task identity.
                 effective = parse_gateway(command[2:])
+                if "candidate" not in kernel_ids:
+                    # Standalone capabilities do not own an EpisodeWorkspace/AgentGit
+                    # view, but a previously registered exact source still has a
+                    # stable commit identity. Resolve it before the nonblocking
+                    # running-task probe so its request hash matches execution.
+                    from aka.light.workspace.sources import snapshot as source_snapshot
+                    try:
+                        kernel_ids["candidate"] = self.measurements.find_kernel_id(
+                            source_snapshot(staged)
+                        )
+                    except (FileNotFoundError, ValueError):
+                        pass
+                if effective.baseline_path and "baseline" not in kernel_ids:
+                    from aka.light.workspace.sources import read_path
+                    try:
+                        baseline_source = read_path(
+                            staged / effective.baseline_path
+                        ).snapshot
+                        kernel_ids["baseline"] = self.measurements.find_kernel_id(
+                            baseline_source
+                        )
+                    except (FileNotFoundError, ValueError) as error:
+                        raise AgentRequestError(
+                            "ABBA baseline has no recorded Git commit identity.",
+                            code="baseline_kernel_commit_unknown",
+                            next_action=(
+                                "Use kernel-read with a full kernel_commit_id to "
+                                "materialize the baseline, then retry the same ABBA request."
+                            ),
+                        ) from error
                 if prepare_identity_only:
                     return self.experiments.task_identity(
                         staged, effective, environment, mode=self.config.optimization_mode,
                         repetitions=self.measurement_repetitions,
+                        kernel_ids=kernel_ids,
                     )
                 effects = MeasurementEffects(
                     mode=self.config.optimization_mode, repetitions=self.measurement_repetitions,
@@ -1068,9 +1241,47 @@ class SupervisorRuntime:
                     publish_log=lambda staged: self.publish_evaluation_log(capability.workspace, staged),
                     publish_outputs=lambda staged, args: self.publish_legacy_outputs(capability.workspace, staged, args),
                     deadline=capability.deadline, request_id=capability.request_id,
+                    kernel_ids=kernel_ids,
                 )
-                return self.experiments.execute(staged, effective, argv, environment, command, effects=effects,
-                                               reuse_completed=reuse_completed, reuse_correctness=reuse_correctness)
+                result = self.experiments.execute(
+                    staged,
+                    effective,
+                    argv,
+                    environment,
+                    command,
+                    effects=effects,
+                    reuse_completed=reuse_completed,
+                    reuse_correctness=reuse_correctness,
+                )
+                if capability.journal is not None:
+                    try:
+                        agent_result = result.get("agent_result")
+                        if isinstance(agent_result, Mapping):
+                            capability.journal.service.observe_measurement(agent_result)
+                        record_id = (
+                            agent_result.get("gateway_record_id")
+                            if isinstance(agent_result, Mapping)
+                            else None
+                        )
+                        capability.journal.service.publish_research_files(
+                            synchronize=False,
+                            direction_ids=frozenset(),
+                            experiment_ids=frozenset(),
+                            record_ids=(
+                                frozenset({record_id})
+                                if isinstance(record_id, str)
+                                else frozenset()
+                            ),
+                        )
+                    except (OSError, ValueError, RuntimeStateError):
+                        # The immutable measurement has already completed. A
+                        # projection failure must not turn it into an unknown
+                        # GPU outcome; registration or the next mutation heals
+                        # PROGRESS.md from authoritative stores.
+                        logging.getLogger(__name__).exception(
+                            "Failed to refresh PROGRESS.md after measurement"
+                        )
+                return result
             # From this point execution may have submitted a job. Failures must
             # never be classified as repairable argument errors by the handler.
             if kind == "wiki":
@@ -1127,24 +1338,63 @@ class SupervisorRuntime:
     def execute_journal(self, capability: Capability, request: dict) -> dict:
         binding = capability.journal
         if binding is None:
-            raise AgentRequestError("Journal tools require a controller-registered Long Horizon Episode", repairable=False,
-                                    code="journal_unavailable", next_action="Use this session's Baseline finish procedure; do not supply paths or Episode IDs to create a Journal")
+            raise AgentRequestError("Research/report mutation tools require a controller-registered Long Horizon Episode", repairable=False,
+                                    code="journal_unavailable", next_action="Use this session's Baseline finish procedure; do not supply paths or Episode IDs to create private Runtime state")
         self._acquire(binding.lock, capability, capability.deadline)
         try:
             if not self._live(capability):
                 raise SessionRevokedError()
             try:
                 with journal_lock(binding.service.path):
-                    value = binding.service.execute(request, validate_candidate=(
-                        lambda source: self._validate_candidate_correctness(capability, source)
-                    ))
+                    agent_kernel_id = None
+                    agent_git = None
+                    body = request.get("request")
+                    if (
+                        request.get("operation") == "episode_report"
+                        and isinstance(body, Mapping)
+                        and body.get("status") == "candidate_ready"
+                    ):
+                        from aka.light.workspace.agent_git import (
+                            AgentGit,
+                            DirtyKernelWorktree,
+                        )
+                        agent_git = (
+                            binding.view.agent_git
+                            if binding.view is not None
+                            else AgentGit(
+                                binding.service.workspace,
+                                (self.audit_root or self.root) / "agent-git.bundle",
+                            )
+                        )
+                        try:
+                            agent_kernel_id = agent_git.kernel_commit()
+                        except DirtyKernelWorktree as error:
+                            raise AgentRequestError(
+                                str(error),
+                                code="dirty_kernel_worktree",
+                                changed_paths=list(error.paths),
+                                next_action=(
+                                    "Review git diff, commit the complete Kernel source tree, "
+                                    "and resubmit episode-report. HEAD is kernel_commit_id."
+                                ),
+                            ) from error
+                    value = binding.service.execute(
+                        request,
+                        validate_candidate=(
+                            lambda source: self._validate_candidate_correctness(capability, source)
+                        ),
+                        agent_kernel_id=agent_kernel_id,
+                        seal_candidate=(
+                            lambda commit_id, source: agent_git.seal_into(
+                                binding.service.git_workspace, commit_id, source
+                            )
+                        ) if agent_git is not None else None,
+                    )
             except (AgentRequestError, RuntimeStateError):
                 raise
             except ValueError as error:
-                evidence_hint = (
-                    "Use list/load-direction or list/load-experiment for IDs, and record-read for measurement evidence. "
-                    if self.journal_factory.research_records else
-                    "Use record-read to check gateway_record_ids; candidate_ready must cite a passing full Evaluate for current candidate. "
+                evidence_hint = _journal_evidence_hint(
+                    self.journal_factory.tool_modules
                 )
                 raise AgentRequestError(str(error), next_action=(
                     "Correct the indicated field or lifecycle state, then retry. Read skills/runtime-records/references/journal.md. "
@@ -1372,7 +1622,7 @@ class SupervisorRuntime:
         paths = set()
         with tempfile.TemporaryDirectory(dir=self.root, prefix="outputs-") as temporary:
             ready = Path(temporary)
-            for value in ([] if args.no_sync else (args.sync or ["profiles"])):
+            for value in requested_sync_paths(args):
                 path = relative_path(value)
                 if path.parts[0] not in {"profiles", "scratch"}:
                     raise ValueError("--sync must be inside profiles/ or scratch/")
