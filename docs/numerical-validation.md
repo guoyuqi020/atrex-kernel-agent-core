@@ -65,7 +65,7 @@ evaluation does not enable this capture or change its scoring behavior.
 
 The complete diagnostic files remain outside Agent workspaces. Failure receipts
 include the original error, evaluator stdout/stderr, exit code and timeout flag
-for the probe planner, the optimization Agent and subsequent `record-read`.
+for the probe planner, the optimization Agent and the projected Gateway Record.
 They are not replaced by a generic "private diagnostics withheld" message.
 Upstream per-stream capture limits remain visible; public projection does not reconstruct
 bytes that were never captured. The current response-size, truncation, shape-redaction,

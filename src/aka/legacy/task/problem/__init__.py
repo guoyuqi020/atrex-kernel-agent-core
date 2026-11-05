@@ -4,9 +4,8 @@ from .layout import (
     GENERATED_AGENT_PROBLEM_FIELDS, GENERALIZED_AGENT_VISIBLE_FILES,
     LEGACY_ATREX_VISIBLE_FILES, agent_visible_operator_files,
     find_atrex_bench_root, has_agent_problem, is_sol_op,
-    public_shapes_payload, should_use_generalized_problem, validate_agent_problem,
+    should_use_generalized_problem, validate_agent_problem,
     validate_generated_agent_problem, validate_private_shapes,
-    validate_public_shapes,
 )
 
 __all__ = [
@@ -14,7 +13,6 @@ __all__ = [
     "GENERATED_AGENT_PROBLEM_FIELDS", "GENERALIZED_AGENT_VISIBLE_FILES",
     "LEGACY_ATREX_VISIBLE_FILES", "agent_visible_operator_files",
     "find_atrex_bench_root", "has_agent_problem", "is_sol_op",
-    "public_shapes_payload", "should_use_generalized_problem", "validate_agent_problem",
+    "should_use_generalized_problem", "validate_agent_problem",
     "validate_generated_agent_problem", "validate_private_shapes",
-    "validate_public_shapes",
 ]

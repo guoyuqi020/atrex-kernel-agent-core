@@ -13,12 +13,11 @@ from copy import deepcopy
 
 JOURNAL_TOOLS = {
     "direction_update": "update-direction", "experiment_record": "record-experiment",
-    "episode_report": "episode-report", "direction_progress": "progress-direction",
+    "episode_report": "episode-report",
     "direction_prioritize": "prioritize-direction",
-    "kernel_adopt": "adopt-kernel",
 }
 DIRECTION_TOOLS = {
-    "direction_update", "direction_progress", "direction_prioritize",
+    "direction_update", "direction_prioritize",
 }
 EXPERIMENT_TOOLS = {"experiment_record"}
 
@@ -47,7 +46,6 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
         DIRECTION_CHANGE_SCOPES,
         DIRECTION_UPDATE_FIELDS,
         DIRECTION_CLOSURE_FIELDS,
-        DIRECTION_CLOSURE_OPTIONAL_FIELDS,
         EXPERIMENT_FIELDS,
         EXPERIMENT_OPTIONAL_FIELDS,
     )
@@ -131,11 +129,6 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
                           wiki_query_ids={"type": "array", "maxItems": 64, "items": query_id},
                           wiki_usage_status={"type": "string", "enum": sorted(WIKI_USAGE_STATUSES)})
         return _object(properties, fields)
-    if operation == "direction_progress":
-        return _object({
-            "direction_id": {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"},
-            "plan_step": {"type": "integer", "minimum": 0},
-        }, {"direction_id", "plan_step"})
     if operation == "direction_prioritize":
         schema = _object({
             "direction_id": {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"},
@@ -145,16 +138,6 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
         }, {"direction_id", "reason"})
         schema["not"] = {"required": ["before_direction_id", "after_direction_id"]}
         return schema
-    if operation == "kernel_adopt":
-        return _object({
-            "kernel_commit_id": {
-                "type": "string",
-                "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
-                "description": "Full Agent Git commit ID identifying the Kernel source",
-            },
-            "source_ref": _text(),
-            "reason": _text(),
-        }, {"kernel_commit_id", "source_ref", "reason"})
     if operation == "direction_update":
         action = body.get("action")
         if not isinstance(action, str) or action not in DIRECTION_ACTIONS:
@@ -164,8 +147,6 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
         fields = (DIRECTION_PROPOSAL_FIELDS if action == "propose" else
                   DIRECTION_REVISION_FIELDS if action == DIRECTION_REVISION_ACTION else
                   DIRECTION_CLOSURE_FIELDS if action in CLOSURES else DIRECTION_UPDATE_FIELDS)
-        if action in CLOSURES and not experiments_enabled:
-            fields = fields - {"supporting_experiment_ids"}
         properties = {key: _text() for key in fields}
         properties["action"] = {"const": action}
         if action in {"propose", DIRECTION_REVISION_ACTION}:
@@ -217,10 +198,11 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
             properties["direction_id"] = {"type": "string", "pattern": "^direction_[0-9a-f]{32}$"}
             if action in CLOSURES:
                 properties["hypothesis_status"] = {"enum": ["unresolved", "supported", "refuted"]}
-                for key in DIRECTION_CLOSURE_OPTIONAL_FIELDS:
-                    properties[key] = _text()
+                properties["reopen_condition"] = _text()
                 if experiments_enabled:
-                    properties["supporting_experiment_ids"] = _ids("experiment_", minimum=1, maximum=32)
+                    properties["supporting_experiment_ids"] = _ids(
+                        "experiment_", minimum=1, maximum=32
+                    )
         return _object(properties, fields)
     return None
 
@@ -228,7 +210,7 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
 def gateway_schema(kind, parser):
     """Read option types/choices from the real parser; never expose its defaults."""
     groups = {
-        "run": {"--mode", "--version", "--shape-id", "--timed-runs", "--baseline-path",
+        "run": {"--mode", "--version", "--shape-id", "--timed-runs", "--baseline-commit",
                 "--comparison-repeats", "--comparison-run-timeout", "--input-path", "--shapes-path"},
         "profile": {"--kernel-name", "--kernel-regex", "--profile-source", "--launch-skip", "--launch-count",
                     "--profile-shape-id", "--requirement", "--deps-mode", "--profile-level", "--profiler",
@@ -238,9 +220,6 @@ def gateway_schema(kind, parser):
         "dev": set(), "command": set(),
         # Managed Runtime injects the Campaign hardware and capability view.
         "env": set(),
-        "record-read": {"--record-id"},
-        "kernel-read": {"--kernel-commit-id", "--output-path"},
-        "kernel-records": {"--kernel-commit-id"},
     }
     if kind not in groups:
         return {"supported_kinds": list(groups), "instruction": "Use an explicit --kind and full option names."}
@@ -260,11 +239,7 @@ def gateway_schema(kind, parser):
                 item["repeatable"] = True
             options[flag] = item
     options["--kind"] = {"const": kind}
-    required = ["--kind", *({
-        "record-read": ["--record-id"],
-        "kernel-read": ["--kernel-commit-id", "--output-path"],
-        "kernel-records": ["--kernel-commit-id"],
-    }.get(kind, []))]
+    required = ["--kind"]
     schema = {"cli_options": options, "required_options": required}
     command_contract = {
         "run": (
@@ -382,9 +357,9 @@ def augment_error(response, *, route, request, research_records=False, direction
             status = body.get("status")
             evidence_instruction = (
                 (
-                    "Select a current-Episode Experiment that cites a passing standard full "
-                    "Evaluate of the exact committed source; do not add gateway_record_ids "
-                    "directly. "
+                    "Select a fully supported visible Experiment that cites a passing standard "
+                    "full Evaluate of the exact committed source. Historical evidence may be "
+                    "reused when it still matches; do not add gateway_record_ids directly. "
                     if experiments_enabled
                     else "Cite gateway_record_ids including a passing standard full Evaluate "
                     "of the exact committed source; do not add selected_experiment_id. "
@@ -403,11 +378,24 @@ def augment_error(response, *, route, request, research_records=False, direction
                 )
             )
             direction_instruction = (
-                "Close all local active Directions with complete/abandon for direction_terminal, "
-                "or with block for a blocked report. Only candidate_ready may use "
-                "cross_trajectory_share while leaving Directions active. "
-                if directions_enabled
-                else "No Direction mutation is required because Direction recording is disabled. "
+                (
+                    "Close all local active Directions with complete/abandon for "
+                    "direction_terminal, or with block for a blocked report. For "
+                    "candidate_ready with direction_terminal, the selected Experiment must "
+                    "belong to a Direction completed or abandoned in this Episode. For "
+                    "cross_trajectory_share, it must belong to an in-progress Direction. Only "
+                    "candidate_ready may use cross_trajectory_share while leaving Directions "
+                    "active. "
+                )
+                if directions_enabled and experiments_enabled
+                else (
+                    "Close all local active Directions with complete/abandon for "
+                    "direction_terminal, or with block for a blocked report. Only "
+                    "candidate_ready may use cross_trajectory_share while leaving Directions "
+                    "active. "
+                    if directions_enabled
+                    else "No Direction mutation is required because Direction recording is disabled. "
+                )
             )
             instruction = (
                 "A validation rejection does not complete the Episode. Continue the current "
@@ -439,13 +427,6 @@ def augment_error(response, *, route, request, research_records=False, direction
             elif word.startswith("--kind="):
                 kind = word.split("=", 1)[1]
         result["request_schema"] = gateway_schema(kind if isinstance(kind, str) else None, parser)
-        if isinstance(kind, str) and kind in {"record-read", "kernel-read", "kernel-records"}:
-            result["recovery"].append({"instruction":
-                "Use an ID returned by this Campaign. record-read needs --record-id; kernel-read needs "
-                "--kernel-commit-id and --output-path scratch/PATH; kernel-records needs "
-                "--kernel-commit-id. Per-Shape historical winners are projected in root "
-                "PROGRESS.md. "
-                "Queries never require a GPU resubmission."})
     elif route == "/v1/plugins/execute":
         name = request.get("tool")
         tool = next((item for item in catalog if item["name"] == name), None)

@@ -58,20 +58,19 @@ python -m pip install --force-reinstall /tmp/aka-dist/*.whl
   containing `scripts/run_eval.py` and `src/atrex_bench`. An optional `agent_problem.json` may provide
   the generalized public contract using schema `atrex.agent_problem.v1`.
 
-Native campaigns expose exact Shape parameters according to `public_shapes` in both Production and
-Leaderboard modes: `0` exposes none, a positive integer exposes a canonical prefix, and `all`
-exposes every Shape (the current default). If `agent_problem.json` is supplied, AKA validates and
-copies it directly. Otherwise a separate clean AKA
+Native campaigns expose exact Shape parameters through `shapes.json` by default. With
+`--no-expose-evaluator-shapes`, AKA instead validates and copies a supplied `agent_problem.json`,
+or runs a separate clean AKA
 preprocessing session using the configured `--agent-cli` at maximum reasoning effort reads
 `reference.py`, `input.py`, and the evaluator-owned detailed shapes, derives the public
 `agent_problem.json`, validates that its development cases do not duplicate evaluator cases, and
-persists that contract in the campaign workspace. Unexposed evaluator inputs and metadata remain
-private. Canonical memory retains real per-shape latency under stable ids; set `PROFILE_SHAPE_ID` to
-one of those ids to profile that real shape.
+persists that contract in the campaign workspace. Exact Shapes and Shape-bearing Agate diagnostics
+remain private in hidden mode. Canonical memory retains real per-shape latency under opaque stable
+ids; set `PROFILE_SHAPE_ID` to one of those ids to profile that real shape.
 
-Leaderboard and Production now share the same explicit Shape-disclosure setting; optimization mode
-does not silently override it. The orchestrator never treats operator inputs as editable candidate files. Start a
-fresh workspace when resuming an older production campaign that exposed exact shapes.
+Leaderboard and Production share the same explicit boolean Shape-disclosure setting; optimization
+mode does not silently override it. The orchestrator never treats operator inputs as editable
+candidate files. Start a fresh workspace when changing Shape visibility.
 
 For native Atrex-Bench and SOL operators, V0 does not launch a coding Agent. The supervisor commits
 the verbatim reference wrapper, runs exactly one official full-workload base-seed evaluator, writes

@@ -43,16 +43,14 @@ A native Atrex-Bench operator contains `reference.py`, `input.py`, and `shapes.j
 inside a checkout with `scripts/run_eval.py` and `src/atrex_bench`.
 The operator directory and AKA's `--repo-root` are separate inputs.
 
-In production mode, a supplied `agent_problem.json` provides the generalized public contract.
-Otherwise a trusted preprocessing session derives it from the evaluator-owned inputs.
-`public_shapes` independently controls exact Shape disclosure in both optimization modes: `0`
-exposes none, a positive integer exposes the canonical prefix, and `all` exposes every Shape
-(the current default). Evaluator generators remain Supervisor-owned. Diagnostic feedback retains
-useful case identifiers and errors while redacting inputs not selected for public disclosure.
+Exact evaluator Shapes are exposed by default through `shapes.json`. Pass
+`--no-expose-evaluator-shapes` to use a supplied or Supervisor-derived generalized
+`agent_problem.json` instead. In hidden mode, every Agent-visible Agate response is Shape-redacted;
+in exposed mode it is not. Evaluator generators and generated tensor values remain Supervisor-owned.
 
 The default `--optimization-mode leaderboard` exposes the benchmark contract and allows
 the permissive optimization policy. Select `production` explicitly for production review.
-Use a new workspace when changing modes or migrating a campaign that exposed private shapes.
+Use a new workspace when changing optimization mode or Shape visibility.
 
 ## Launch Light
 

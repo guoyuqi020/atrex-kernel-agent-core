@@ -345,7 +345,10 @@ def _command_option(command: list[str], name: str) -> str | None:
 
 def _evaluation_performance_timeout(command: list[str], step_timeout: int) -> int:
     """Return only the sequential per-Shape performance work in a request."""
-    if _command_option(command, "--baseline-path") is not None:
+    if (
+        _command_option(command, "--baseline-path") is not None
+        or _command_option(command, "--baseline-commit") is not None
+    ):
         repeats_value = _command_option(command, "--comparison-repeats")
         repeats = int(repeats_value) if repeats_value is not None else DEFAULT_ABBA_REPEATS
         return 2 * repeats * step_timeout
@@ -572,27 +575,8 @@ def _record_local_test_result(workspace: Path, version: str, result: dict, *, ge
     if generalized:
         perf["shape_visibility"] = "hidden"
         perf["public_shape_ids"] = []
-    if (workspace / "public_shapes.json").is_file():
-        try:
-            public_payload = json.loads(
-                (workspace / "public_shapes.json").read_text(encoding="utf-8")
-            )
-            public_shapes = public_payload.get("shapes", {})
-            selection = public_payload.get("selection", {})
-        except (OSError, json.JSONDecodeError, AttributeError):
-            public_shapes = {}
-            selection = {}
-        public_ids = list(public_shapes) if isinstance(public_shapes, dict) else []
-        public_count = selection.get("count")
-        total_count = selection.get("total_shape_count")
-        all_public = (
-            type(public_count) is int
-            and type(total_count) is int
-            and public_count == total_count
-        )
-        perf["shape_ids_are_opaque"] = generalized and not all_public
-        perf["shape_visibility"] = "all" if all_public else "partial"
-        perf["public_shape_ids"] = public_ids
+    else:
+        perf["shape_visibility"] = "all"
     perf["measurement_status"] = (
         "complete" if result.get("all_pass") and by_shape else "incomplete"
     )

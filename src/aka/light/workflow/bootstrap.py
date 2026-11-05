@@ -70,15 +70,12 @@ from aka.light.workspace.versions import (
 )
 from aka.legacy.task.problem.layout import (
     AGENT_PROBLEM_FILENAME,
-    PUBLIC_SHAPES_FILENAME,
     agent_visible_operator_files,
     has_agent_problem,
     is_sol_op,
-    public_shapes_payload,
     validate_agent_problem,
     validate_generated_agent_problem,
     validate_private_shapes,
-    validate_public_shapes,
 )
 from aka.light.acceptance.source_policy import (
     install_workspace_policy,
@@ -126,7 +123,6 @@ _FRAMEWORK_BASELINE_CORRECTNESS_CONTEXT_PATHS = (
     "reference.py",
     "input.py",
     "agent_problem.json",
-    "public_shapes.json",
     "shapes.json",
     "metadata.json",
     "definition.json",
@@ -274,7 +270,7 @@ class Campaign:
     platform: str
     framework: str
     specify_dsl: bool = True
-    public_shapes: int | str = "all"
+    expose_evaluator_shapes: bool = True
     notes: str = "none"
     arch: str = ""  # real runtime GPU arch e.g. "sm_103" / "gfx942"; auto-detected
     work_dir: str = ""  # explicit working directory; "" = Path.cwd() (backward compat)
@@ -337,13 +333,8 @@ class Campaign:
     def __post_init__(self) -> None:
         if type(self.specify_dsl) is not bool:
             raise TypeError("specify_dsl must be a boolean")
-        if not (
-            (type(self.public_shapes) is int and self.public_shapes >= 0)
-            or self.public_shapes == "all"
-        ):
-            raise ValueError(
-                "public_shapes must be a non-negative integer or 'all'"
-            )
+        if type(self.expose_evaluator_shapes) is not bool:
+            raise TypeError("expose_evaluator_shapes must be a boolean")
         if self.sandbox_timeout is None:
             from aka.contracts.evaluation import derived_evaluation_timeout
             self.sandbox_timeout = derived_evaluation_timeout(
@@ -394,7 +385,8 @@ class Campaign:
         """Return evaluator-only native inputs behind a generalized public problem."""
         op_dir = Path(self.kernel_demo).resolve().parent
         use_generalized = (
-            not is_sol_op(op_dir)
+            not self.expose_evaluator_shapes
+            and not is_sol_op(op_dir)
             and (op_dir / "shapes.json").is_file()
         )
         if not self.atrex_bench_root or not use_generalized:
@@ -510,75 +502,18 @@ class Campaign:
                 )
                 return
 
-    def _ensure_public_shapes(self) -> None:
-        """Materialize the configured deterministic Shape projection exactly once."""
-        private_dir = self.private_reference_dir
-        if private_dir is None:
-            return
-        destination = self.workspace / PUBLIC_SHAPES_FILENAME
-        if self.public_shapes == 0:
-            if destination.exists():
-                raise RuntimeError(
-                    "public_shapes is configured as 0 but public_shapes.json already exists; "
-                    "start a fresh workspace"
-                )
-            return
-        shapes_path = private_dir / "shapes.json"
-        expected = public_shapes_payload(shapes_path, count=self.public_shapes)
-        if destination.exists():
-            try:
-                validate_public_shapes(
-                    destination,
-                    private_shapes_path=shapes_path,
-                    count=self.public_shapes,
-                )
-            except ValueError as exc:
-                raise RuntimeError(
-                    "workspace public_shapes.json does not match the configured "
-                    f"public_shapes={self.public_shapes!r}; start a fresh workspace"
-                ) from exc
-            return
-        destination.write_text(
-            json.dumps(expected, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
     @property
     def shape_ids_are_opaque(self) -> bool:
-        """Whether at least one evaluator Shape still has private parameters."""
-        private_dir = self.private_reference_dir
-        if private_dir is None:
-            return False
-        selection = public_shapes_payload(
-            private_dir / "shapes.json", count=self.public_shapes
-        )["selection"]
-        return selection["count"] < selection["total_shape_count"]
+        """Whether evaluator Shape parameters are hidden from the Agent."""
+        return self.private_reference_dir is not None
 
     def _shape_disclosure_prompt(self) -> str:
         private_dir = self.private_reference_dir
         if private_dir is None:
             return ""
-        selection = public_shapes_payload(
-            private_dir / "shapes.json", count=self.public_shapes
-        )["selection"]
-        count = selection["count"]
-        total = selection["total_shape_count"]
-        if count == 0:
-            return (
-                "For this generalized native task, no exact evaluator Shape parameters are "
-                "public and public_shapes.json is intentionally absent. Shape IDs in Runtime "
-                "results are opaque; do not try to reconstruct hidden inputs."
-            )
-        if count == total:
-            return (
-                f"For this generalized native task, public_shapes.json exposes all {total} "
-                "evaluator Shapes. The Supervisor still owns the evaluator input file and "
-                "all standard Evaluate and ABBA requests use the complete workload."
-            )
         return (
-            f"For this generalized native task, public_shapes.json exposes exact parameters "
-            f"for the canonical first {count} of {total} evaluator Shapes. Other Shape IDs "
-            "are opaque; do not try to reconstruct hidden inputs."
+            "For this generalized native task, exact evaluator Shape parameters are private. "
+            "Shape IDs in Runtime results are opaque; do not try to reconstruct hidden inputs."
         )
 
 
@@ -1010,15 +945,6 @@ class Campaign:
         head = git_head(self.workspace)
         if head and not git_path_blob(self.workspace, head, AGENT_PROBLEM_FILENAME):
             return "agent_problem.json is not tracked by the V0 baseline commit"
-        public_blob = (
-            git_path_blob(self.workspace, head, PUBLIC_SHAPES_FILENAME)
-            if head
-            else ""
-        )
-        if self.public_shapes == 0 and public_blob:
-            return "public_shapes.json is tracked although public_shapes=0"
-        if self.public_shapes != 0 and head and not public_blob:
-            return "public_shapes.json is not tracked by the V0 baseline commit"
         return ""
 
     def _assert_generalized_inputs_are_private(self) -> None:
@@ -1060,28 +986,6 @@ class Campaign:
             raise RuntimeError(
                 f"generalized Atrex-Bench workspace has an invalid public problem: {exc}; "
                 "start a fresh workspace"
-            ) from exc
-        public_shapes = self.workspace / PUBLIC_SHAPES_FILENAME
-        try:
-            if self.public_shapes == 0:
-                if public_shapes.exists():
-                    raise ValueError(
-                        "public_shapes.json must be absent when public_shapes=0"
-                    )
-            else:
-                if not public_shapes.is_file():
-                    raise ValueError(
-                        "public_shapes.json is missing for the configured Shape projection"
-                    )
-                validate_public_shapes(
-                    public_shapes,
-                    private_shapes_path=private_dir / "shapes.json",
-                    count=self.public_shapes,
-                )
-        except ValueError as exc:
-            raise RuntimeError(
-                "generalized Atrex-Bench workspace has an invalid public Shape "
-                f"projection: {exc}; start a fresh workspace"
             ) from exc
         leaked = [
             name
@@ -1378,6 +1282,7 @@ class Campaign:
             source_checks_enabled=self.source_checks_enabled,
             specify_dsl=self.specify_dsl,
             numerical_validation_enabled=self.module_options.numerical_validation,
+            expose_evaluator_shapes=self.expose_evaluator_shapes,
         )
 
     def _evaluator_directive(self) -> str:
@@ -1389,8 +1294,7 @@ class Campaign:
         )
         if self.atrex_bench_root:
             profile_shapes = (
-                "For generalized tasks, exact parameters are public only for IDs listed in "
-                "public_shapes.json; unlisted IDs remain opaque."
+                "For generalized tasks, Shape IDs are opaque and exact parameters remain private."
                 if self.private_reference_dir
                 else "For ordinary public-shape tasks, read exact parameters from shapes.json."
             )
@@ -1486,13 +1390,10 @@ class Campaign:
         # sandbox boundary. A missing public contract is authored before the baseline session.
         generalized = self.private_reference_dir is not None
         for name in agent_visible_operator_files(op_dir, generalized=generalized):
-            if name == PUBLIC_SHAPES_FILENAME:
-                continue
             source = op_dir / name
             if source.is_file():
                 shutil.copy2(source, self.workspace / name)
         self._ensure_agent_problem()
-        self._ensure_public_shapes()
         if generalized:
             # Seed the immutable public contract into the eventual V0 commit even when the
             # baseline agent stages only its own implementation files.
@@ -1599,6 +1500,11 @@ class Campaign:
             health_command=self.sandbox_health_command,
             gateway_kind="run",
             private_reference_dir=self.private_reference_dir,
+            # V0 is mandatory campaign evidence.  Keep polling/retrying through
+            # infrastructure failures exactly like the later terminal candidate
+            # gates; a completed incorrect V0 still returns normally and is
+            # rejected by the correctness check below.
+            terminal_validation=True,
         )
         self._print_v0_evaluator_output(test)
         if test.returncode == ENVIRONMENT_TEMPFAIL:

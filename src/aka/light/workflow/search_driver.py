@@ -35,6 +35,61 @@ from aka.light.workspace.shared_history import export_epoch, import_exports
 from aka.light.research import ResearchStore
 
 
+_OPEN_DIRECTION_STATUSES = {"proposed", "in_progress", "deferred", "blocked"}
+
+
+def _shareable_claim(item):
+    """Keep explicit low-quality reviews trajectory-local; preserve legacy claims."""
+    quality = item.get("claim_review_quality", item.get("review_quality"))
+    return quality not in {
+        "partially_supported", "unreviewed"
+    }
+
+
+def _aggregate_direction_queue(research_states, directions):
+    """Merge trajectory-local rankings without letting the last writer win.
+
+    Rank is normalized inside each trajectory before averaging so a longer
+    local queue does not carry a larger numeric penalty.  A trajectory that
+    has not observed a newly proposed Direction casts no vote for it instead
+    of implicitly ranking it last.  Deterministic ties prefer broader
+    agreement, then the lower mean raw rank, then the stable Direction ID.
+    """
+    open_ids = {
+        direction_id
+        for direction_id, direction in directions.items()
+        if direction.get("status") in _OPEN_DIRECTION_STATUSES
+    }
+    votes = {direction_id: [] for direction_id in open_ids}
+    for trajectory, state in sorted(research_states.items()):
+        # Only the trajectory's independently maintained writable queue is a
+        # vote. ``shared_queue`` is the result of an earlier aggregation; using
+        # it as another vote would feed the global order back into itself and
+        # progressively drown out independent local judgments.
+        raw_queue = state.get("queue", [])
+        if not isinstance(raw_queue, list):
+            raise RuntimeError(
+                f"Trajectory {trajectory} has an invalid Direction queue"
+            )
+        queue = []
+        for direction_id in raw_queue:
+            if direction_id in open_ids and direction_id not in queue:
+                queue.append(direction_id)
+        denominator = max(len(queue) - 1, 1)
+        for offset, direction_id in enumerate(queue):
+            votes[direction_id].append((offset / denominator, offset + 1))
+
+    def rank(direction_id):
+        observed = votes[direction_id]
+        if not observed:
+            return (1.0, 0, float("inf"), direction_id)
+        mean_normalized = sum(item[0] for item in observed) / len(observed)
+        mean_raw = sum(item[1] for item in observed) / len(observed)
+        return (mean_normalized, -len(observed), mean_raw, direction_id)
+
+    return sorted(open_ids, key=rank)
+
+
 class EpisodeSearchDriver:
     def __init__(self, campaign, root: Path):
         self.campaign, self.root = campaign, root
@@ -224,11 +279,18 @@ class EpisodeSearchDriver:
         except FileNotFoundError:
             previous = {"directions": {}, "experiments": {}, "records": {}}
         direction_rows = {
-            number: projection["directions"] for number, projection in projections.items()
+            number: {
+                key: item
+                for key, item in projection["directions"].items()
+                if _shareable_claim(item)
+            }
+            for number, projection in projections.items()
         }
         experiment_rows = {
             number: {
-                item["experiment_id"]: item for item in projection["experiments"]
+                item["experiment_id"]: item
+                for item in projection["experiments"]
+                if _shareable_claim(item)
             }
             for number, projection in projections.items()
         }
@@ -250,6 +312,10 @@ class EpisodeSearchDriver:
             job_rows,
             "Experiment",
         )
+        for experiment_id, experiment in experiments.items():
+            trajectory = experiment_origins.get(experiment_id, {}).get("trajectory")
+            if type(trajectory) is int and trajectory > 0:
+                experiment["recorded_by"] = f"T{trajectory}"
         for experiment_id, experiment in experiments.items():
             if not experiment.get("references"):
                 continue
@@ -286,47 +352,7 @@ class EpisodeSearchDriver:
             )
             for number, store in research_stores.items()
         }
-        research_events = {
-            number: (
-                store.events_through_episode(terminal[number])
-                if terminal_only
-                else store.events()
-            )
-            for number, store in research_stores.items()
-        }
-        # A progress step is monotonic. Merge the union so a peer's completed
-        # milestone cannot disappear when the Direction crosses an Epoch.
-        for direction_id, direction in directions.items():
-            completed = set()
-            for state in research_states.values():
-                item = state.get("directions", {}).get(direction_id, {})
-                completed.update(item.get("completed_plan_steps", []))
-            if completed:
-                direction["completed_plan_steps"] = sorted(completed)
-
-        latest_reorder = None
-        for number, events in research_events.items():
-            for event in events:
-                if event.get("type") != "direction.reordered":
-                    continue
-                candidate = (str(event.get("recorded_at", "")), number)
-                if latest_reorder is None or candidate > latest_reorder:
-                    latest_reorder = candidate
-        order_sources = sorted(research_states)
-        if latest_reorder is not None:
-            preferred = latest_reorder[1]
-            order_sources = [preferred, *(item for item in order_sources if item != preferred)]
-        research_queue = []
-        for number in order_sources:
-            for direction_id in research_states[number].get("queue", []):
-                if direction_id in directions and direction_id not in research_queue:
-                    research_queue.append(direction_id)
-        for direction_id in sorted(directions):
-            if (
-                directions[direction_id].get("status") in {"proposed", "in_progress", "deferred", "blocked"}
-                and direction_id not in research_queue
-            ):
-                research_queue.append(direction_id)
+        research_queue = _aggregate_direction_queue(research_states, directions)
 
         central = MeasurementStore(self.root / "shared" / "measurements")
         record_origins = copy.deepcopy(previous.get("records", {}))

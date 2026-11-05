@@ -144,8 +144,8 @@ class DuplicateTask(RuntimeError):
         return {"code": "duplicate_gateway_task", "message": str(self),
                 "gateway_record_id": self.record_id,
                 "next_action": (
-                    "Read the recorded result: python3 tools/sandbox.py --kind record-read --record-id "
-                    + self.record_id if self.record_id else
+                    "Read records/" + self.record_id + ".json; do not resubmit the completed task."
+                    if self.record_id else
                     "Wait for the original request; do not launch a second identical job.")}
 
 

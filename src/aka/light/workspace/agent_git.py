@@ -19,7 +19,7 @@ IGNORED = (
     "scratch/", "tools/", "skills/", "memory/", "input/", "eval/", "profiles/",
     "plans/", "directions/", "experiments/", "records/", "reference/", "input/evidence/",
     ".atrex_*/", ".claude/", ".agents/",
-    "README.md", "CLAUDE.md", "WORKSPACE.md", "PROGRESS.md", "agent_problem.json", "public_shapes.json",
+    "README.md", "CLAUDE.md", "WORKSPACE.md", "PROGRESS.md", "frontier.json", "agent_problem.json",
     "reference.py", "input.py", "shapes.json", "metadata.json", "roofline.json", "valid.py",
     "definition.json", "workload.jsonl", "solution.json", "config.json", "test_kernel.py",
     "profile_driver.py", "*.jsonl",
@@ -190,13 +190,16 @@ class AgentGit:
             present = _run(
                 self.workspace, "cat-file", "-e", f"{commit_id}^{{commit}}", check=False
             )
-            if present.returncode == 0:
-                from aka.light.workspace.sources import from_git
+            if present.returncode != 0:
+                raise ValueError(
+                    "Runtime cannot expose a private source snapshot as a different Git commit"
+                )
+            from aka.light.workspace.sources import from_git
 
-                if from_git(self.workspace, commit_id) != source:
-                    raise ValueError("Runtime Kernel commit does not match its saved source")
-                _run(self.workspace, "update-ref", ref, commit_id)
-                return commit_id
+            if from_git(self.workspace, commit_id) != source:
+                raise ValueError("Runtime Kernel commit does not match its saved source")
+            _run(self.workspace, "update-ref", ref, commit_id)
+            return commit_id
         files = Artifact(source).materialized_files
         with tempfile.TemporaryDirectory(prefix="aka-agent-index-") as directory:
             index = str(Path(directory) / "index")
@@ -223,6 +226,33 @@ class AgentGit:
         commit = _run(self.workspace, "commit-tree", tree, "-m", message).stdout.strip()
         _run(self.workspace, "update-ref", ref, commit)
         return commit
+
+    def commit_reachable(self, commit_id: str) -> bool:
+        """Return whether a complete commit is reachable from Agent-visible Git state."""
+        if GIT_COMMIT_ID.fullmatch(commit_id) is None:
+            return False
+        ancestor = _run(
+            self.workspace,
+            "merge-base",
+            "--is-ancestor",
+            commit_id,
+            "HEAD",
+            check=False,
+        )
+        if ancestor.returncode == 0:
+            return True
+        refs = _run(
+            self.workspace,
+            "for-each-ref",
+            "--format=%(refname)",
+            "--contains",
+            commit_id,
+            "refs/heads",
+            "refs/tags",
+            "refs/atrex",
+            check=False,
+        )
+        return refs.returncode == 0 and bool(refs.stdout.strip())
 
     def head(self) -> str | None:
         result = _run(self.workspace, "rev-parse", "HEAD", check=False)

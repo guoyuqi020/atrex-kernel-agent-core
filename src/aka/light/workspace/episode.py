@@ -20,7 +20,7 @@ from aka.light.workspace.sources import (
 
 EPISODE_WORKSPACE_ENV = "ATREX_EPISODE_WORKSPACE"
 PUBLIC_FILES = (
-    "README.md", "CLAUDE.md", "agent_problem.json", "public_shapes.json", "reference.py", "input.py",
+    "README.md", "CLAUDE.md", "agent_problem.json", "reference.py", "input.py",
     "definition.json", "workload.jsonl", "solution.json", "shapes.json", "metadata.json", "roofline.json",
     "valid.py",
 )

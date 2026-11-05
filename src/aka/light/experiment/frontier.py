@@ -10,13 +10,19 @@ from aka.light.evaluation.provider import result_from_response
 from aka.light.experiment.store import MeasurementStore, RECORD_ID, read_record_header
 
 
-def latest_gateway_result(store: MeasurementStore) -> dict | None:
+def latest_gateway_result(
+    store: MeasurementStore,
+    *,
+    record_ids: set[str] | None = None,
+) -> dict | None:
     """Return a compact, trusted summary of the newest terminal Gateway Record."""
     candidates: list[tuple[float, str]] = []
     for path in (store.root / "records").glob("gateway-*/record.json"):
         record_id = path.parent.name
         try:
-            if not RECORD_ID.fullmatch(record_id):
+            if not RECORD_ID.fullmatch(record_id) or (
+                record_ids is not None and record_id not in record_ids
+            ):
                 continue
             header = read_record_header(path)
             if header["gateway_record_id"] != record_id:
@@ -102,7 +108,11 @@ def latest_gateway_result(store: MeasurementStore) -> dict | None:
     return None
 
 
-def kernel_pareto_frontier(store: MeasurementStore) -> dict:
+def kernel_pareto_frontier(
+    store: MeasurementStore,
+    *,
+    record_ids: set[str] | None = None,
+) -> dict:
     """Read existing facts only; a per-Shape envelope is not a measured composite Kernel.
 
     Use the same ordinary-full-Evaluate eligibility as nomination, never Profile,
@@ -116,7 +126,9 @@ def kernel_pareto_frontier(store: MeasurementStore) -> dict:
     for path in (store.root / "records").glob("gateway-*/record.json"):
         record_id = path.parent.name
         try:
-            if not RECORD_ID.fullmatch(record_id):
+            if not RECORD_ID.fullmatch(record_id) or (
+                record_ids is not None and record_id not in record_ids
+            ):
                 continue
             # Do not load response bodies or source artifacts for other operations.
             header = read_record_header(path)

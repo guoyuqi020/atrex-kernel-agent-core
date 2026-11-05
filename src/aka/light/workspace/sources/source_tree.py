@@ -140,7 +140,7 @@ def instructions(policy):
             "Keep probes and temporary build outputs in scratch/; use custom tools/ or skills/ "
             "only for genuinely reusable Agent helpers. "
             "Evaluate, Profile, Check, Disassemble, sealed reports and broadcasts bind the entire tree. "
-            "kernel-read writes a directory for tree Kernels; pass that directory to --baseline-path.\n")
+            "For ABBA, pass a reachable Git commit with --baseline-commit; Runtime exports it privately.\n")
 
 def _git_sources(repository, revision, paths):
     if not isinstance(revision, str) or len(revision) not in {40, 64} or any(c not in "0123456789abcdef" for c in revision):

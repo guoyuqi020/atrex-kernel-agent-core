@@ -18,7 +18,7 @@ class WorkflowSettings:
     platform: str
     framework: str
     specify_dsl: bool = True
-    public_shapes: int | str = "all"
+    expose_evaluator_shapes: bool = True
     notes: str = "none"
     arch: str = ""
     max_iters: int = 20
@@ -50,13 +50,8 @@ class WorkflowSettings:
     def __post_init__(self):
         if type(self.specify_dsl) is not bool:
             raise TypeError("specify_dsl must be a boolean")
-        if not (
-            (type(self.public_shapes) is int and self.public_shapes >= 0)
-            or self.public_shapes == "all"
-        ):
-            raise ValueError(
-                "public_shapes must be a non-negative integer or 'all'"
-            )
+        if type(self.expose_evaluator_shapes) is not bool:
+            raise TypeError("expose_evaluator_shapes must be a boolean")
         for name in (
             "setup_timeout",
             "framework_baseline_timeout",

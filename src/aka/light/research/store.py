@@ -30,7 +30,9 @@ MAX_EVENT_SEGMENT_BYTES = 8 * 1024 * 1024
 MAX_EVENT_SEGMENTS = 4096
 MAX_BOARD_DIRECTIONS = 12
 MAX_BOARD_EXPERIMENTS = 8
-OPEN_STATUSES = {"proposed", "in_progress", "deferred", "blocked"}
+RUNNABLE_STATUSES = {"proposed", "in_progress"}
+PAUSED_STATUSES = {"deferred", "blocked"}
+OPEN_STATUSES = RUNNABLE_STATUSES | PAUSED_STATUSES
 CLOSED_STATUSES = {"completed", "abandoned"}
 
 
@@ -56,6 +58,7 @@ def _empty() -> dict[str, Any]:
         "directions": {},
         "experiments": {},
         "queue": [],
+        "shared_queue": [],
         "lineages": {},
         "promotions": [],
         # Private idempotency index.  Keeping this in the compact projection
@@ -68,15 +71,15 @@ def _lineage_key(origin: Mapping[str, object] | None) -> str:
     return f"T{_origin(origin)['trajectory']}"
 
 
-def _derive_next_step(direction: Mapping[str, object]) -> str | None:
-    plan = direction.get("plan")
-    completed = set(direction.get("completed_plan_steps") or [])
-    if not isinstance(plan, list):
-        return None
-    for index, step in enumerate(plan):
-        if index not in completed and isinstance(step, str) and step.strip():
-            return step
-    return None
+def _remove_retired_plan_progress(state: Mapping[str, object]) -> None:
+    """Remove Runtime-owned plan cursors from historical snapshots/events."""
+    directions = state.get("directions")
+    if not isinstance(directions, Mapping):
+        return
+    for direction in directions.values():
+        if isinstance(direction, dict):
+            direction.pop("completed_plan_steps", None)
+            direction.pop("next_step", None)
 
 
 def _apply(state: dict[str, Any], event: Mapping[str, object]) -> None:
@@ -90,6 +93,8 @@ def _apply(state: dict[str, Any], event: Mapping[str, object]) -> None:
         if not isinstance(direction, Mapping):
             raise ValueError("direction.observed requires a direction object")
         item = deepcopy(dict(direction))
+        item.pop("completed_plan_steps", None)
+        item.pop("next_step", None)
         direction_id = item.get("direction_id")
         if not isinstance(direction_id, str) or not direction_id:
             raise ValueError("observed Direction has no ID")
@@ -105,19 +110,7 @@ def _apply(state: dict[str, Any], event: Mapping[str, object]) -> None:
             raise ValueError("Direction revision is invalid")
         if item_revision < previous_revision:
             raise ValueError("Direction revision regressed")
-        completed = previous.get("completed_plan_steps", [])
-        if item_revision > previous_revision:
-            old_plan = previous.get("plan", [])
-            completed_steps = {
-                old_plan[index]
-                for index in completed
-                if type(index) is int and 0 <= index < len(old_plan)
-            }
-            completed = [
-                index for index, step in enumerate(item.get("plan", []))
-                if step in completed_steps
-            ]
-        item.setdefault("completed_plan_steps", completed)
+        item.setdefault("access", previous.get("access", "local_writable"))
         proposed_by = item.get("proposed_by") or previous.get("proposed_by")
         if not isinstance(proposed_by, str) or not proposed_by:
             proposed_by = _lineage_key(origin)
@@ -126,12 +119,18 @@ def _apply(state: dict[str, Any], event: Mapping[str, object]) -> None:
         if item.get("status") == "in_progress" and not item.get("owner") and previous_owner:
             item["owner"] = previous_owner
         item["origin"] = _origin(item.get("origin") if isinstance(item.get("origin"), Mapping) else origin)
-        item["next_step"] = _derive_next_step(item)
         state["directions"][direction_id] = item
-        if item.get("status") in OPEN_STATUSES and direction_id not in state["queue"]:
-            state["queue"].append(direction_id)
-        if item.get("status") in CLOSED_STATUSES and direction_id in state["queue"]:
-            state["queue"].remove(direction_id)
+        if item.get("status") in OPEN_STATUSES:
+            if item.get("access") == "peer_read_only":
+                if direction_id in state["queue"]:
+                    state["queue"].remove(direction_id)
+            elif direction_id not in state["queue"]:
+                state["queue"].append(direction_id)
+        if item.get("status") in CLOSED_STATUSES:
+            if direction_id in state["queue"]:
+                state["queue"].remove(direction_id)
+            if direction_id in state["shared_queue"]:
+                state["shared_queue"].remove(direction_id)
         owner = item.get("owner") or previous_owner
         if isinstance(owner, str) and owner:
             active_ids = [
@@ -144,18 +143,12 @@ def _apply(state: dict[str, Any], event: Mapping[str, object]) -> None:
             lineage["active_direction_ids"] = active_ids
             # Retain the singular key for old snapshots and consumers that display one focus.
             lineage["active_direction_id"] = active_ids[0] if active_ids else None
+            if lineage.get("focus_direction_id") not in active_ids:
+                lineage["focus_direction_id"] = active_ids[0] if active_ids else None
     elif kind == "direction.progressed":
-        direction_id = payload.get("direction_id")
-        direction = state["directions"].get(direction_id)
-        if direction is None:
-            raise ValueError("Direction progress references an unknown Direction")
-        index = payload.get("plan_step")
-        if type(index) is not int or index < 0 or index >= len(direction.get("plan", [])):
-            raise ValueError("Direction progress has an invalid plan_step")
-        completed = set(direction.get("completed_plan_steps", []))
-        completed.add(index)
-        direction["completed_plan_steps"] = sorted(completed)
-        direction["next_step"] = _derive_next_step(direction)
+        # Historical compatibility only. Direction plans are Agent-owned:
+        # Runtime does not track completed steps or derive the next action.
+        pass
     elif kind == "direction.reordered":
         direction_id = payload.get("direction_id")
         if direction_id not in state["queue"]:
@@ -174,7 +167,19 @@ def _apply(state: dict[str, Any], event: Mapping[str, object]) -> None:
             offset = queue.index(anchor) + (1 if after is not None else 0)
             queue.insert(offset, direction_id)
         state["queue"] = queue
-    elif kind == "queue.synchronized":
+    elif kind == "direction.focused":
+        direction_id = payload.get("direction_id")
+        direction = state["directions"].get(direction_id)
+        if (
+            not isinstance(direction, Mapping)
+            or direction.get("access") != "local_writable"
+            or direction.get("status") != "in_progress"
+        ):
+            raise ValueError("Only a local in-progress Direction can be focused")
+        owner = direction.get("owner") or _lineage_key(origin)
+        lineage = state["lineages"].setdefault(owner, {})
+        lineage["focus_direction_id"] = direction_id
+    elif kind in {"queue.synchronized", "shared_queue.synchronized"}:
         requested = payload.get("direction_ids")
         if not isinstance(requested, list) or len(set(requested)) != len(requested):
             raise ValueError("Shared Direction queue must contain unique IDs")
@@ -184,11 +189,16 @@ def _apply(state: dict[str, Any], event: Mapping[str, object]) -> None:
         open_ids = [
             item for item in requested
             if state["directions"][item].get("status") in OPEN_STATUSES
+            and state["directions"][item].get("access") == "peer_read_only"
         ]
-        for item in state["queue"]:
-            if item not in open_ids and state["directions"].get(item, {}).get("status") in OPEN_STATUSES:
-                open_ids.append(item)
-        state["queue"] = open_ids
+        for direction_id, direction in state["directions"].items():
+            if (
+                direction_id not in open_ids
+                and direction.get("status") in OPEN_STATUSES
+                and direction.get("access") == "peer_read_only"
+            ):
+                open_ids.append(direction_id)
+        state["shared_queue"] = open_ids
     elif kind == "experiment.observed":
         experiment = payload.get("experiment")
         if not isinstance(experiment, Mapping):
@@ -200,8 +210,11 @@ def _apply(state: dict[str, Any], event: Mapping[str, object]) -> None:
         item["origin"] = _origin(item.get("origin") if isinstance(item.get("origin"), Mapping) else origin)
         previous = state["experiments"].get(experiment_id)
         if previous is not None:
-            previous_value = {key: value for key, value in previous.items() if key != "origin"}
-            item_value = {key: value for key, value in item.items() if key != "origin"}
+            derived = {"origin", "recorded_by", "access"}
+            previous_value = {
+                key: value for key, value in previous.items() if key not in derived
+            }
+            item_value = {key: value for key, value in item.items() if key not in derived}
             previous_revision = previous.get("revision", 1)
             item_revision = item.get("revision", 1)
             if (
@@ -218,7 +231,12 @@ def _apply(state: dict[str, Any], event: Mapping[str, object]) -> None:
                     raise ValueError(
                         "Experiment revision was reused for different content"
                     )
-                item = previous
+                # Source lineage and local access are derived independently in
+                # each trajectory and may be added to an existing revision by
+                # a newer Runtime projection.
+                for field in ("recorded_by", "access"):
+                    if field not in item and field in previous:
+                        item[field] = previous[field]
         state["experiments"][experiment_id] = item
     elif kind == "lineage.checkpointed":
         lineage = _lineage_key(origin)
@@ -233,8 +251,20 @@ def _apply(state: dict[str, Any], event: Mapping[str, object]) -> None:
     elif kind == "kernel.adopted":
         lineage = _lineage_key(origin)
         current = state["lineages"].setdefault(lineage, {})
-        current["working_kernel_id"] = payload.get("kernel_id")
-        current["adopted_from"] = deepcopy(payload.get("source"))
+        # Replay-only compatibility for logs created before the adopt-kernel
+        # operation was retired. New Agents use imported Git refs directly.
+        # Older events may contain one ID or distinct source/local IDs.
+        source_kernel_id = payload.get(
+            "source_kernel_commit_id", payload.get("kernel_id")
+        )
+        local_kernel_id = payload.get(
+            "local_kernel_commit_id", payload.get("kernel_id")
+        )
+        current["working_kernel_id"] = local_kernel_id
+        source = deepcopy(payload.get("source"))
+        source = source if isinstance(source, dict) else {}
+        source["kernel_commit_id"] = source_kernel_id
+        current["adopted_from"] = source
     elif kind in {"promotion.accepted", "promotion.rejected"}:
         state["promotions"].append({
             "type": kind,
@@ -363,7 +393,9 @@ class ResearchStore:
         state = deepcopy(value["state"])
         if state.get("schema_version") != SCHEMA_VERSION or type(state.get("sequence")) is not int:
             return None
+        _remove_retired_plan_progress(state)
         state.setdefault("dedupe_keys", [])
+        state.setdefault("shared_queue", [])
         active_size = self._active_size()
         offset = value["active_offset"]
         if offset > active_size:
@@ -585,19 +617,6 @@ class ResearchStore:
             origin=origin,
         )
 
-    def progress(
-        self,
-        direction_id: str,
-        plan_step: int,
-        *,
-        origin: Mapping[str, object] | None = None,
-    ) -> dict[str, Any]:
-        return self.append(
-            "direction.progressed",
-            {"direction_id": direction_id, "plan_step": plan_step},
-            origin=origin,
-        )
-
     def checkpoint_lineage(
         self, values: Mapping[str, object], *, origin: Mapping[str, object] | None = None
     ) -> dict[str, Any]:
@@ -608,46 +627,28 @@ class ResearchStore:
             skip_if_projection_unchanged="lineages",
         )
 
-    def synchronize_queue(
+    def synchronize_shared_queue(
         self,
         direction_ids: list[str],
         *,
         origin: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         return self.append(
-            "queue.synchronized",
+            "shared_queue.synchronized",
             {"direction_ids": direction_ids},
             origin=origin,
-            # The same shared order may need to be applied again after a local
-            # reorder.  Global event-key deduplication would incorrectly keep
-            # that later local order, so deduplicate only when the resulting
-            # queue projection is already current.
-            skip_if_projection_unchanged="queue",
+            skip_if_projection_unchanged="shared_queue",
         )
 
-    def adopt_kernel(
+    def focus_direction(
         self,
-        kernel_commit_id: str,
+        direction_id: str,
         *,
-        source_ref: str,
-        reason: str,
         origin: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
-        if not isinstance(kernel_commit_id, str) or not kernel_commit_id:
-            raise ValueError("Kernel adoption requires a Kernel commit ID")
-        if not isinstance(source_ref, str) or not source_ref.strip():
-            raise ValueError("Kernel adoption requires the local or shared Git ref used")
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("Kernel adoption requires a non-empty reason")
         return self.append(
-            "kernel.adopted",
-            {
-                # Private event compatibility: historical projections use this
-                # key internally.  The Agent-facing Board renames it precisely.
-                "kernel_id": kernel_commit_id,
-                "source": {"git_ref": source_ref.strip()},
-                "reason": reason.strip(),
-            },
+            "direction.focused",
+            {"direction_id": direction_id},
             origin=origin,
         )
 
@@ -658,50 +659,102 @@ class ResearchStore:
         pareto_frontier: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         state = self.read()
-        queue = []
-        for rank, direction_id in enumerate(state["queue"], 1):
-            item = state["directions"].get(direction_id)
-            if not isinstance(item, dict):
-                continue
-            owner = item.get("owner")
-            status = item.get("status")
-            queue.append({
-                "rank": rank,
-                "direction_id": direction_id,
-                "name": item.get("name"),
-                "change_scope": item.get("change_scope", "local"),
-                "proposed_by": item.get("proposed_by"),
-                "status": f"in_progress({owner})" if status == "in_progress" and owner else status,
-                "hypothesis": item.get("hypothesis"),
-                "applicability": item.get("applicability"),
-                "expected_benefit": item.get("expected_benefit"),
-                "next_step": item.get("next_step"),
-                "analysis": item.get("analysis"),
-                "reopen_condition": item.get("reopen_condition"),
-            })
-            if len(queue) >= MAX_BOARD_DIRECTIONS:
-                break
+        current_lineage = f"T{trajectory}"
+        current_state = state.get("lineages", {}).get(current_lineage, {})
+        active_ids = {
+            value
+            for value in current_state.get("active_direction_ids", [])
+            if isinstance(value, str)
+        }
+
+        def projected_queue(
+            direction_ids, *, rank_field, access, statuses, pinned=frozenset()
+        ):
+            candidates = []
+            for rank, direction_id in enumerate(direction_ids, 1):
+                item = state["directions"].get(direction_id)
+                if not isinstance(item, dict) or item.get("access") != access:
+                    continue
+                owner = item.get("owner")
+                status = item.get("status")
+                if status not in statuses:
+                    continue
+                candidates.append({
+                    rank_field: rank,
+                    "direction_id": direction_id,
+                    "name": item.get("name"),
+                    "change_scope": item.get("change_scope", "incremental"),
+                    "proposed_by": item.get("proposed_by"),
+                    "access": item.get("access"),
+                    "status": (
+                        f"in_progress({owner})"
+                        if status == "in_progress" and owner else status
+                    ),
+                    "hypothesis": item.get("hypothesis"),
+                    "applicability": item.get("applicability"),
+                    "expected_benefit": item.get("expected_benefit"),
+                    "analysis": item.get("analysis"),
+                    "reopen_condition": item.get("reopen_condition"),
+                    "claim_review_quality": item.get(
+                        "claim_review_quality", item.get("review_quality")
+                    ),
+                })
+            rows = candidates[:MAX_BOARD_DIRECTIONS]
+            visible_ids = {item.get("direction_id") for item in rows}
+            rows.extend(
+                item
+                for item in candidates
+                if item.get("direction_id") in pinned
+                and item.get("direction_id") not in visible_ids
+            )
+            rows.sort(key=lambda item: item.get(rank_field, 1 << 30))
+            return rows, len(candidates)
+
+        queue, queue_total = projected_queue(
+            state["queue"], rank_field="local_rank", access="local_writable",
+            statuses=RUNNABLE_STATUSES, pinned=active_ids,
+        )
+        paused, paused_total = projected_queue(
+            state["queue"], rank_field="local_rank", access="local_writable",
+            statuses=PAUSED_STATUSES,
+        )
+        shared_queue, shared_queue_total = projected_queue(
+            state["shared_queue"],
+            rank_field="shared_rank",
+            access="peer_read_only",
+            statuses=RUNNABLE_STATUSES,
+        )
+        shared_paused, shared_paused_total = projected_queue(
+            state["shared_queue"],
+            rank_field="shared_rank",
+            access="peer_read_only",
+            statuses=PAUSED_STATUSES,
+        )
         experiments = list(state["experiments"].values())[-MAX_BOARD_EXPERIMENTS:]
         recent = [
             {
                 key: item.get(key)
-                for key in ("experiment_id", "direction_id", "name", "interpretation")
+                for key in (
+                    "experiment_id", "direction_id", "name", "recorded_by", "access",
+                    "interpretation",
+                )
                 if item.get(key) is not None
             }
             for item in experiments
         ]
-        closed = [
+        all_closed = [
             {
                 key: item.get(key)
                 for key in (
-                    "direction_id", "name", "proposed_by", "status", "hypothesis",
+                    "direction_id", "name", "proposed_by", "access", "status", "hypothesis",
                     "applicability", "expected_benefit", "analysis", "reopen_condition",
                 )
                 if item.get(key) is not None
             }
             for item in state["directions"].values()
             if item.get("status") in CLOSED_STATUSES
-        ][-MAX_BOARD_DIRECTIONS:]
+        ]
+        closed = all_closed[-MAX_BOARD_DIRECTIONS:]
         promotions = state["promotions"]
         incumbent = next(
             (
@@ -737,9 +790,17 @@ class ResearchStore:
             "revision": state["sequence"],
             "incumbent": public_incumbent,
             "lineages": public_lineages,
-            "current_lineage": f"T{trajectory}",
+            "current_lineage": current_lineage,
             "pareto_frontier": frontier,
             "open_queue": queue,
+            "open_queue_total": queue_total,
+            "paused_directions": paused,
+            "paused_directions_total": paused_total,
+            "shared_direction_pool": shared_queue,
+            "shared_direction_pool_total": shared_queue_total,
+            "shared_paused_directions": shared_paused,
+            "shared_paused_directions_total": shared_paused_total,
             "recent_experiments": recent,
             "closed_directions": closed,
+            "closed_directions_total": len(all_closed),
         }

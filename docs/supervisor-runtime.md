@@ -43,7 +43,7 @@ python3 tools/sandbox.py --kind env
 | Operation | Meaning |
 | --- | --- |
 | Evaluate (`run`) | Full or correctness-only evaluator request; native candidate checks use five cases per Shape |
-| ABBA (`run --baseline-path ...`) | Native comparison against an exact baseline source snapshot |
+| ABBA (`run --baseline-commit ...`) | Native comparison against an exact reachable baseline Git commit; Runtime exports its source privately |
 | Profile | Profiler evidence for a selected shape; not correctness or promotion evidence |
 | Dev | Bounded exploratory commands; a source-bound record does not prove the command measured that source |
 | Check / Disassemble | Supported source diagnostics, subject to layout and worker capabilities |
@@ -58,20 +58,18 @@ trusted diagnostic route. Native CUDA manifests support Evaluate, Profile, and A
 not Check/Disassemble or SOL/SSH. Light ABBA requires Agate Atrex-Bench.
 See [source-layout compatibility](native-cuda.md) before selecting an operation.
 
-The Episode prompt contains the exact acceptance ABBA command and the matching
-`kernel-read` command. Use those values rather than assuming that every candidate is
-a Python file or that any exploratory comparison can be reused for promotion.
+The Episode prompt contains the exact acceptance ABBA command and incumbent commit. Use those
+values rather than assuming that any exploratory comparison can be reused for promotion.
 
 ## Public results and original GPU errors
 
-GPU calls and `record-read` return a single JSON object containing `operation`,
+GPU calls and projected `records/<gateway_record_id>.json` contain `operation`,
 `status`, `result`, `gateway_record_id`, and `kernel_commit_id` when source-bound.
 ABBA is an Evaluate result with `result.comparison` and `baseline_kernel_commit_id`.
 Dev output lives inside `result.stdout`, `result.stderr`, and its exit code.
 
-A successful historical read exits zero even if the saved evaluator rejected the candidate.
-Inspect the result's status and correctness. Initial failed operations retain nonzero CLI
-outcomes. Legacy marker streams are private executor evidence, not the agent parsing contract.
+Inspect each projected result's status and correctness. Initial failed operations retain nonzero
+CLI outcomes. Legacy marker streams are private executor evidence, not the Agent parsing contract.
 
 Feedback retains compiler/runner errors, rank-local checks, output identity, numerical errors,
 tolerances, and failing-case seeds. Private dimensions and credentials are redacted.

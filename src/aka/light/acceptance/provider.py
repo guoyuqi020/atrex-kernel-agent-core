@@ -148,7 +148,7 @@ class RecordedAcceptance:
                 "The report was not accepted and no candidate commit was created.",
                 code="candidate_correctness_failed", gateway_record_id=record_id,
                 next_action=(
-                    f"Inspect python3 tools/sandbox.py --kind record-read --record-id {record_id}. "
+                    f"Inspect records/{record_id}.json. "
                     + ("Repair the Kernel implementation, record a passing full Evaluate and its Experiment, then resubmit "
                        "episode-report with the matching selected_experiment_id. "
                        if context.experiments_enabled else

@@ -25,10 +25,9 @@ operations and request schemas. Do not infer a different workflow from unrelated
 - Use the trajectory's local Git repository for checkpoints, branches, comparison, and rollback.
   Before every Kernel-bound Runtime request, commit the complete candidate and leave the worktree
   clean. The full HEAD is `kernel_commit_id`; a commit is source identity, not measurement evidence.
-- `public_shapes.json`, when present, lists the exact Shape parameters intentionally disclosed by
-  the Supervisor. Unlisted Shape IDs are opaque. If a generalized task has no such file, no exact
-  Shape parameters are public. Ordinary public-shape tasks may provide `shapes.json`. Never infer or
-  search for private cases. Shape-subset measurements are diagnostic, not promotion evidence.
+- In exposed mode, `shapes.json` is the authoritative public evaluator workload. In hidden mode,
+  exact Shape parameters are private and Runtime result Shape IDs are opaque. Never infer or search
+  for private cases. Shape-subset measurements are diagnostic, not promotion evidence.
 - Use `scratch/` for temporary probes and outputs. Installed `tools/` and `skills/`, Runtime
   projections, public inputs, and historical evidence are Supervisor-owned; do not edit them.
   Do not create extra plan, profile, or benchmark documents unless the Prompt or a Skill requires

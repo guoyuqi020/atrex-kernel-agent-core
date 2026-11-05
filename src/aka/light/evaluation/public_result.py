@@ -6,6 +6,8 @@ import json
 import math
 import statistics
 
+from aka.light.evaluation.response_policy import known_gateway_error
+
 PREFIXES = {
     "evaluate": "[test_kernel] RESULT_JSON=",
     "same_allocation_abba": "[sandbox] ABBA_JSON=",
@@ -263,18 +265,33 @@ def canonical_result(response: dict, request: dict, *, record_id=None, kernels=N
     if operation == "dev":
         result["exit_code"] = response.get("exit_code")
     if errors:
-        for key in ("error", "next_action", "recovery", "outcome", "job_id", "trace_id", "http_status"):
-            if key in errors[0]:
-                result[key] = errors[0][key]
+        first_error = errors[0]
+        if known_gateway_error(first_error):
+            for key in (
+                "error", "next_action", "recovery", "outcome", "job_id",
+                "trace_id", "http_status",
+            ):
+                if key in first_error:
+                    result[key] = first_error[key]
+        else:
+            # Unknown Agate schemas are already redacted at the projection
+            # boundary. Keep the complete envelope so the Agent sees the
+            # actual failure instead of a Runtime-authored generic wrapper.
+            result.update(deepcopy(first_error))
         if len(errors) > 1:
             result["errors"] = errors
     if response.get("truncated"):
         result["truncated"] = True
     if response.get("diagnostic_truncation"):
         result["diagnostic_truncation"] = response["diagnostic_truncation"]
-    if missing_result:
+    if missing_result and not (notes or response.get("stderr")):
         result.update(error={"code": "result_unavailable", "message": "No valid structured result was captured."},
                       outcome="unknown", next_action="Inspect the saved Record and ask the operator to reconcile the outcome; do not resubmit blindly.")
+    elif missing_result:
+        # Unknown Agate output is itself the diagnostic. Preserve the redacted
+        # streams and exit code without obscuring them with a synthetic
+        # result_unavailable/outcome_unknown wrapper.
+        result["exit_code"] = response.get("exit_code")
     return {"operation": "evaluate" if operation == "same_allocation_abba" else operation,
             "status": status, "result": result, **identity}
 

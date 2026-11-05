@@ -10,8 +10,6 @@ from typing import Any, Optional, cast
 
 AGENT_PROBLEM_FILENAME = "agent_problem.json"
 AGENT_PROBLEM_SCHEMA_VERSION = "atrex.agent_problem.v1"
-PUBLIC_SHAPES_FILENAME = "public_shapes.json"
-PUBLIC_SHAPES_SCHEMA_VERSION = "atrex.public_shapes.v1"
 GENERATED_AGENT_PROBLEM_FIELDS = frozenset(
     {
         "schema_version",
@@ -31,7 +29,6 @@ GENERALIZED_AGENT_VISIBLE_FILES = (
     "input.py",
     "metadata.json",
     AGENT_PROBLEM_FILENAME,
-    PUBLIC_SHAPES_FILENAME,
 )
 LEGACY_ATREX_VISIBLE_FILES = (
     "reference.py",
@@ -88,44 +85,6 @@ def validate_private_shapes(path: Path) -> dict[str, dict[str, Any]]:
             + ", ".join(invalid[:8])
         )
     return cast(dict[str, dict[str, Any]], payload)
-
-
-def _shape_sort_key(shape_id: str) -> tuple[int, object]:
-    return (0, int(shape_id)) if shape_id.isdigit() else (1, shape_id)
-
-
-def public_shapes_payload(
-    private_shapes_path: Path, *, count: int | str = "all"
-) -> dict[str, Any]:
-    """Project the canonical prefix without exposing any remaining case."""
-    if not ((type(count) is int and count >= 0) or count == "all"):
-        raise ValueError(
-            "public Shape count must be a non-negative integer or 'all'"
-        )
-    shapes = validate_private_shapes(private_shapes_path)
-    ordered = sorted((str(shape_id) for shape_id in shapes), key=_shape_sort_key)
-    selected = ordered if count == "all" else ordered[:count]
-    return {
-        "schema_version": PUBLIC_SHAPES_SCHEMA_VERSION,
-        "selection": {
-            "policy": "canonical_prefix",
-            "count": len(selected),
-            "total_shape_count": len(shapes),
-        },
-        "shapes": {shape_id: shapes[shape_id] for shape_id in selected},
-    }
-
-
-def validate_public_shapes(
-    path: Path, *, private_shapes_path: Path, count: int | str = "all"
-) -> dict[str, Any]:
-    payload = _load_json_object(path, label=PUBLIC_SHAPES_FILENAME)
-    expected = public_shapes_payload(private_shapes_path, count=count)
-    if payload != expected:
-        raise ValueError(
-            f"{path} must be the exact deterministic canonical-prefix projection of shapes.json"
-        )
-    return payload
 
 
 def _case_signature(value: dict[str, Any]) -> str:
@@ -259,15 +218,21 @@ def has_agent_problem(op_dir: Path) -> bool:
     return (op_dir / AGENT_PROBLEM_FILENAME).is_file()
 
 
-def should_use_generalized_problem(op_dir: Path, optimization_mode: str) -> bool:
+def should_use_generalized_problem(
+    op_dir: Path,
+    optimization_mode: str,
+    *,
+    expose_evaluator_shapes: bool = True,
+) -> bool:
     """Return whether an operator must expose a generalized public contract.
 
-    Native Atrex-Bench campaigns use a supplied contract when present and otherwise
-    generate one from ``shapes.json`` before setup. Exact evaluator cases stay private
-    in both Leaderboard and Production modes.
+    Hidden mode uses a supplied contract when present and otherwise generates one
+    from ``shapes.json`` before setup. Exposed mode gives the Agent the evaluator
+    Shapes directly. The two modes intentionally have no partial-prefix state.
     """
     return (
-        not is_sol_op(op_dir)
+        not expose_evaluator_shapes
+        and not is_sol_op(op_dir)
         and (op_dir / "shapes.json").is_file()
         and find_atrex_bench_root(op_dir) is not None
     )

@@ -116,7 +116,7 @@ def validate_candidate(
             from aka.light.workspace.sources import install, snapshot as source_snapshot
             install(frozen, source if source is not None else source_snapshot(workspace))
             private = Path(campaign.private_reference_dir) if campaign.private_reference_dir else None
-            for name in ("input.py", "reference.py", "shapes.json", "metadata.json", "agent_problem.json", "public_shapes.json",
+            for name in ("input.py", "reference.py", "shapes.json", "metadata.json", "agent_problem.json",
                          "solution.json", "config.json", "definition.json", "workload.jsonl"):
                 from aka.light.workspace.sources import layout_at
                 if layout_at(frozen).owns(name):

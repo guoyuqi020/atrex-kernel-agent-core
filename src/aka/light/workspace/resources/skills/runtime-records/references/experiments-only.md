@@ -43,22 +43,14 @@ When GPU Wiki knowledge materially affects the work, optional attribution uses
 
 ## Adopt an exact measured Kernel
 
-Materialize the source with a shared Git ref, `cherry-pick`, or `kernel-read`, then submit:
-
-```json
-{
-  "kernel_commit_id": "0123456789abcdef0123456789abcdef01234567",
-  "source_ref": "refs/atrex/shared/T2/e0004/head",
-  "reason": "Continue the peer split-KV implementation"
-}
-```
-
-Use `--kind adopt-kernel`. Runtime requires the current SourceProvider-declared candidate bytes to match the
-cited commit. Adoption alone is not correctness or performance evidence.
+Imported peer source history is available under refs such as
+`refs/atrex/shared/T2/e0001/head`. Keep or commit local work before switching, inspect with
+`git log`/`git diff`, and use `git switch -c <branch> <ref>` to continue a peer commit. A Git checkout
+alone is not correctness or performance evidence; evaluate the resulting clean HEAD.
 
 ## Submit the Episode report
 
-Candidate reports select a current-Episode Experiment:
+Candidate reports select a fully supported visible Experiment:
 
 ```json
 {

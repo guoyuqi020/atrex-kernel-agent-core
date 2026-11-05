@@ -13,22 +13,6 @@ from .cli_problem import problem_request
 from .cli_request import campaign_request
 
 
-def _public_shapes_argument(value: str) -> int | str:
-    if value.casefold() == "all":
-        return "all"
-    try:
-        count = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            "expected a non-negative integer or 'all'"
-        ) from exc
-    if count < 0:
-        raise argparse.ArgumentTypeError(
-            "expected a non-negative integer or 'all'"
-        )
-    return count
-
-
 def parse_arguments(argv):
     ap = argparse.ArgumentParser(
         description="Long-horizon episode orchestrator for atrex-kernel-agent."
@@ -44,9 +28,8 @@ def parse_arguments(argv):
         help=(
             "The operator dir (SOL definition.json/workload.jsonl/reference.py, or native "
             "Atrex-Bench reference.py/input.py/shapes.json with optional agent_problem.json). "
-            "Production always optimizes from a generalized public contract: a provided "
-            "agent_problem.json is used directly, otherwise AKA derives one from the detailed "
-            "shapes before hiding them from optimization sessions."
+            "Evaluator Shapes are exposed by default. Use --no-expose-evaluator-shapes "
+            "to optimize from a generalized public contract while keeping exact Shapes private."
         ),
     )
     ap.add_argument(
@@ -191,14 +174,13 @@ def parse_arguments(argv):
         ),
     )
     ap.add_argument(
-        "--public-shapes",
-        type=_public_shapes_argument,
-        default="all",
-        metavar="COUNT|all",
+        "--expose-evaluator-shapes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "Expose exact parameters for the canonical first COUNT evaluator Shapes "
-            "through public_shapes.json. Use 0 to expose none or 'all' to expose every "
-            "Shape. This never changes the full evaluator workload (default: all)."
+            "Expose native Atrex-Bench shapes.json and Shape details in Runtime results "
+            "(default: enabled). --no-expose-evaluator-shapes uses the generalized "
+            "hidden-Shape flow and redacts Shape details from every Agent-visible result."
         ),
     )
     ap.add_argument(
@@ -489,7 +471,7 @@ def adapt_argv(argv):
             f"{args.framework}_{args.platform}"
             if args.specify_dsl
             else f"open_dsl_{args.platform}"
-        ))
+        ), expose_evaluator_shapes=args.expose_evaluator_shapes)
     values = vars(args).copy()
     from aka.legacy.execution.configuration import configure_legacy_arguments
     configure_legacy_arguments(values)
@@ -503,8 +485,8 @@ def adapt_argv(argv):
                         if "--" + field.name.replace("_", "-") in explicit}
     if "--no-specify-dsl" in explicit:
         workflow_options.add("specify_dsl")
-    if "--public-shapes" in explicit:
-        workflow_options.add("public_shapes")
+    if "--no-expose-evaluator-shapes" in explicit:
+        workflow_options.add("expose_evaluator_shapes")
     runtime_options = {field.name for field in __import__("dataclasses").fields(request.runtime)
                        if "--" + field.name.replace("_", "-") in explicit}
     if "--verify-shape-batch-size" in explicit:

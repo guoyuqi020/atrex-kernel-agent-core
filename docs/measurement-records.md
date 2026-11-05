@@ -49,25 +49,19 @@ Run these commands in an active managed draft, using IDs returned by the campaig
 
 ```bash
 python3 tools/sandbox.py --kind run --no-sync
-python3 tools/sandbox.py --kind record-read --record-id gateway-11111111111111111111111111111111
-python3 tools/sandbox.py --kind kernel-records --kernel-commit-id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-python3 tools/sandbox.py --kind kernel-read --kernel-commit-id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --output-path scratch/previous
-# Read root PROGRESS.md for the Research Board and per-Shape frontier.
+# Read records/*.json, root PROGRESS.md, and the corresponding local/shared Git commits.
 ```
 
-GPU calls and `record-read` return one JSON object containing `operation`, `status`,
+GPU calls and projected Record files contain `operation`, `status`,
 `result`, `gateway_record_id`, and `kernel_commit_id` when source-bound.
 ABBA is `operation: evaluate` with a comparison and `baseline_kernel_commit_id`.
 Parse the complete JSON, not private executor marker lines.
 
-A successful read exits zero even when the stored evaluator rejected the source.
 Initial failed operations retain their nonzero execution outcome. Dev preserves bounded
 probe stdout/stderr and process exit code inside `result`.
-Record reads submit no GPU work and do not recreate old profiler artifacts.
-
-`kernel-read` restores a file for `single_file` and a directory for multi-file artifacts.
-Use that same layout for `--baseline-path`. `kernel-records` lists metadata; a listed
-ID still needs full integrity validation when read. Root `PROGRESS.md` returns observed
+Reading projected files and Git submits no GPU work and does not recreate old profiler artifacts.
+ABBA accepts `--baseline-commit`; Runtime validates reachability and exports the source privately.
+Root `PROGRESS.md` returns observed
 per-shape minima from eligible passing full Evaluations, not a measured composite kernel.
 
 An Agent duplicate returns `duplicate_gateway_task` with an existing record reference

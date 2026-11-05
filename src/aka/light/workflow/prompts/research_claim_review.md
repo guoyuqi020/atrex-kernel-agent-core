@@ -11,11 +11,15 @@ Directly cited evidence may appear in:
 - `kernels/`
 - `evidence-manifest.json`
 
-Audit every conclusion that could affect a later optimization decision. Separate observations from causal or mechanistic explanations, scope claims, and recommended actions. A measured result does not establish a baseline-relative or causal claim unless the necessary comparison or isolation evidence is present.
+First classify the submission from `target.json`:
+
+- A Direction `propose` or `revise` is an exploratory hypothesis, not a claim that its predicted mechanism or benefit has already been proven. Judge whether it is optimization-relevant, falsifiable, scoped, internally coherent, and paired with a bounded discriminating plan. Do not mark it unsupported merely because the proposed hypothesis still needs measurement. Treat asserted existing facts and claimed prior evidence strictly.
+- A Direction terminal action or an Experiment records a conclusion. Audit every decision-relevant observation, numerical/comparative statement, causal or mechanistic explanation, scope claim, and recommended action strictly. A measured result does not establish a baseline-relative or causal claim unless the necessary comparison or isolation evidence is present.
+- A lifecycle-only `start` is not a scientific claim and should not normally be sent for review.
 
 Use exactly one verdict:
 
-- `supported`: every factual, numerical, comparative, causal, mechanistic, scope, and action claim is adequately supported. No unsupported detail, material imprecision, or unverifiable fact remains.
+- `supported`: for an exploratory Direction, the hypothesis and plan meet the exploratory standard above and any asserted facts are supported; for a conclusion, every factual, numerical, comparative, causal, mechanistic, scope, and action claim is adequately supported. No material unsupported detail remains.
 - `partially_supported`: a useful core conclusion or action is supported, but at least one claim is unsupported, overbroad, imprecise, or not isolated.
 - `unsupported`: a decision-critical claim or action is contradicted or lacks necessary evidence, or the supplied evidence cannot justify a useful version of the conclusion.
 

@@ -15,7 +15,12 @@ DIRECTION_STATUS = {
 DIRECTION_REVISION_ACTION = "revise"
 DIRECTION_ACTIONS = frozenset({*DIRECTION_STATUS, DIRECTION_REVISION_ACTION})
 CLOSURES = {"complete", "abandon", "block", "defer"}
-CLOSED_STATUSES = {"completed", "abandoned", "blocked", "deferred"}
+PAUSED_STATUSES = {"blocked", "deferred"}
+TERMINAL_STATUSES = {"completed", "abandoned"}
+# Compatibility export for consumers that accept evidence after execution has
+# stopped. Lifecycle transitions below deliberately distinguish paused from
+# terminal states.
+CLOSED_STATUSES = PAUSED_STATUSES | TERMINAL_STATUSES
 
 
 def advance_direction(
@@ -38,13 +43,16 @@ def advance_direction(
         raise ValueError(f"Direction ID is outside visible history: {direction_id}")
     elif action == DIRECTION_REVISION_ACTION:
         if status not in {"proposed", "in_progress"}:
-            raise ValueError(
-                f"Direction cannot revise from status {status}; start it before revising"
+            recovery = (
+                "start it before revising"
+                if status in PAUSED_STATUSES
+                else "it is terminal; propose a derived Direction instead"
             )
+            raise ValueError(f"Direction cannot revise from status {status}; {recovery}")
         return
     elif action == "start":
-        if status not in {"proposed", *CLOSED_STATUSES}:
+        if status not in {"proposed", *PAUSED_STATUSES}:
             raise ValueError(f"Direction cannot start from status {status}")
-    elif status not in {"in_progress", *CLOSED_STATUSES}:
+    elif status != "in_progress":
         raise ValueError(f"Direction cannot {action} from status {status}")
     statuses[direction_id] = DIRECTION_STATUS[action]

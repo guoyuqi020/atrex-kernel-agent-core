@@ -146,6 +146,7 @@ def install_workspace_policy(
     agent_runtime: str | None = None,
     update_tracked_files: bool = True,
     source_checks_enabled: bool = True,
+    expose_evaluator_shapes: bool = True,
 ) -> None:
     """Persist immutable mode, framework, and optional campaign runtime identity.
 
@@ -160,6 +161,9 @@ def install_workspace_policy(
     )
     if agent_runtime is not None and not requested_runtime:
         raise ValueError("agent_runtime must be a non-empty runtime id")
+    if type(expose_evaluator_shapes) is not bool:
+        raise TypeError("expose_evaluator_shapes must be a boolean")
+    requested_visibility = "exposed" if expose_evaluator_shapes else "hidden"
 
     workspace.mkdir(parents=True, exist_ok=True)
     state_path = workspace / MODE_STATE_FILE
@@ -171,11 +175,19 @@ def install_workspace_policy(
             raise RuntimeError(f"invalid optimization-mode state: {state_path}") from exc
         existing_mode = state.get("mode")
         existing_framework = state.get("framework")
-        if existing_mode != mode or existing_framework != framework:
+        existing_visibility = state.get("evaluator_shape_visibility")
+        if existing_visibility is None:
+            existing_visibility = "hidden" if (workspace / "agent_problem.json").is_file() else "exposed"
+        if (
+            existing_mode != mode
+            or existing_framework != framework
+            or existing_visibility != requested_visibility
+        ):
             raise RuntimeError(
                 "workspace policy mismatch: "
-                f"recorded mode/framework={existing_mode}/{existing_framework}, "
-                f"requested={mode}/{framework}"
+                "recorded mode/framework/shape_visibility="
+                f"{existing_mode}/{existing_framework}/{existing_visibility}, "
+                f"requested={mode}/{framework}/{requested_visibility}"
             )
         existing_runtime = str(state.get("agent_runtime") or "").strip()
         if requested_runtime and existing_runtime and existing_runtime != requested_runtime:
@@ -188,13 +200,20 @@ def install_workspace_policy(
             state["agent_runtime"] = requested_runtime
             state_changed = True
     else:
-        state = {"mode": mode, "framework": framework}
+        state = {
+            "mode": mode,
+            "framework": framework,
+            "evaluator_shape_visibility": requested_visibility,
+        }
         if requested_runtime:
             state["agent_runtime"] = requested_runtime
         state_changed = True
 
     if state.get("source_checks_enabled") != source_checks_enabled:
         state["source_checks_enabled"] = source_checks_enabled
+        state_changed = True
+    if state.get("evaluator_shape_visibility") != requested_visibility:
+        state["evaluator_shape_visibility"] = requested_visibility
         state_changed = True
     if state_changed:
         state_path.write_text(

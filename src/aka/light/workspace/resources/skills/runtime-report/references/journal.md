@@ -16,8 +16,7 @@ Run the ordinary evaluator prescribed by the current phase:
 python3 tools/sandbox.py --kind run --no-sync
 ```
 
-Inspect root `records/<gateway_record_id>.json`; use `record-read` only if that projection is
-unavailable. Leave the exact measured candidate paths
+Inspect root `records/<gateway_record_id>.json`. Leave the exact measured candidate paths
 committed at HEAD as declared by the SourceProvider contract in `WORKSPACE.md`.
 Save `scratch/episode-report.json`, replacing the example ID with the returned `gateway_record_id`:
 

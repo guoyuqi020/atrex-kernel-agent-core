@@ -33,13 +33,8 @@ class WorkflowLaunch:
                 raise TypeError(f"{name} must be a string")
         if type(settings.specify_dsl) is not bool:
             raise TypeError("specify_dsl must be a boolean")
-        if not (
-            (type(settings.public_shapes) is int and settings.public_shapes >= 0)
-            or settings.public_shapes == "all"
-        ):
-            raise ValueError(
-                "public_shapes must be a non-negative integer or 'all'"
-            )
+        if type(settings.expose_evaluator_shapes) is not bool:
+            raise TypeError("expose_evaluator_shapes must be a boolean")
         for name, value in (("timeout", runtime.timeout), ("verify_repeats", runtime.verify_repeats),
                             ("shape_batch_size", runtime.shape_batch_size),
                             ("evaluation_step_timeout", runtime.evaluation_step_timeout),
@@ -96,7 +91,32 @@ def decode_launch(argv) -> WorkflowLaunch:
     if source.get("snapshot_directory") is not None:
         source["snapshot_directory"] = Path(source["snapshot_directory"])
     settings = request.pop("settings")
-    values.setdefault("provided_settings", tuple(settings))
+    serialized_settings = tuple(settings)
+    if "public_shapes" in settings:
+        legacy = settings.pop("public_shapes")
+        if legacy not in (0, "all"):
+            raise ValueError(
+                "partial public_shapes launches are no longer supported; "
+                "use expose_evaluator_shapes=true or false"
+            )
+        settings["expose_evaluator_shapes"] = legacy == "all"
+        provided = values.get("provided_settings")
+        if isinstance(provided, (tuple, list)) and "public_shapes" in provided:
+            values["provided_settings"] = tuple(
+                "expose_evaluator_shapes" if item == "public_shapes" else item
+                for item in provided
+            )
+    else:
+        # Launches predating an explicit visibility field used the generalized
+        # hidden-Shape flow. Preserve that boundary instead of silently exposing.
+        settings.setdefault("expose_evaluator_shapes", False)
+    values.setdefault(
+        "provided_settings",
+        tuple(
+            "expose_evaluator_shapes" if item == "public_shapes" else item
+            for item in serialized_settings
+        ),
+    )
     values.setdefault("provided_runtime", tuple(request.get("runtime", {})))
     for name in ("framework_baseline_reviewers", "fast_episode_reviewers", "full_episode_reviewers"):
         if name in settings:

@@ -6,32 +6,36 @@ allowed-tools: "Bash Read"
 
 # Runtime records
 
-Use `python3 tools/sandbox.py` inside a registered optimization Episode. Runtime owns immutable
-measurement facts, exact measured source, and report validation; the Agent owns hypotheses and
-interpretations.
+Use `python3 tools/sandbox.py`. Runtime owns immutable measurements, exact measured source, and
+report validation; the Agent owns hypotheses and interpretations.
 
-Start with root `PROGRESS.md`, then open only relevant `directions/<status>/*.json`,
-`experiments/<experiment_id>/experiment.json`, and `records/<gateway_record_id>.json`. These are
-read-only projections. Gateway Records are measurement authority; `PROGRESS.md`, Directions,
-Experiments, and historical Conversations may contain fallible analysis.
+Start with `PROGRESS.md`. Open `frontier.json` only for the complete frontier, then only relevant
+Direction, Experiment, and `records/<gateway_record_id>.json` files. Projections are read-only.
+Gateway Records are measurement authority; all analysis is fallible.
 
 ## Research loop
 
-- A Direction is a consequential Kernel path or uncertainty, not necessarily an immediate source edit. It may be an implementation change, capability probe, microbenchmark, correctness investigation, or performance attribution; state the consequential decision it unlocks. Do not use it for Runtime/evaluator maintenance or infrastructure work. Check for duplicates and rank by expected benefit and applicability. Multiple local Directions may be `in_progress`; keep that set intentional and identify the relevant Direction explicitly when more than one is active.
-- Correct an open local Direction with `action=revise`, its stable `direction_id`, and the complete
-  revised claim and plan. Runtime increments `revision` without changing lifecycle status or
-  genealogy. Start a deferred, blocked, completed, or abandoned Direction before revising it.
+- A Direction is a consequential Kernel path or uncertainty, not necessarily an immediate source edit. It may be a change or bounded investigation; state the consequential decision it unlocks. Do not use it for Runtime/evaluator maintenance or infrastructure work. Check duplicates and rank by expected benefit and applicability. Multiple local Directions may be `in_progress`; the latest started one is the focus, while queue reordering does not change focus.
+- Choose work from the Local work queue. The Shared direction pool is discovery-only: absorb
+  compatible peer ideas into one local derivative and cite every source ID in
+  `derived_from_direction_ids`.
+- Revise a proposed or active local Direction using its stable ID and complete replacement claim.
+  Restart deferred or blocked work first. Completed and abandoned Directions are terminal; continue
+  them through a derived Direction.
 - Record decisive work as an Experiment with `name`, concrete `intent`, and bounded
-  `interpretation`. `gateway_record_ids` and archived `references` are independent optional lists.
-  Do not copy measured values into the interpretation. An Experiment without a Gateway Record is a
-  research note, not measured promotion evidence. To correct an archived local Experiment,
-  resubmit its required fields with its `experiment_id`; Runtime keeps the ID and creates the next
-  reviewed revision. Shared peer Experiments are read-only.
-- Use local Git for candidate history. After materializing a measured peer Kernel, call
-  `adopt-kernel` before using it as local evidence.
+  `interpretation`. Records and archived references are independent optional evidence. Keep measured
+  facts in Records. A note without a Record is not promotion evidence. Revise only
+  `local_writable` Experiments; extend `peer_read_only` evidence with a new local Experiment.
+- Use local Git for candidate history. Imported peer history is available under `refs/atrex/shared/<trajectory>/<epoch>/head`; inspect it with `git log`/`git diff`, or continue it with `git switch -c <branch> <ref>`. Commit or restore local work before switching.
 - Continue bounded probe/edit/measurement/revert-or-keep cycles while the selected path has a
   concrete high-value step. Close a terminal Direction with the evidence required by the active
   module contract.
+- Runtime returns the full Review once with the mutation result. `archive_status` reports storage,
+  `claim_review_quality` reports scientific support, and `evidence_eligible` controls terminal use.
+  `runtime_action` is workflow guidance; `scientific_next_check` is the evidence follow-up. Only projected
+  `claim_review_quality`, `scope_safe_interpretation`, and `scientific_next_check` remain Agent-visible afterward; full receipts and reviewer
+  conversations are Supervisor-private. Partial or unreviewed claims remain trajectory-local and
+  cannot support terminal conclusions or handoff.
 
 Submit `episode-report` only under the Session Prompt's handoff conditions. A `candidate_ready`
 report requires a passing standard full Evaluate of the exact clean HEAD. Report acceptance is a

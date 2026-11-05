@@ -1,7 +1,6 @@
 """Accept recorded, policy-matched ABBA evidence for Full Episodes."""
 from __future__ import annotations
 
-import shlex
 import tempfile
 from pathlib import Path
 
@@ -22,43 +21,36 @@ from aka.light.acceptance.verifier import (
 
 
 class RecordedABBAValidator(GatewayABBAValidator):
-    # This path may be either a regular file or a source-tree directory. Avoid
-    # a .py suffix that falsely suggests the default tree provider exports one file.
-    BASELINE_PATH = "scratch/incumbent-kernel"
-
     def __init__(self, *, execute, **kwargs):
         super().__init__(**kwargs)
         self.execute = execute
 
-    def request_argv(self) -> list[str]:
+    def request_argv(self, baseline_kernel_id: str) -> list[str]:
         """One canonical request for trusted acceptance and the Agent prompt."""
         return [
             "--kind", "run", "--mode", "full", "--no-sync",
-            "--baseline-path", self.BASELINE_PATH,
+            "--baseline-commit", baseline_kernel_id,
             "--comparison-repeats", str(self.repeats),
             "--comparison-run-timeout", str(self.per_run_timeout),
         ]
 
     def agent_instructions(self, *, baseline_kernel_id: str, measurement_repetitions: int) -> str:
-        read = shlex.join([
-            "python3", "tools/sandbox.py", "--kind", "kernel-read", "--kernel-commit-id",
-            baseline_kernel_id, "--output-path", self.BASELINE_PATH,
-        ])
-        measure = shlex.join(["python3", "tools/sandbox.py", *self.request_argv()])
+        import shlex
+        measure = shlex.join(
+            ["python3", "tools/sandbox.py", *self.request_argv(baseline_kernel_id)]
+        )
         return f"""## This Episode's acceptance request
 
 ABBA is optional during exploration. To make a comparison eligible for acceptance reuse,
-commit the complete candidate, verify `git status` is clean, and run these exact commands
-(for a source-tree task, `kernel-read` creates a baseline directory, not a Python file):
+commit the complete candidate, verify `git status` is clean, and run this exact command:
 
 ```bash
-{read}
 {measure}
 ```
 
-The first command copies this Episode's committed incumbent, not the current draft; it is
-safe to use after edits or resume. Do not modify `{self.BASELINE_PATH}` before the comparison.
-The second command matches the Supervisor's configured ABBA repeats and per-run timeout.
+`--baseline-commit` names this Episode's committed incumbent, not the current draft. Runtime
+exports that exact Git source into private request staging before submission. The command matches
+the Supervisor's configured ABBA repeats and per-run timeout.
 Runtime applies the Campaign's Shape batch size; the separate candidate correctness gate owns its
 Runtime-defined coverage. Do not add
 command/input/Shape/seed/benchmark/dependency overrides.
@@ -70,8 +62,8 @@ These are Runtime-owned settings, already applied to this request; do not loop t
 or set environment variables to reproduce them.
 
 Reuse requires the same candidate, incumbent, inputs, evaluator and complete task policy.
-A duplicate-task error names an existing Record: read `records/<ID>.json`; use `record-read`
-only when that projection is unavailable, and do not make another GPU submission.
+A duplicate-task error names an existing Record: read `records/<ID>.json` and do not make another
+GPU submission.
 Acceptance reuses a completed matching Record or measures when none exists; it is not a
 zero-submission guarantee. ABBA does not replace the standard full Evaluate required by
 `episode-report`, and the Supervisor still applies policy and performance gates.
@@ -96,10 +88,9 @@ zero-submission guarantee. ABBA does not replace the standard full Evaluate requ
                         continue
                     publish(staged, name, content)
                 install(staged, candidate)
-                Artifact(baseline).export(staged / self.BASELINE_PATH)
                 response = self.execute(
                     staged,
-                    self.request_argv(),
+                    self.request_argv(baseline_kernel_id or base_commit),
                     kernel_ids={
                         "candidate": candidate_kernel_id or candidate_commit,
                         "baseline": baseline_kernel_id or base_commit,

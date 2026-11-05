@@ -14,19 +14,42 @@ records/<gateway_record_id>.json
 PROGRESS.md
 ```
 
-Direction files contain their full decision-useful state, immutable `proposed_by` lineage, current
-plan progress, next step and queue rank. `owner` separately identifies the trajectory currently
-executing an in-progress Direction. `experiment.json` contains only research semantics and Gateway Record references. Root
+Direction files contain their full decision-useful state, immutable `proposed_by` lineage, `access`,
+the Agent-maintained plan, and either `local_rank` or `shared_rank`. Runtime does not track completed
+plan steps or select the next action. Experiments identify their
+Direction through `direction_id`; Runtime derives the reverse association when needed instead of
+persisting a second index. `supporting_experiment_ids` is the reviewed evidence subset selected when
+closing the Direction. `owner` identifies the trajectory
+currently executing an in-progress Direction. `experiment.json` contains research semantics,
+Gateway Record references, immutable `recorded_by` lineage, and `access`. Root
 `records/` contains every currently visible standardized public result, flat and without per-
 Experiment copies. Neither contains private requests, input hashes or executor streams. Kernel
 commit IDs link Records to exact Git source. Search these files with normal file tools. They are
 regenerated from private Runtime state and must not be edited.
 
-Root `PROGRESS.md` is the bounded research projection and includes the complete eligible per-Shape
-Pareto frontier plus a compact Direction queue when Direction recording is enabled. Experiments
-remain indexed by their normal directories; open the corresponding file for full visible fields.
-Peer Directions may appear as `in_progress(Tn)` in `PROGRESS.md`;
-only the owning trajectory may mutate them.
+Root `PROGRESS.md` is the bounded research projection and includes a capped per-Shape Pareto
+summary, an independently ordered Local work queue, paused and terminal sections, and an advisory Shared direction pool
+when Direction recording is enabled. Global aggregation orders only the shared pool and never
+overwrites local priorities. Read root `frontier.json` for the complete eligible frontier. In
+Experiment-only mode, `experiments/index.json` provides a compact catalog; when Directions are
+enabled, navigate Experiments from their `direction_id` and filesystem paths instead of maintaining
+a second durable index.
+Peer Directions may appear as `in_progress(Tn)` in `PROGRESS.md`. Choose executable work from the
+Local work queue. Use the Shared pool to absorb compatible mechanisms, evidence, and applicability
+into one local Direction; cite every source ID in `derived_from_direction_ids`. Explicitly
+`partially_supported` or `unreviewed` Directions and Experiments remain trajectory-local until a
+reviewed revision replaces them.
+
+Claim-bearing mutations return `review` once. Its workflow fields are deliberately distinct:
+
+- `archive_status`: whether Runtime stored the submitted claim;
+- `claim_review_quality`: `supported`, `partially_supported`, `unsupported`, or `unreviewed`;
+- `evidence_eligible`: whether the claim may support terminal conclusions, peer publication, or handoff;
+- `runtime_action`: how to repair or continue the Runtime workflow;
+- `scientific_next_check`: the smallest evidence-producing test suggested by the reviewer.
+
+The projected record retains only `claim_review_quality`, `scope_safe_interpretation`, and
+`scientific_next_check`; full Review receipts and reviewer conversations remain private.
 
 ## Propose and select a Direction
 
@@ -35,7 +58,7 @@ change, but it may also isolate a hardware/compiler capability, microbenchmark a
 correctness, or attribute performance when that answer will change Kernel design, implementation
 selection, or repair. It must name the consequential Kernel decision it informs; generic exploration,
 Runtime/evaluator maintenance, infrastructure operation, and unrelated documentation do not belong in
-the Direction queue. For a probe-led Direction, `change_scope` describes the Kernel path that would be
+the Direction queue. `change_scope` is `incremental` or `major_redesign`; for a probe-led Direction it describes the Kernel path that would be
 unlocked or rejected if the hypothesis is confirmed, not the number of files touched by the probe.
 
 ```json
@@ -69,7 +92,7 @@ but name the affected metric, bottleneck, or branch in the implementation strate
 new idea only after refreshing the catalog and checking likely matches. These fields record
 genealogy only. A derived Direction receives its own lifecycle, plan, owner and queue position; it
 does not inherit parent status, Experiments, Gateway evidence, Kernel source or priority. Materialize
-and adopt an exact parent Kernel separately when the new work actually continues that source.
+and switch to an imported parent Git ref separately when the new work actually continues that source.
 Runtime validates visible parents, parent counts and cycles, but not whether the chosen relationship
 label is scientifically correct.
 
@@ -90,8 +113,9 @@ Correct an existing open local Direction without inventing a replacement identit
 
 `revise` keeps `direction_id`, lifecycle status and genealogy, increments `revision`, and reruns
 Review. It replaces the claim, scope and plan in the latest projection. Only `proposed` or
-`in_progress` local Directions can be revised; start a deferred, blocked, completed or abandoned
-Direction first. Shared peer Directions remain read-only. Prior submissions and Reviews remain in
+`in_progress` local Directions can be revised; restart a deferred or blocked Direction first.
+Completed and abandoned Directions are terminal, so continued work uses a new derived Direction.
+Shared peer Directions remain read-only. Prior submissions and Reviews remain in
 the private Supervisor audit. The reviewer resumes the latest valid Review Session for this
 Direction so it can compare the correction with its previous critique; if that native Session is
 unavailable, Runtime retries once in a fresh Session.
@@ -106,8 +130,10 @@ Start selected work:
 }
 ```
 
-A trajectory may own multiple local active Directions. Keep concurrent work intentional, address
-updates by Direction ID, and leave new ideas proposed until work actually starts. Continue each
+A trajectory may own multiple local active Directions. The most recently started Direction is the
+focus; queue reordering does not change it. Runtime infers an omitted Experiment `direction_id` only
+when exactly one local Direction is active; with zero or multiple active Directions, include it.
+Keep concurrent work intentional, address updates by Direction ID, and leave new ideas proposed until work actually starts. Continue each
 selected redesign through bounded edit/measurement cycles instead of reporting its first promotable checkpoint.
 
 Reorder the durable queue:
@@ -125,15 +151,8 @@ python3 tools/sandbox.py --kind prioritize-direction --request-file scratch/prio
 ```
 
 Use `after_direction_id` instead of `before_direction_id`, or omit both to move the Direction to the
-end. Mark a completed zero-based plan step:
-
-```json
-{"direction_id":"direction_11111111111111111111111111111111","plan_step":0}
-```
-
-```bash
-python3 tools/sandbox.py --kind progress-direction --request-file scratch/progress.json
-```
+end. Routine completion of plan steps does not require a Runtime mutation. If evidence materially
+changes the claim or remaining plan, submit a complete `action=revise` Direction instead.
 
 ## Record an Experiment
 
@@ -154,9 +173,9 @@ workspace material when they exist:
 python3 tools/sandbox.py --kind record-experiment --request-file scratch/experiment.json
 ```
 
-When Directions are enabled and exactly one local Direction is active, Runtime supplies its
-`direction_id`; with zero or multiple active Directions, include the ID explicitly. When Directions
-are disabled, omit it.
+When Directions are enabled, Runtime infers `direction_id` only when exactly one local Direction is
+active. With zero or multiple active Directions, include the ID explicitly. When Directions are
+disabled, omit it.
 
 Runtime validates every cited ID; its standardized public result is available under root `records/`.
 Correctness, latency, failure, operation and Kernel commit identity live only in those records. Use
@@ -167,11 +186,11 @@ Git to inspect source changes between the cited commits. Do not copy these facts
 empty. An Experiment without Gateway Records remains a useful research note, but cannot by itself
 support a measured `supported`/`refuted` Direction verdict or candidate promotion.
 
-Revise a local Experiment by resubmitting its required fields plus the `experiment_id` shown in
+Revise a `local_writable` Experiment by resubmitting its required fields plus the `experiment_id` shown in
 `experiments/<experiment_id>/experiment.json`. Runtime keeps that identity, increments `revision`,
 reruns independent Review, and updates the projected latest version. Omitted optional evidence is
-preserved; explicit empty arrays clear it. `direction_id` is immutable, and shared peer Experiments
-cannot be revised locally. Prior submissions, Review receipts, conversations, and referenced bytes
+preserved; explicit empty arrays clear it. `direction_id` is immutable. Extend a `peer_read_only`
+Experiment with a new local record rather than revising it. Prior submissions, Review receipts, conversations, and referenced bytes
 remain available to the Supervisor's private audit even though the Agent sees only the latest revision.
 The reviewer resumes that Experiment's latest valid Review Session; if native resume is unavailable,
 Runtime falls back to one fresh Review Session without discarding the earlier audit records.
@@ -201,35 +220,35 @@ Close only when the research state is truly terminal:
 }
 ```
 
-`complete`, `abandon`, `block`, and `defer` use the same fields. Direction-only mode omits
-`supporting_experiment_ids`. `hypothesis_status` is `unresolved`, `supported`, or `refuted`.
-Unresolved `defer`, `block`, or `abandon` also requires a non-empty `reopen_condition` describing
-what evidence or capability should reactivate it. Active Directions may cross an Episode boundary
+`complete`, `abandon`, `block`, and `defer` use the same lifecycle fields. A `supported` or
+`refuted` closure requires `supporting_experiment_ids`; an unresolved closure may omit them.
+Direction-only mode always omits `supporting_experiment_ids`. `hypothesis_status` is
+`unresolved`, `supported`, or `refuted`.
+Use `defer` for a deliberate strategic pause or lower-priority path that can be resumed by the Agent;
+use `block` only for a concrete technical or external dependency that currently prevents progress.
+Unresolved `defer` or `block` also requires a non-empty `reopen_condition` describing what evidence
+or capability should reactivate it. `abandon` is terminal and may remain unresolved. `complete`
+requires a `supported` or `refuted` hypothesis. Active Directions may cross an Episode boundary
 only when a pooled search reports `status=candidate_ready` with
 `handoff_reason=cross_trajectory_share`; ordinary terminal handoff
 requires all local active Directions to be completed or abandoned. For a blocked handoff, close all
 local active Directions with `block` first.
 
-## Adopt a measured peer Kernel
+## Continue a measured peer Kernel
 
-First materialize the source through a shared Git ref, `cherry-pick`, or `kernel-read`. Then audit the
-adoption:
-
-```json
-{
-  "kernel_commit_id": "0123456789abcdef0123456789abcdef01234567",
-  "source_ref": "refs/atrex/shared/T2/e0004/head",
-  "reason": "Use the peer split-KV family as the base for this trajectory's independent refinement"
-}
-```
+Epoch sharing imports exact peer Git history under refs such as
+`refs/atrex/shared/T2/e0001/head`. Keep or commit local work before switching. Inspect or continue the
+peer source with normal Git:
 
 ```bash
-python3 tools/sandbox.py --kind adopt-kernel --request-file scratch/adopt.json
+git log --oneline --decorate refs/atrex/shared/T2/e0001/head
+git diff HEAD refs/atrex/shared/T2/e0001/head
+git switch -c explore/t2-e0001 refs/atrex/shared/T2/e0001/head
 ```
 
-Runtime rejects the request unless the current SourceProvider-declared candidate bytes exactly match
-the cited Git-identified Kernel source. Adoption does not assert correctness, performance, or promotion; evaluate
-it normally.
+The checked-out commit is the Kernel ID. Switching source does not assert correctness, performance,
+or promotion; evaluate the resulting clean HEAD normally. Legacy evidence whose original Git object
+is unavailable stays private to Supervisor recovery and is not projected as reusable Agent evidence.
 
 ## Submit an Episode report
 
@@ -252,12 +271,18 @@ Disassemble, and ABBA alone do not satisfy nomination.
 python3 tools/sandbox.py --kind episode-report --request-file scratch/episode-report.json
 ```
 
-`handoff_reason` is required. Use `direction_terminal` after completing or abandoning the selected
-Direction. In pooled search, `cross_trajectory_share` with `status=candidate_ready` publishes a
-reusable checkpoint backed by a passing standard full Evaluate of the exact committed source and
-may leave that Direction active.
-Use `blocked` only with `status=blocked` and a non-empty `blocker`. If a local Direction is active,
-close it with `block` first. For example, pivot is
+`handoff_reason` is required. With both modules enabled, `candidate_ready` plus
+`direction_terminal` requires the selected Experiment to belong to a completed or abandoned visible
+Direction, at least one local Direction to become terminal in this Episode, and all local active
+Directions to be completed or abandoned. A pivot
+with `direction_terminal` has no selected Experiment. In pooled search, `cross_trajectory_share` with
+`status=candidate_ready` requires the selected Experiment to belong to an `in_progress` Direction;
+it publishes a reusable checkpoint backed by a passing standard full Evaluate of the exact committed
+source and is the only handoff that may leave local Directions active. With Directions disabled,
+the supported visible Experiment and exact-HEAD Evaluate requirements still apply to `candidate_ready`
+without a Direction relation. A historical Experiment may be reused when its Review and measurement
+remain eligible. Use `blocked` only with `status=blocked` and a non-empty `blocker`. Close every
+local active Direction with `block` first. For example, pivot is
 `{"status":"pivot","handoff_reason":"direction_terminal","summary":"..."}`. A repairable rejection
 leaves the Episode open; follow `error.next_action` and resubmit only when the stated handoff condition
 is satisfied. Acceptance is a handoff, not a promotion. Stop after acceptance.

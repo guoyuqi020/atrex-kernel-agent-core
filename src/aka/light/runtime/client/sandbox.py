@@ -11,14 +11,12 @@ Custom execution examples:
   python3 tools/sandbox.py --kind command -- python3 scratch/probe.py
 Additional typed operations: check, disassemble, env; Wiki: wiki-query, wiki-search,
 wiki-hardware. Use --kind OPERATION --help for the operation's request options.
-Read saved results from records/<gateway_record_id>.json; compatibility query:
---kind record-read --record-id gateway-...;
-copy source with --kind kernel-read --kernel-commit-id FULL_GIT_COMMIT --output-path scratch/kernel-tree;
-list a Kernel's measurements with --kind kernel-records --kernel-commit-id FULL_GIT_COMMIT.
+Read saved results from records/<gateway_record_id>.json and inspect exact Kernel source with local
+Git commits and refs. ABBA accepts --baseline-commit FULL_GIT_COMMIT; Runtime exports it internally.
 Root PROGRESS.md includes enabled Direction state and each Shape's fastest measured Kernel;
 complete Experiments are normal files under experiments/ when that module is enabled.
-Possible Runtime mutations include update-direction, progress-direction, prioritize-direction,
-adopt-kernel, record-experiment, and episode-report --request-file FILE. The installed
+Possible Runtime mutations include update-direction, prioritize-direction, record-experiment,
+and episode-report --request-file FILE. The installed
 runtime-records Skill lists the module-specific subset available in this Episode; disabled calls
 are rejected. Research/report mutation tools require a registered Long Horizon Episode.
 No direct Agate fallback is performed when the Runtime is unavailable.
@@ -43,9 +41,7 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 WIKI_KINDS = {"wiki-query": "query_nl", "wiki-search": "query_wiki", "wiki-hardware": "query_hardware"}
 REQUEST_KINDS = {
     "update-direction": "direction_update",
-    "progress-direction": "direction_progress",
     "prioritize-direction": "direction_prioritize",
-    "adopt-kernel": "kernel_adopt",
     "record-experiment": "experiment_record",
     "episode-report": "episode_report",
 }
@@ -104,7 +100,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def proxy_command(path: str, payload: dict, *, record_read=False) -> int:
+def proxy_command(path: str, payload: dict) -> int:
     url, token = os.environ.get(RUNTIME_URL_ENV, ""), os.environ.get(RUNTIME_TOKEN_ENV, "")
     if not url or not token:
         client_error("session_unavailable", "This tool requires a live Supervisor Session.",
@@ -171,9 +167,6 @@ def proxy_command(path: str, payload: dict, *, record_read=False) -> int:
                 and result.get("status") in {"completed", "failed", "cancelled"}
                 and isinstance(result.get("result"), dict)):
             print(json.dumps(result, ensure_ascii=False, allow_nan=False, sort_keys=True))
-            # Reading a failed measurement succeeds; it is not a failed query.
-            if record_read:
-                return 0
             # Preserve the executor's tempfail/candidate exit classification
             # without putting the compatibility stream envelope back in JSON.
             if execution_exit_code is not None:
@@ -216,21 +209,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     # Only recognize the full client-side dispatcher; the Supervisor validates
     # every argument using parsers with allow_abbrev=False.
-    record_read = False
     for index, value in enumerate(args):
         if value == "--":
             break
         kind = args[index + 1] if value == "--kind" and index + 1 < len(args) else (
             value.split("=", 1)[1] if value.startswith("--kind=") else None
         )
-        if kind is not None:
-            record_read = kind == "record-read"
         if kind in REQUEST_KINDS:
             return proxy_command("/v1/journal/execute", journal_request(kind, args))
         if kind in WIKI_KINDS:
             count = 2 if value == "--kind" else 1
             return proxy_wiki(WIKI_KINDS[kind], args[:index] + args[index + count:])
-    return proxy_command("/v1/gateway/execute", {"argv": args}, record_read=record_read)
+    return proxy_command("/v1/gateway/execute", {"argv": args})
 
 
 if __name__ == "__main__":

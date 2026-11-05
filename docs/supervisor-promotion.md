@@ -84,9 +84,9 @@ Trusted acceptance can reuse a completed record only when the entire required ta
 matches. Agent duplicates return the existing record ID instead of silently launching another
 sample. Unknown, unavailable, cancelled, or inconsistent results are not completed verdicts.
 
-Each Episode prompt provides its effective ABBA command and incumbent retrieval command.
-For tree/native-manifest sources, `kernel-read` restores a directory; single-file sources
-restore a file. Use the selected command and baseline path so source and policy identities match.
+Each Episode prompt provides its effective ABBA command and incumbent commit. Runtime resolves the
+reachable commit and privately exports the correct single-file or source-tree layout so source and
+policy identities match.
 
 SOL full-workload correctness is supported with explicit `single_file`, but Light's
 native ABBA promotion path requires Agate Atrex-Bench. Use

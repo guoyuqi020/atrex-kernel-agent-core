@@ -8,10 +8,12 @@ allowed-tools: "Bash Read"
 
 Direction recording is enabled; Experiment commands are disabled. Start with root `PROGRESS.md`, then open only relevant `directions/<status>/*.json` and `records/*.json`. These Runtime projections are read-only.
 
-A Direction is a consequential Kernel path or uncertainty, not Runtime/evaluator maintenance. Check for duplicates and rank by expected benefit and applicability. Multiple local Directions may be `in_progress`; keep that set intentional and address updates by ID. Continue bounded probe/edit/measurement/revert-or-keep cycles while useful work remains.
+A Direction is a consequential Kernel path or uncertainty, not Runtime/evaluator maintenance. Check for duplicates and rank by expected benefit and applicability. Multiple local Directions may be `in_progress`; the most recently started or prioritized one is the focus. Choose executable work from the Local work queue; restart paused work explicitly. The Shared direction pool is discovery-only: absorb compatible peer ideas into one local derivative and cite every source ID in `derived_from_direction_ids`. Continue bounded probe/edit/measurement/revert-or-keep cycles while useful work remains.
 
-Use `update-direction`, `progress-direction`, and `prioritize-direction` for mutations. Omit `supporting_experiment_ids`; Experiment-derived genealogy is unavailable. For `candidate_ready`, cite `gateway_record_ids` containing a passing standard full Evaluate of the exact clean HEAD. Follow [the exact Direction, adoption, and report schemas](references/journal.md) and [saved result/source semantics](references/records.md). Never invent IDs or measured results.
+Use `update-direction` and `prioritize-direction` for mutations. Routine execution of plan steps does not require a Runtime mutation; use `action=revise` only when the claim or remaining plan changes materially. Omit `supporting_experiment_ids`; Experiment-derived genealogy is unavailable. For `candidate_ready`, cite `gateway_record_ids` containing a passing standard full Evaluate of the exact clean HEAD. Follow [the exact Direction and report schemas](references/journal.md) and [saved result/source semantics](references/records.md). Never invent IDs or measured results.
 
-Revise an open local Direction with `action=revise`, its `direction_id`, and the complete revised
-claim and plan. Runtime keeps the ID, increments `revision`, reruns Review, and preserves lifecycle
-status and genealogy. Shared peer Directions are read-only.
+Revise a proposed or active local Direction with `action=revise`, its `direction_id`, and the complete
+revised claim and plan. Restart a deferred or blocked Direction first. Completed and abandoned
+Directions are terminal; continue them through a new derived Direction. Runtime keeps the ID,
+increments `revision`, reruns Review, and preserves lifecycle status and genealogy. Shared peer
+Directions are read-only.

@@ -171,7 +171,6 @@ class ManagedCampaign(Campaign):
         self.candidate_workspace.initialize_at(self.workspace, content)
         self.candidate_workspace.install_files(self.workspace, self.problem.agent.files)
         self._ensure_agent_problem()
-        self._ensure_public_shapes()
         self._link_runtime()
         self._install_native_evaluator()
         self._install_profile_driver()

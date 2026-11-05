@@ -45,7 +45,7 @@ from aka.light.workspace.files import (
     snapshot,
 )
 from aka.light.experiment.store import ABBA_BATCH_ROOT_ENV, BATCH_ROOT_ENV, JOB_ROOT_ENV, TaskRunning
-from aka.light.experiment.records import QUERY_KINDS, task_conflict_response
+from aka.light.experiment.records import task_conflict_response
 from aka.light.workflow.journal_service import SupervisorJournalService, load_journal, journal_lock
 from aka.light.runtime.request_errors import AgentRequestError, RuntimeStateError, error_response
 from aka.light.runtime.request_feedback import augment_error
@@ -85,6 +85,9 @@ AUTHORITY = frozenset({
 FORBIDDEN = frozenset({
     "--preflight",
     "--check-health",
+    # Agent ABBA identifies its baseline by Git commit. The Runtime owns the
+    # temporary source export and its private path.
+    "--baseline-path",
     # Managed Sessions query the Campaign's assigned target. Letting an Agent
     # choose another product or force a shared refresh would make the returned
     # facts disagree with the Kernel execution target.
@@ -221,6 +224,34 @@ def managed_gateway_argv(
     if not isinstance(hardware, str) or not hardware.strip():
         raise ValueError("Managed env query requires the Campaign hardware identity")
     return [*argv, "--env-gpu", hardware.strip(), "--env-capabilities"]
+
+
+def materialized_baseline_argv(argv: list[str], baseline_path: str) -> list[str]:
+    """Replace the Agent's commit selector with Runtime's private source path."""
+    result: list[str] = []
+    index = 0
+    inserted = False
+    while index < len(argv):
+        word = argv[index]
+        if word == "--":
+            if not inserted:
+                result.extend(("--baseline-path", baseline_path))
+                inserted = True
+            result.extend(argv[index:])
+            break
+        if word == "--baseline-commit":
+            if index + 1 >= len(argv):
+                raise ValueError("--baseline-commit requires a value")
+            index += 2
+            continue
+        if word.startswith("--baseline-commit="):
+            index += 1
+            continue
+        result.append(word)
+        index += 1
+    if not inserted:
+        result.extend(("--baseline-path", baseline_path))
+    return result
 
 
 def validate_gateway_transport(
@@ -519,7 +550,7 @@ class _Handler(BaseHTTPRequestHandler):
             execution_exit_code = None
             if self.path == "/v1/gateway/execute" and isinstance(result.get("agent_result"), dict):
                 # Never expose the private compatibility streams alongside the
-                # canonical result. Initial reads and record-read share this object.
+                # canonical result. Agent-visible history is projected under records/.
                 execution_exit_code = result["exit_code"]
                 result = result["agent_result"]
             self.reply(200, result, execution_exit_code=execution_exit_code)
@@ -594,8 +625,8 @@ class _Handler(BaseHTTPRequestHandler):
         except ResultPublicationError as error:
             record_id = error.gateway_record_id
             record_instruction = (
-                f"The GPU operation completed and its result is saved as {record_id}. Read it with "
-                f"`python3 tools/sandbox.py --kind record-read --record-id {record_id}`; do not "
+                f"The GPU operation completed and its result is saved as {record_id}. Read "
+                f"`records/{record_id}.json`; do not "
                 "resubmit the completed request."
                 if record_id else
                 "The GPU operation completed, but its saved Record ID could not be returned. "
@@ -609,10 +640,8 @@ class _Handler(BaseHTTPRequestHandler):
             recovery = [{"instruction": next_action}]
             if record_id:
                 recovery.insert(0, {
-                    "tool": "record-read",
-                    "request": {"record_id": record_id},
-                    "command": "python3 tools/sandbox.py --kind record-read --record-id " + record_id,
-                    "instruction": "Read the completed measurement result; this does not rerun the GPU job.",
+                    "path": f"records/{record_id}.json",
+                    "instruction": "Read the projected completed measurement; this does not rerun the GPU job.",
                 })
             issue_path = error.details.get("output_path", "$")
             self.reply(503, failure(
@@ -837,18 +866,21 @@ class SupervisorRuntime:
                     ("refs/tags/atrex/global-best", incumbent_id, "global best"),
                     ("refs/tags/atrex/lineage-best", lineage_id, "lineage best"),
                 ):
-                    if not isinstance(kernel_id, str):
+                    if (
+                        not isinstance(kernel_id, str)
+                        or not view.agent_git.commit_reachable(kernel_id)
+                    ):
                         continue
                     try:
                         source = self.measurements.read_kernel(kernel_id)
-                    except (OSError, ValueError):
+                        view.agent_git.install_runtime_ref(
+                            ref,
+                            source,
+                            message=f"Runtime: {label} Kernel {kernel_id}",
+                            commit_id=kernel_id,
+                        )
+                    except (OSError, ValueError, subprocess.SubprocessError):
                         continue
-                    view.agent_git.install_runtime_ref(
-                        ref,
-                        source,
-                        message=f"Runtime: {label} Kernel {kernel_id}",
-                        commit_id=kernel_id,
-                    )
             binding = JournalBinding(self.journal_factory.open(
                 workspace=agent_workspace, git_workspace=workspace,
                 campaign_root=self.journals_root, evidence_root=evidence,
@@ -1048,11 +1080,10 @@ class SupervisorRuntime:
                     argv = managed_gateway_argv(argv, parsed, self.config.hardware)
                     if parsed is not None and parsed.kind == "env":
                         parsed = parse_gateway(argv)
-                    if prepare_identity_only and (parsed is None or parsed.kind in QUERY_KINDS
-                                                  or parsed.kind == "env" or parsed.dry_run):
+                    if prepare_identity_only and (
+                        parsed is None or parsed.kind == "env" or parsed.dry_run
+                    ):
                         return None
-                    if parsed is not None and parsed.kind in QUERY_KINDS:
-                        return self.experiments.query(parsed, capability.workspace)
                     if parsed is not None:
                         # Invalid operator overrides are known configuration
                         # failures, not Agent errors or unknown GPU outcomes.
@@ -1079,6 +1110,50 @@ class SupervisorRuntime:
                         )
                         if frozen_source is not None:
                             stage_frozen(staged, frozen_source)
+                        if parsed.baseline_commit:
+                            if not capability.journal or not capability.journal.view:
+                                raise AgentRequestError(
+                                    "ABBA baseline commits require a registered Episode Git workspace.",
+                                    code="baseline_commit_unavailable",
+                                    next_action=(
+                                        "Run ABBA from an active optimization Episode and pass a full "
+                                        "commit shown by local Git or refs/atrex/shared/."
+                                    ),
+                                )
+                            baseline_commit = parsed.baseline_commit
+                            from aka.light.experiment.identifiers import KERNEL_RECORD_ID_RE
+                            git = capability.journal.view.agent_git
+                            if (
+                                KERNEL_RECORD_ID_RE.fullmatch(baseline_commit) is None
+                                or not git.commit_reachable(baseline_commit)
+                            ):
+                                raise AgentRequestError(
+                                    "ABBA baseline commit is not reachable from local or shared Git refs.",
+                                    code="baseline_commit_unavailable",
+                                    baseline_kernel_commit_id=baseline_commit,
+                                    next_action=(
+                                        "Use a complete commit from git log, the current lineage, or "
+                                        "refs/atrex/shared/<trajectory>/<epoch>/head."
+                                    ),
+                                )
+                            from aka.light.workspace.sources import Artifact, from_git
+                            try:
+                                baseline = Artifact(from_git(git.workspace, baseline_commit))
+                                baseline_path = ".atrex_long_horizon/abba-baseline"
+                                baseline.export(staged / baseline_path)
+                            except (OSError, UnicodeError, ValueError, subprocess.SubprocessError) as error:
+                                raise AgentRequestError(
+                                    "ABBA baseline commit does not contain a valid Kernel source tree.",
+                                    code="baseline_commit_invalid",
+                                    baseline_kernel_commit_id=baseline_commit,
+                                    next_action=(
+                                        "Inspect the commit with Git and choose one containing the complete "
+                                        "task-owned Kernel source."
+                                    ),
+                                ) from error
+                            kernel_ids["baseline"] = baseline_commit
+                            argv = materialized_baseline_argv(argv, baseline_path)
+                            parsed = parse_gateway(argv)
                         # Freeze the exact Agent-visible files before trusted
                         # evaluator inputs and Runtime control files are added.
                         # --kind command consumes this allowlist instead of
@@ -1178,7 +1253,7 @@ class SupervisorRuntime:
                     if self.config.private_reference_dir:
                         environment["ATREX_PRIVATE_REFERENCE_DIR"] = str(reference_snapshot or self.config.private_reference_dir)
                     # Keep the legacy report compiler's log alongside private records.
-                    (staged / ".atrex_long_horizon").mkdir()
+                    (staged / ".atrex_long_horizon").mkdir(exist_ok=True)
                     (staged / ".atrex_long_horizon/journal.json").write_text("{}")
                     if parsed is not None:
                         for value in requested_sync_paths(parsed):
@@ -1208,23 +1283,9 @@ class SupervisorRuntime:
                     except (FileNotFoundError, ValueError):
                         pass
                 if effective.baseline_path and "baseline" not in kernel_ids:
-                    from aka.light.workspace.sources import read_path
-                    try:
-                        baseline_source = read_path(
-                            staged / effective.baseline_path
-                        ).snapshot
-                        kernel_ids["baseline"] = self.measurements.find_kernel_id(
-                            baseline_source
-                        )
-                    except (FileNotFoundError, ValueError) as error:
-                        raise AgentRequestError(
-                            "ABBA baseline has no recorded Git commit identity.",
-                            code="baseline_kernel_commit_unknown",
-                            next_action=(
-                                "Use kernel-read with a full kernel_commit_id to "
-                                "materialize the baseline, then retry the same ABBA request."
-                            ),
-                        ) from error
+                    raise RuntimeStateError(
+                        "Runtime materialized an ABBA baseline without preserving its Git identity"
+                    )
                 if prepare_identity_only:
                     return self.experiments.task_identity(
                         staged, effective, environment, mode=self.config.optimization_mode,

@@ -32,7 +32,6 @@ PROTECTED_PATHS = frozenset(
         "config.json",
         "input.py",
         "agent_problem.json",
-        "public_shapes.json",
         "shapes.json",
         "metadata.json",
         "roofline.json",

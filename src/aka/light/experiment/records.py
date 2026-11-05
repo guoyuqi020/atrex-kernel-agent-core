@@ -19,14 +19,12 @@ from aka.light.experiment.store import (
     private_write_bytes,
     read_json,
 )
-from aka.light.workspace.files import MAX_FILE_BYTES, publish, relative_path
+from aka.light.workspace.files import MAX_FILE_BYTES, publish
 from aka.light.agent.session_tail import read_regular_bytes
 
 from aka.light.evaluation.provider import PREFIXES, result_from_response
 from aka.light.evaluation.public_result import cacheable_evaluation, seal_response
-from aka.light.runtime.request_errors import AgentRequestError, RuntimeStateError, error_response, field_error
-from aka.light.experiment.identifiers import GATEWAY_RECORD_ID_RE, KERNEL_RECORD_ID_RE
-QUERY_KINDS = {"record-read", "kernel-read", "kernel-records"}
+from aka.light.runtime.request_errors import AgentRequestError, error_response
 
 
 def _completed_abba_timeout(sample: object, states: list[dict], *, truncated: bool) -> bool:
@@ -40,65 +38,6 @@ def _completed_abba_timeout(sample: object, states: list[dict], *, truncated: bo
         and all(state.get("phase") == "terminal" for state in states)
         and not truncated
     )
-
-
-def _read_record(reader, identifier, *, field, pattern):
-    if not isinstance(identifier, str) or pattern.fullmatch(identifier) is None:
-        raise field_error(field, f"{field} must be a complete ID returned by this Campaign")
-    try:
-        return reader(identifier)
-    except (FileNotFoundError, RecordNotFound) as error:
-        raise field_error(field, "Record is not available in this Campaign; check the original tool result for its exact ID",
-                          code="record_not_found") from error
-    except (OSError, ValueError, KeyError, TypeError) as error:
-        raise RuntimeStateError("Saved evidence is unreadable or inconsistent; ask the operator to restore it",
-                                code="record_unavailable") from error
-
-
-def query(store, args, workspace: Path) -> dict:
-    if args.command or args.input or args.baseline_path:
-        raise ValueError("Record queries take IDs, not commands or GPU inputs")
-    if args.kind == "record-read":
-        record = _read_record(store.read, args.record_id, field="record_id", pattern=GATEWAY_RECORD_ID_RE)
-        return seal_response(record["response"], record["request"],
-                             record_id=record["gateway_record_id"], kernels=record["kernels"])
-    if args.kind == "kernel-records":
-        result = {"kernel_commit_id": args.kernel_commit_id, "gateway_records": _read_record(
-            store.kernel_records, args.kernel_commit_id,
-            field="kernel_commit_id", pattern=KERNEL_RECORD_ID_RE)}
-    else:
-        path = relative_path(args.output_path or "")
-        if len(path.parts) < 2 or path.parts[0] != "scratch":
-            raise ValueError("--output-path must name a file (or tree directory) inside scratch/")
-        source = _read_record(
-            store.read_kernel,
-            args.kernel_commit_id,
-            field="kernel_commit_id",
-            pattern=KERNEL_RECORD_ID_RE,
-        )
-        from aka.light.workspace.sources import Artifact
-        try:
-            exported = Artifact(source).export(workspace / path)
-        except (OSError, UnicodeError, ValueError) as exc:
-            from aka.light.runtime.request_errors import field_error
-            raise field_error(
-                "output_path",
-                "Kernel-read output path already exists but is not a complete source tree.",
-                code="output_path_conflict",
-                next_action=(
-                    "Remove or rename the stale destination, or choose a new empty path inside "
-                    "scratch/, then retry kernel-read."
-                ),
-            ) from exc
-        result = {
-            "ok": True,
-            "kernel_commit_id": args.kernel_commit_id,
-            "file": str(path),
-            "bytes": len(source),
-        }
-        if exported:
-            result.update(exported, directory=str(path))
-    return {"exit_code": 0, "stdout": json.dumps(result) + "\n", "stderr": ""}
 
 
 def correctness_identity(request: dict) -> dict | None:
@@ -442,9 +381,8 @@ def execute(store, evaluation, effects, staged, args, argv, environment, command
 
 def task_conflict_response(error: DuplicateTask) -> dict:
     info = error.response()
-    recovery = ([{"tool": "record-read", "request": {"record_id": error.record_id},
-                  "command": "python3 tools/sandbox.py --kind record-read --record-id " + error.record_id,
-                  "instruction": "Reuse the completed result; do not resubmit this exact Kernel task."}]
+    recovery = ([{"path": f"records/{error.record_id}.json",
+                  "instruction": "Read the projected completed result; do not resubmit this exact Kernel task."}]
                 if error.record_id else [{"instruction": info["next_action"]}])
     response = error_response(info.pop("message"), repairable=False, recovery=recovery, **info)
     response["previous_gateway_record_id"] = error.record_id

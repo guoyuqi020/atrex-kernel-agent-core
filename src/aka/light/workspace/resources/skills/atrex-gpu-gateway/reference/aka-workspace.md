@@ -16,7 +16,7 @@ extension API on Agate; use paths relative to the loader's `__file__`.
 Do not import `pathlib` or `os`, which Agate source validation rejects.
 `kernel.py` must continue to supply the evaluator's Python `Model` entry point; an
 Agate native-CUDA manifest is not used in this mode.
-`kernel-read` exports the entire source directory for `--baseline-path`.
+ABBA accepts a reachable `--baseline-commit`; Runtime exports that entire source directory privately.
 Use the managed Evaluate/Profile tools and submit the usual episode report.
 
 ## Explicit CUDA manifest
@@ -69,7 +69,7 @@ python3 tools/sandbox.py --kind run --no-sync
 The controller supplies the hardware, environment and evaluator. A full Evaluate
 covers correctness and performance. Change JSON and native sources together;
 any file, build option or dependency change creates a different Kernel identity.
-`kernel-read` exports a directory for a native Kernel, suitable for baseline-path.
+ABBA accepts a reachable `--baseline-commit`; Runtime exports its native source tree privately.
 Temporary experiments belong in scratch/, not source.files. Leave the final exact
 candidate in place and use the usual episode-report flow. The Agent owns engineering Git and
 commits; the Supervisor independently validates and seals the exact reported HEAD.

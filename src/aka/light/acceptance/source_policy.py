@@ -146,6 +146,7 @@ def install_workspace_policy(
     source_checks_enabled: bool = True,
     specify_dsl: bool = True,
     numerical_validation_enabled: bool = True,
+    expose_evaluator_shapes: bool = True,
 ) -> None:
     """Persist immutable mode, framework, and optional campaign runtime identity.
 
@@ -161,6 +162,9 @@ def install_workspace_policy(
     )
     if agent_runtime is not None and not requested_runtime:
         raise ValueError("agent_runtime must be a non-empty runtime id")
+    if type(expose_evaluator_shapes) is not bool:
+        raise TypeError("expose_evaluator_shapes must be a boolean")
+    requested_visibility = "exposed" if expose_evaluator_shapes else "hidden"
 
     workspace.mkdir(parents=True, exist_ok=True)
     state_path = workspace / MODE_STATE_FILE
@@ -173,16 +177,20 @@ def install_workspace_policy(
         existing_mode = state.get("mode")
         existing_framework = state.get("framework")
         existing_specify_dsl = state.get("specify_dsl", True)
+        existing_visibility = state.get("evaluator_shape_visibility")
+        if existing_visibility is None:
+            existing_visibility = "hidden" if (workspace / "agent_problem.json").is_file() else "exposed"
         if (
             existing_mode != mode
             or existing_framework != policy_framework
             or existing_specify_dsl != specify_dsl
+            or existing_visibility != requested_visibility
         ):
             raise RuntimeError(
                 "workspace policy mismatch: "
-                "recorded mode/framework/specify_dsl="
-                f"{existing_mode}/{existing_framework}/{existing_specify_dsl}, "
-                f"requested={mode}/{policy_framework}/{specify_dsl}"
+                "recorded mode/framework/specify_dsl/shape_visibility="
+                f"{existing_mode}/{existing_framework}/{existing_specify_dsl}/{existing_visibility}, "
+                f"requested={mode}/{policy_framework}/{specify_dsl}/{requested_visibility}"
             )
         existing_runtime = str(state.get("agent_runtime") or "").strip()
         if requested_runtime and existing_runtime and existing_runtime != requested_runtime:
@@ -199,6 +207,7 @@ def install_workspace_policy(
             "mode": mode,
             "framework": policy_framework,
             "specify_dsl": specify_dsl,
+            "evaluator_shape_visibility": requested_visibility,
         }
         if requested_runtime:
             state["agent_runtime"] = requested_runtime
@@ -209,6 +218,9 @@ def install_workspace_policy(
         state_changed = True
     if state.get("numerical_validation_enabled") != numerical_validation_enabled:
         state["numerical_validation_enabled"] = numerical_validation_enabled
+        state_changed = True
+    if state.get("evaluator_shape_visibility") != requested_visibility:
+        state["evaluator_shape_visibility"] = requested_visibility
         state_changed = True
     if state_changed:
         state_path.write_text(

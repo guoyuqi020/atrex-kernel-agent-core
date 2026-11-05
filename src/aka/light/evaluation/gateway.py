@@ -1875,8 +1875,7 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
     )
     parser.add_argument(
         "--kind",
-        choices=("auto", "run", "profile", "dev", "command", "check", "disassemble", "env",
-                 "record-read", "kernel-read", "kernel-records"),
+        choices=("auto", "run", "profile", "dev", "command", "check", "disassemble", "env"),
         default="auto",
         help=(
             "Gateway interface to use. auto routes test_kernel.py to run, profiler "
@@ -1885,12 +1884,6 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
             "command uploads a bounded engineering projection of the Agent workspace and returns scratch/."
         ),
     )
-    parser.add_argument("--record-id", help="Recorded Gateway result to read (no GPU submission)")
-    parser.add_argument(
-        "--kernel-commit-id",
-        help="Full Agent Git commit ID whose Kernel source or measurements should be read",
-    )
-    parser.add_argument("--output-path", help="Write Kernel source to a workspace-relative scratch/ file")
     parser.add_argument(
         "--gateway-profile",
         choices=("pre", "prod"),
@@ -2132,6 +2125,15 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
                 "ABBA comparison. Valid only with --kind run --mode full."
             ),
         )
+    parser.add_argument(
+        "--baseline-commit",
+        default=None,
+        metavar="COMMIT",
+        help=(
+            "Committed baseline Kernel for an Agent-requested same-allocation ABBA comparison. "
+            "Managed Runtime resolves this Git commit to an internal immutable source export."
+        ),
+    )
     parser.add_argument(
             "--comparison-repeats",
             type=int,
@@ -3880,8 +3882,12 @@ def validate_evaluation_options(args: argparse.Namespace) -> None:
             raise ValueError("--profile-shape-id requires --kind profile; use --shape-id for --kind run")
         if not args.profile_shape_id.strip():
             raise ValueError("--profile-shape-id must be a non-empty opaque ID from a saved evaluation")
-    if getattr(args, "comparison_run_timeout", None) is not None and not args.baseline_path:
-        raise ValueError("--comparison-run-timeout requires --baseline-path")
+    if getattr(args, "comparison_run_timeout", None) is not None and not (
+        args.baseline_path or args.baseline_commit
+    ):
+        raise ValueError("--comparison-run-timeout requires --baseline-commit")
+    if args.baseline_path and args.baseline_commit:
+        raise ValueError("--baseline-path and --baseline-commit are mutually exclusive")
     if args.multi_seed is not None:
         raise ValueError(
             "--multi-seed is Runtime-owned and cannot be set by the Agent; "
@@ -4269,8 +4275,6 @@ def _run_typed_gateway(
 
 def _main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.kind in {"record-read", "kernel-read", "kernel-records"}:
-        raise SystemExit("sandbox: record queries require tools/sandbox.py inside a live Campaign Session")
     try:
         validate_evaluation_options(args)
     except ValueError as exc:
@@ -4344,6 +4348,11 @@ def _main(argv: list[str] | None = None) -> int:
         if args.command or (args.env_capabilities and not args.env_gpu):
             raise SystemExit("sandbox: env takes no command; --env-capabilities requires --env-gpu")
         return _run_environment_query(args)
+    if args.baseline_commit:
+        raise SystemExit(
+            "sandbox: --baseline-commit requires the managed Runtime so the commit can be "
+            "resolved from the Agent repository"
+        )
     if args.kind in DIAGNOSTIC_KINDS or args.baseline_path:
         from aka.light.evaluation.operations import compare, diagnostic
         operation = diagnostic if args.kind in DIAGNOSTIC_KINDS else compare
@@ -5111,8 +5120,7 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
             normalized.append(item)
         index += 1
     options = {key: value for key, value in vars(args).items() if key not in {
-        "workspace", "command", "version", "sync", "no_sync", "dry_run", "output_path", "record_id",
-        "kernel_commit_id",
+        "workspace", "command", "version", "sync", "no_sync", "dry_run",
         "multi_seed", "timed_runs", "shape_id", "env", "ssh_init", "url",
     }}
     # Values may be secrets. Requests with custom environment are non-cacheable.

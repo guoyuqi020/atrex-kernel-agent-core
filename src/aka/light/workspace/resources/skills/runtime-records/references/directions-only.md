@@ -33,8 +33,8 @@ not expose Experiments. Relationship values are
 `contradiction`. All cited IDs must already be visible. Refinement, correction, alternative,
 reimplementation, and contradiction require exactly one effective parent; combination requires at
 least two. Reuse an existing Direction ID when the hypothesis is unchanged. Genealogy is descriptive:
-the child does not inherit parent status, plan, evidence, Kernel source or priority. Materialize and
-adopt parent source separately when needed. Runtime checks parent visibility, arity and cycles, not
+the child does not inherit parent status, plan, evidence, Kernel source or priority. Check out or
+branch from the relevant imported Git ref separately when needed. Runtime checks parent visibility, arity and cycles, not
 the scientific correctness of the relationship label.
 
 ```bash
@@ -56,14 +56,10 @@ updates by Direction ID, and leave new ideas proposed until work actually starts
 {"direction_id":"direction_11111111111111111111111111111111","before_direction_id":"direction_22222222222222222222222222222222","reason":"Highest-information structural probe"}
 ```
 
-Use `after_direction_id` instead, or omit both positions to move it to the end. Mark a completed
-zero-based plan step with:
-
-```json
-{"direction_id":"direction_11111111111111111111111111111111","plan_step":0}
-```
-
-Submit these through `prioritize-direction` and `progress-direction`, respectively.
+Use `after_direction_id` instead, or omit both positions to move it to the end. Submit durable queue
+changes through `prioritize-direction`. The `plan` belongs to the Agent: Runtime neither records
+completed plan steps nor chooses the next step. Revise the Direction only when its claim, scope, or
+remaining plan changes materially.
 
 ## Close or preserve a Direction
 
@@ -79,24 +75,23 @@ Submit these through `prioritize-direction` and `progress-direction`, respective
 
 `complete`, `abandon`, `block`, and `defer` use the same core fields. Do not provide Experiment
 support fields. `hypothesis_status` is `unresolved`, `supported`, or `refuted`. Unresolved defer,
-block, and abandon actions require `reopen_condition`. Continue multiple bounded
+block, and abandon actions require `reopen_condition`. Use `defer` for a strategic pause and `block`
+only for a concrete technical or external dependency that prevents progress. Continue multiple bounded
 probe/candidate/measurement cycles while useful work remains; do not hand off the first promotable
 checkpoint.
 
-## Adopt an exact measured Kernel
+## Continue imported peer history
 
-Materialize the source with a shared Git ref, `cherry-pick`, or `kernel-read`, then audit it:
+Peer source history is already imported under refs such as
+`refs/atrex/shared/T2/e0001/head`. Keep or commit local work before switching, then use normal Git:
 
-```json
-{
-  "kernel_commit_id": "0123456789abcdef0123456789abcdef01234567",
-  "source_ref": "refs/atrex/shared/T2/e0004/head",
-  "reason": "Continue the peer split-KV implementation"
-}
+```bash
+git log --oneline --decorate refs/atrex/shared/T2/e0001/head
+git diff HEAD refs/atrex/shared/T2/e0001/head
+git switch -c explore/t2-e0001 refs/atrex/shared/T2/e0001/head
 ```
 
-Submit with `--kind adopt-kernel`. Runtime requires the current SourceProvider-declared candidate bytes to
-match that commit. Adoption alone says nothing about correctness or performance.
+Switching source does not establish correctness or performance; evaluate the resulting clean HEAD.
 
 ## Submit the Episode report
 

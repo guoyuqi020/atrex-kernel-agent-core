@@ -31,8 +31,8 @@ automatically, so use explicit command overrides only when the reference documen
 
 ## Results and failures
 
-- Gateway Records are immutable measurement evidence. Reuse exact matches; `record-read` reads a
-  saved result and does not rerun work. A Git commit without a passing Record is not performance or
+- Gateway Records are immutable measurement evidence. Reuse exact matches by reading their
+  `records/<gateway_record_id>.json` projections. A Git commit without a passing Record is not performance or
   correctness evidence.
 - Follow `error.next_action` and preserved upstream diagnostics. Candidate compile, import,
   correctness, or source-policy errors require repair; they are not infrastructure failures.

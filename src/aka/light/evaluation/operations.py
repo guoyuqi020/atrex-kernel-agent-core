@@ -73,7 +73,7 @@ def diagnostic(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
 
 def validate_comparison(args) -> None:
     if args.kind != "run" or args.evaluation_mode == "correctness_only":
-        raise ValueError("--baseline-path requires --kind run in full mode")
+        raise ValueError("ABBA requires --kind run in full mode")
     validate_abba_repeats(args.comparison_repeats)
     if (args.command or args.evaluation_input_path or args.evaluation_shapes_path
             or args.shape_id):

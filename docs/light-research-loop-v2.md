@@ -95,7 +95,7 @@ PROGRESS.md
 
 Direction 文件按当前状态存放在 `proposed/`、`in_progress/`、`deferred/`、`blocked/`、
 `completed/` 或 `abandoned/` 子目录；状态变化时 Runtime 移除旧路径并投影到新路径。
-文件包含完整的决策字段、生命周期、plan 进度、`next_step` 与队列位置。
+文件包含完整的决策字段、生命周期、当前 plan 与队列位置。
 `experiment.json` 只包含研究语义与 Gateway Record 引用；根目录 `records/` 平铺当前可见的全部
 标准化公开结果，不再在各 Experiment 下复制一份。它不包含私有请求、输入哈希或兼容执行流。
 Record 中的 `kernel_commit_id` 是 Git commit ID，因此精确源码由同一 trajectory 仓库或已导入
@@ -108,8 +108,8 @@ Record 中的 `kernel_commit_id` 是 Git commit ID，因此精确源码由同一
 - Agent 可以用普通文件工具检索，也可以随 `command` 上传到远端诊断环境；
 - Agent 不得直接修改，Runtime 不会把文件内容读回为权威状态；
 - `PROGRESS.md`、`directions/` 和 `experiments/` 被 Kernel Git 与源码快照排除；
-- Direction/Experiment 不再提供重复的 list/load 工具；`record-read` 暂时保留为旧工作区和显式
-  单条查询的兼容入口，正常恢复直接读取根目录 `records/`。
+- Direction/Experiment 不再提供重复的 list/load 工具；Gateway Record 直接读取根目录
+  `records/`，Kernel 源码直接通过本地或导入的共享 Git 历史读取。
 
 ## Research Board
 
@@ -142,16 +142,27 @@ Runtime 将有大小限制的 Research Board 持续投影到 Agent 工作区根�
 
 ## Directions
 
-### In Progress
+### Local work queue
 
-1. **Split KV across CTAs** (`direction_bbbb`) — queue #1; owner `T1`;
+1. **Split KV across CTAs** (`direction_bbbb`) — local rank #1; owner `T1`;
    scope `major_redesign`.
    - Hypothesis: KSPLIT 能隐藏长 KV 延迟。
    - Next: 实现 KSPLIT=2 原型。
 
-### Proposed
+Experiment 通过自己的 `direction_id` 关联 Direction。Runtime 需要反向导航时动态计算相关
+Experiment，不在 Direction 中持久化易漂移的反向索引；`supporting_experiment_ids` 只记录
+最终结论实际采用的证据子集。
 
-1. **Reduce TMEM readout work** (`direction_aaaa`) — queue #2; scope `local`.
+### Shared direction pool
+
+1. **Reduce TMEM readout work** (`direction_aaaa`) — shared rank #1;
+   proposed by `T2`; access `peer_read_only`; scope `incremental`.
+
+### Terminal directions
+
+1. **Retune warp count** (`direction_cccc`) — status `abandoned`;
+   proposed by `T1`; access `local_writable`; scope `incremental`.
+   - Reopen when: register pressure is reduced.
 
 ## Visible-history per-Shape Pareto frontier
 
@@ -160,18 +171,20 @@ Runtime 将有大小限制的 Research Board 持续投影到 Agent 工作区根�
 | `shape_0001` | 12.5 | `456789ab...` | `gateway-1111...` |
 ```
 
-首页采用 Ruibo 风格的一页当前状态，但所有字段由 Runtime 机械生成而非 Agent 自由编辑：整体最佳来自正确且完整的标准 Evaluate；最新可见结果及适用范围来自本地与已导入同伴历史中时间上最新的终态 Gateway Record；建议实验来自 active Direction，缺失时取有序队列首项；真实 blocker 只采用显式 blocked Direction，或最新终态记录中的基础设施/超时故障。当前工作和下一步来自 active/queue Direction，三线状态来自 Research Store。Research Board 不得包含隐藏输入、私有 evaluator 输出、conversation 原文或无上限的测量正文。`pareto_frontier` 直接给出所有当前可见标准完整 Evaluate 历史中每个 Shape 的观测最优 Kernel/Record；它不是当前 lineage 私有边界，也不是一个已测量的合成 Kernel。完整 Direction、Experiment 和公开 Measurement 结果从工作区研究投影按需读取；Kernel 源码通过 Git commit 或 `kernel-read` 获取。
+首页采用 Ruibo 风格的一页当前状态，但所有字段由 Runtime 机械生成而非 Agent 自由编辑：整体最佳来自正确且完整的标准 Evaluate；最新可见结果及适用范围来自本地与已导入同伴历史中时间上最新的终态 Gateway Record；建议实验优先来自 active/local Direction，本地队列为空时才提示从共享池派生；真实 blocker 只采用本地显式 blocked Direction，或最新终态记录中的基础设施/超时故障。当前工作和下一步来自本地 Direction，三线状态来自 Research Store。Research Board 不得包含隐藏输入、私有 evaluator 输出、conversation 原文或无上限的测量正文。`pareto_frontier` 直接给出所有当前可见标准完整 Evaluate 历史中每个 Shape 的观测最优 Kernel/Record；它不是当前 lineage 私有边界，也不是一个已测量的合成 Kernel。完整 Direction、Experiment 和公开 Measurement 结果从工作区研究投影按需读取；Kernel 源码通过可达 Git commit 获取。
 内部 `schema_version`、`revision` 以及最近 Experiment 缓存不投影到 `PROGRESS.md`；前两项只用于 Runtime 恢复与一致性，Experiment 直接从 `experiments/` 按需读取。
 
 ### 队列排序
 
-队列顺序是显式状态，不由 Runtime 根据公式自动计算。新 Direction 默认追加到队尾。Agent 查看完整列表后，可以原子地调整顺序：
+每条 trajectory 的 Local work queue 是独立显式状态。新建的本地 Direction 默认追加到本地队尾；Agent 可以原子调整本地顺序：
 
 ```text
 direction-prioritize D7 --before D2
 ```
 
-Prompt 要求 Agent 综合考虑预期总收益、workload 覆盖范围、证据可信度、信息增益、实现成本、验证成本和正确性风险。这些因素用于帮助判断，不要求模型为了满足公式而虚构数值。
+Runtime 不用跨轨迹结果覆盖本地顺序。Epoch/publication 根据各 trajectory 的本地队列和它实际看见的共享池分别做归一化投票，生成只读 Shared direction pool；未见过某项的 trajectory 不投票。该聚合是 Supervisor 内部调度细节，Agent 只看到 `shared_rank`，不需要理解或迎合公式。
+
+Prompt 要求 Agent 对本地队列综合考虑预期总收益、workload 覆盖范围、证据可信度、信息增益、实现成本、验证成本和正确性风险。这些因素用于帮助判断，不要求模型虚构数值。共享池只用于发现；Agent 应比较多个同伴 Direction，吸收兼容的机制、证据和适用范围，合成为一个进入本地队列的 Direction，并在 `derived_from_direction_ids` 中保留全部来源。
 
 Agent 可以不选择队首 Direction，但必须记录简短原因，使持续回避高价值工作成为可见、可审计的行为。
 
@@ -182,9 +195,12 @@ Direction 是研究意图的基本单位，不重复记录测量结果。
 ```yaml
 direction_id: direction_...
 proposed_by: T2
+access: local_writable | peer_read_only
+local_rank: 1       # 仅本地可写 Direction
+shared_rank: 2      # 仅同伴只读 Direction
 name: Split KV across CTAs
 status: proposed | in_progress | deferred | completed | abandoned | blocked
-change_scope: local | major_redesign
+change_scope: incremental | major_redesign
 hypothesis: 多 CTA 可以在低 wave Shape 上隐藏 KV 访存延迟。
 applicability: 长上下文、CTA waves 较低且 reduction 开销可被摊薄的 Shape。
 expected_benefit: 降低长上下文延迟，并避免短上下文 dispatch 退化。
@@ -194,20 +210,19 @@ plan:
   - 在相同 allocation policy 下比较 KSPLIT=1/2/4。
 stop_conditions:
   - 如果 reduction 开销大于 Profile 推导出的延迟收益，则终止。
-next_step: 证明 KSPLIT=2 源码结构可以编译。
 reopen_condition: null
 relationship: refinement | correction | combination | alternative | reimplementation | contradiction
 derived_from_direction_ids: []
 derived_from_experiment_ids: []
 ```
 
-`next_step` 是 `plan` 中第一个尚未完成的步骤，Runtime 可以自动推导，不必重复存储。对于假设仍未解决的 `deferred`、`abandoned` 或 `blocked` Direction，必须记录 `reopen_condition`。
+日常执行 plan 中的步骤不单独生成 Runtime 记录；只有证据实质改变了 Direction 的声明或剩余 plan 时才提交完整 revision。对于假设仍未解决的 `deferred` 或 `blocked` Direction，必须记录 `reopen_condition`；`abandoned` 是不可重启的终态。
 
 Direction 关闭时记录 hypothesis status 和引用证据；完整的 Experiment 与 Measurement 关联由 Runtime 自动推导。
 
 ### 所有权
 
-每条 trajectory 同时只能拥有一个 active Direction；不同 trajectory 可以同时拥有不同 Direction。每个 Direction 的 Agent 可见投影包含不可变的 `proposed_by: Tn`，说明最初由哪条轨迹提出；`in_progress(T2)`/`owner` 只说明当前由谁执行，二者不能混用。Agent 不需要填写这些字段，它们由 Runtime 从可信搜索坐标生成。
+每条 trajectory 可以拥有多个 active Direction，但必须维护一个明确的 focus；最近启动或优先级调整的 active Direction 成为默认 focus。不同 trajectory 可以同时拥有不同 Direction。每个 Direction 的 Agent 可见投影包含不可变的 `proposed_by: Tn`，说明最初由哪条轨迹提出；`in_progress(T2)`/`owner` 只说明当前由谁执行，二者不能混用。Agent 不需要填写这些字段，它们由 Runtime 从可信搜索坐标生成。
 
 所有权是一种持久 lease：
 
@@ -216,7 +231,7 @@ Direction 关闭时记录 hypothesis status 和引用证据；完整的 Experime
 - trajectory 被永久停止或恢复状态被丢弃时失效；
 - 其他 trajectory 如需独立实现同一想法，应创建 `reimplementation` Direction，而不是静默重复工作。
 
-Direction 身份和队列顺序在 Epoch 边界共享。实时所有权变化由 Runtime 原子协调。
+Direction 身份在 Epoch 边界共享；每条 trajectory 的本地队列保持独立，Runtime 只发布聚合后的只读共享池。所有权变化由 Runtime 原子记录。
 
 ## Experiment 契约
 
@@ -244,7 +259,7 @@ Runtime 验证每个 `gateway_record_id`；对应的标准化公开结果平铺�
 `references` 才创建归档。没有测量 Record 的 Experiment 只能作为研究笔记，不能单独支撑
 `supported/refuted` 结论或候选晋升。
 
-Direction 和 Experiment 同时启用时，如果 trajectory 只有一个 active Direction，Experiment 默认自动关联该 Direction；如果请求明确指定其他可见 Direction，则使用显式值。只启用 Experiment 时不要求 `direction_id`，由 `intent` 表达本次局部假设。关闭 Experiment 时，Measurement Record 仍完整保留执行事实。
+Direction 和 Experiment 同时启用时，省略 `direction_id` 的 Experiment 默认关联当前 focus Direction；没有 focus 时仅在恰好一个本地 active Direction 的情况下自动推导。请求可以显式指定其他本地可写 Direction。只启用 Experiment 时不要求 `direction_id`，由 `intent` 表达本次局部假设。关闭 Experiment 时，Measurement Record 仍完整保留执行事实。
 
 Episode Report 只选择最终 Kernel 或 Experiment 并总结 Episode 结果，不重复 Direction plan 和测量正文。
 
@@ -437,7 +452,7 @@ Git note 只是 Measurement Record 的紧凑索引；Kernel commit ID 与 Gatewa
 3. 最终 head 的 squash snapshot；
 4. 一条说明被省略 commit 数量和原因的审计记录。
 
-同伴的真实 `.git/`、当前 checkout、实时 branch、scratch 和 conversation 始终保持私有。采用同伴 commit 会记录为研究事件，但在正常 Evaluate 和 promotion 通过前不会改变 official incumbent。
+同伴的真实 `.git/`、当前 checkout、实时 branch、scratch 和 conversation 始终保持私有。Agent 可以从 Runtime 导入的只读共享 ref 创建本地 branch；这种 Git 操作不会改变 official incumbent，只有后续正常 Evaluate 和 promotion 可以晋升该实现。
 
 ### 当前最佳指针
 
@@ -474,8 +489,8 @@ Runtime 继续负责长时间等待、重试、去重和基础设施故障分类
 
 一个 Episode 内可以持续完成多轮 `probe → candidate → measurement → revert/keep`。获得一个可晋升候选只是 checkpoint，不是终止条件。`episode-report` 必须声明 `handoff_reason`，且只允许：
 
-- `direction_terminal`：当前 Direction 真正完成或穷尽；启用 Direction 时必须先 `complete` 或 `abandon`；
-- `cross_trajectory_share`：仅限多轨迹搜索，需要把有意义的 checkpoint 发布给同伴；这是唯一可保留 active Direction 的 handoff；
+- `direction_terminal`：本 Episode 选中的研究工作真正完成或穷尽；启用 Direction 时必须先把所有本地 active Direction `complete` 或 `abandon`，候选 Experiment 必须属于本 Episode 完成或放弃的 Direction；
+- `cross_trajectory_share`：仅限多轨迹搜索，需要把有意义的 checkpoint 发布给同伴；候选 Experiment 必须属于仍为 `in_progress` 的 Direction，这是唯一可保留 active Direction 的 handoff；
 - `blocked`：具体 blocker 使当前工作无法继续；启用 Direction 时必须先用 `block` 关闭。
 
 Runtime 会校验 reason、report status、当前 Direction 生命周期及运行模式，避免 Agent 用普通 checkpoint 提前结束 Episode。
@@ -569,7 +584,7 @@ Light 默认启动三条持久 island，每条 island 每个 Epoch 运行一个 
 - `synchronous`（默认）保留严格 Epoch barrier，所有 trajectory 的本轮 Episode 都终态后才密封共享；
 - `asynchronous` 取消全局准入 barrier。每条 trajectory 内部仍串行，某条 trajectory 终态后立即形成累计 publication，并可直接开始下一 Episode。调度使用 round-robin，避免并发槽位少于 trajectory 数量时快岛长期饿死未启动的岛。
 
-两种模式都只共享最终 Direction 状态和队列调整、Experiment 标注、完成的 Measurement Record、被引用的 Kernel Artifact、密封且经过源码范围过滤的 Git 历史，以及全局 Pareto frontier。不共享实时草稿、scratch、conversation 或未验证分析。异步 publication 按终态 Episode 边界过滤 Research event 和评测引用，不能读取仍在运行的同伴 Episode。共享历史中的未测量 commit 只作为工程过程，不作为证据。
+两种模式都只共享通过 Review 的 Direction/Experiment、聚合后的只读共享池顺序、完成的 Measurement Record、被引用的 Kernel Artifact、密封且经过源码范围过滤的 Git 历史，以及全局 Pareto frontier。显式标为 `partially_supported` 或 `unreviewed` 的 Direction/Experiment 保持 trajectory 私有，直到修订后通过 Review。每条 trajectory 的本地工作队列与优先级仍独立，不会被 publication 覆盖。不共享实时草稿、scratch、conversation 或未验证分析。异步 publication 按终态 Episode 边界过滤 Research event 和评测引用，不能读取仍在运行的同伴 Episode。共享历史中的未测量 commit 只作为工程过程，不作为证据。
 
 `search.role_specialization` 决定是否向三条 trajectory 注入不同职责，新搜索默认关闭。
 关闭时三条 trajectory 收到相同的通用 island 指令；调度、共享、lineage、Git 和 Session
@@ -581,7 +596,7 @@ Light 默认启动三条持久 island，每条 island 每个 Epoch 运行一个 
 | T2 | 持续推进最高优先级 major redesign；完成后重新选题或发现新的结构性方向 |
 | T3 | 做能力探针、Profile 或独立探索 |
 
-职责只引导任务分配，不限制 Agent 的具体实现。trajectory 可以在 Epoch 边界主动采用同伴 Kernel，但不能仅因为对方赢得上一轮就被自动迁移。
+职责只引导任务分配，不限制 Agent 的具体实现。trajectory 可以在 Epoch 边界从同伴共享 ref 创建本地 branch，但不能仅因为对方赢得上一轮就被自动迁移。
 
 协调器仍只发布一个 official incumbent。保留 lineage 只影响研究状态，不改变 Production 权限。
 
@@ -593,8 +608,8 @@ Light 必须防止直接拟合完整 workload，但完全模糊的 Agent Problem
 
 | 可见性 | 是否参与普通 Evaluate | 是否参与终态 Evaluate/ABBA | Agent 可见信息 |
 | --- | --- | --- | --- |
-| `public_shapes` | 是 | 是 | 精确 Shape 参数、稳定公开 ID、逐 Shape 正确性、延迟和诊断 |
-| `hidden_shapes` | 是 | 是 | 不公开参数；进入完整 workload 的正确性与性能聚合，可使用不携带参数的 opaque ID 返回受限结果 |
+| `exposed` | 是 | 是 | `shapes.json`、精确 Shape 参数、稳定 ID，以及未做 Shape 脱敏的 Agate 结果 |
+| `hidden` | 是 | 是 | `agent_problem.json`；精确参数不公开，Agate 结果中的 Shape 细节统一脱敏，ID 为 opaque handle |
 
 V0、普通 Episode Evaluate、终态 Evaluate、终态 ABBA 和最终报告必须使用相同的 Shape 集合、频率权重、正确性策略和性能聚合方式。普通 Evaluate 不能只测公开 Shape；否则 Agent 优化目标与终态门禁仍会发生偏移。
 
@@ -611,48 +626,18 @@ dimensions:
   cta_wave_buckets: [sub_wave, one_to_two_waves, multi_wave]
 ```
 
-该摘要不能包含精确隐藏 Shape 组合。`public_shapes` 显式给出一部分真实 Shape，使 Agent 能围绕 `D`、group count、CTA waves、span、rows、padding ratio、window mode 等有物理意义的变量实现 Kernel family，而不必猜测实际工作负载是否包含 decode、MTP、prefill 或不同 window regime。
+该摘要不能包含精确隐藏 Shape 组合。需要基于真实 workload 设计 Kernel family 时，应使用默认的 exposed 模式；需要评估泛化能力时，显式启用 hidden 模式。两者之间不再提供“前 N 个 Shape”的中间状态。
 
 ### 可见性划分规则
 
-可见性由 Runtime 在 Campaign 创建时一次性生成并固化。启动参数
-`--public-shapes 0|N|all` 控制精确 Shape 参数的可见数量，默认值为 `all`：
+可见性在 Campaign 创建时固化为二值设置：
 
-- `0` 不生成 `public_shapes.json`，不公开任何精确 Shape 参数；
-- 正整数 `N` 按 evaluator 的规范 Shape 顺序固定公开前 `N` 个 Shape；如果完整 workload 少于 `N`，则公开全部 Shape；
-- `all` 公开全部 Shape；
-- 恢复 Campaign 时不得重新选择、重排或更改可见数量；如需更改必须使用新工作区；
-- 公开 Shape 使用 `public-*` ID；隐藏 Shape 可以使用 opaque ID，但 ID 不能编码或映射回参数；
-- Runtime 保存完整私有 visibility manifest，Agent 工作区只物化公开 Shape 参数；
-- Agent 可以看到公开 Shape 的精确频率权重，以及完整 workload 的频率桶摘要；隐藏 Shape 的精确参数与参数—权重映射不公开。
+- 默认 `--expose-evaluator-shapes`：工作区包含完整 `shapes.json`，Agate 返回保留 Shape 细节；
+- `--no-expose-evaluator-shapes`：工作区只含 generalized contract，Agate 返回统一脱敏 Shape 细节；
+- 恢复 Campaign 时不得改变该设置；如需改变必须使用新工作区；
+- 两种模式都使用完整 workload 进行标准 Evaluate 和 ABBA，开关只控制可见性，不改变评分样本。
 
-例如 90 个 Shape 使用默认配置时公开全部 90 个精确参数；显式使用 `--public-shapes 5` 时只公开规范顺序中的前 5 个，使用 `--public-shapes 0` 时不公开精确参数。无论配置为何，全部 90 个 Shape 都参与每次标准 Evaluate；公开数量只控制 Agent 能看到多少精确参数，不改变评分样本。
-
-Agent Problem 可以扩展为：
-
-```yaml
-schema_version: atrex.agent_problem.v2
-shape_visibility: partial
-dimensions: ...
-public_shapes:
-  - case_id: public-001
-    shape: {...}
-    frequency_weight: 0.08
-  - case_id: public-002
-    shape: {...}
-  - case_id: public-003
-    shape: {...}
-  - case_id: public-004
-    shape: {...}
-  - case_id: public-005
-    shape: {...}
-synthetic_development_cases: [...]
-hidden_summary:
-  count: 85
-  regime_coverage: {...}
-```
-
-`hidden_summary` 只说明数量与粗粒度覆盖，不包含精确 Shape。现有 `shape_ids` 请求机制继续保留：Agent 可以按公开或 opaque Shape ID 发起诊断性子集 Evaluate、Profile 或其他探针；子集结果必须明确标记为非终态证据，不能用于晋升或更新 official incumbent。
+现有 `shape_ids` 请求机制继续保留：Agent 可以按公开或 opaque Shape ID 发起诊断性子集 Evaluate、Profile 或其他探针；子集结果必须明确标记为非终态证据，不能用于晋升或更新 official incumbent。
 
 ### 评测与反馈
 
@@ -726,7 +711,7 @@ Runtime 保存 append-only 研究事件流，至少记录：
 - 测量时观察到的 Agent Git 身份；
 - Runtime 生成 ref 的刷新；
 - 共享历史的原始 Commit 到导入 Commit 映射及测量 notes；
-- 同伴 Kernel adoption；
+- 共享 Git ref 的导入、更新和本地派生；
 - Episode 选题决定；
 - lineage migration；
 - promotion 和 rejection。
@@ -746,7 +731,7 @@ Runtime 保存 append-only 研究事件流，至少记录：
 | 持久 island lineage | `workflow/search.py`、`workflow/search_driver.py` | 搜索 checkpoint 升级为 per-trajectory working/best/WIP，取消 winner 覆盖 |
 | Agent 私有 Git | `workspace/agent_git.py`、`workspace/episode.py` | Episode draft 初始化受控本地 Git；Git 身份只用于工程审计 |
 | Epoch 共享源码历史 | `workspace/shared_history.py`、`workflow/search_driver.py` | 过滤导出 `kernel.py` 与 `impl/**`，导入 peer refs 和测量 notes |
-| 可配置公开 Shape | `task/problem/layout.py`、`workflow/bootstrap.py`、`workflow/session_io.py` | Runtime 按 `0`、`N` 或 `all` 确定性生成只读 `public_shapes.json`；完整 evaluator 输入始终参与评测 |
+| 二值 Shape 可见性 | `task/problem/layout.py`、`workflow/bootstrap.py`、`evaluation/projection.py` | exposed 模式公开 `shapes.json` 与 Shape 诊断；hidden 模式只公开 generalized contract 并统一脱敏 Agate 返回 |
 | Prompt 与上下文恢复 | `workflow/prompts/`、`workflow/episode.py`、`agent/home.py` | Episode 开始要求读取 `PROGRESS.md` 与上一轮结算；同一 trajectory 跨 Episode 恢复 Claude Session，并以投影与 Git 保持权威恢复边界 |
 | 审计与恢复 | Research event store、search checkpoint、Measurement Store | 先写事件再更新投影；所有生成视图均可重建 |
 
@@ -783,7 +768,7 @@ Runtime 保存 append-only 研究事件流，至少记录：
 - 从现有存储生成有大小限制的 Research Board；
 - 持续投影到根目录 `PROGRESS.md`，不再注入 Prompt 或提供刷新命令；
 - 增加显式 Direction 队列顺序和原子 reorder；
-- 增加 `next_step` 与 `reopen_condition` 语义；
+- 增加 `reopen_condition` 语义；
 - 修改 Prompt 和终态引导，避免第一个局部改善立即触发 handoff。
 
 该阶段不改变 promotion 和搜索选择语义。
@@ -807,14 +792,14 @@ Runtime 保存 append-only 研究事件流，至少记录：
 - 把 active Direction ownership 限制从全局改为每条 trajectory；
 - 跨 Epoch 保留 lineage best 和 WIP；
 - 停止使用 global winner 覆盖所有 trajectory seed；
-- 增加主动 peer adoption 和 major-redesign milestone budget；
+- 支持从 peer shared ref 主动创建本地研究分支，并增加 major-redesign milestone budget；
 - 在 Epoch 边界共享完成的研究状态。
 
 ### 第四阶段：Workload 边界
 
 - 生成公开语义 workload descriptor；
-- 按 evaluator 规范顺序和 `--public-shapes 0|N|all` 生成稳定 visibility manifest；
-- 在 Agent 工作区只物化 public Shape 参数；Agent 可以按公开或 opaque Shape ID 做子集诊断，但子集结果不能晋升；
+- 固化 `--[no-]expose-evaluator-shapes` 二值 visibility policy；
+- exposed 工作区物化完整 `shapes.json`，hidden 工作区只物化 generalized contract；Agent 可以按公开或 opaque Shape ID 做子集诊断，但子集结果不能晋升；
 - 默认 full Evaluate、终态 Evaluate 和 ABBA 固定使用完整 workload，同时保留显式、非晋升的诊断性子集 Evaluate；
 - 隐藏 Shape 只返回全量聚合、opaque ID 或有大小限制的 per-regime 摘要；
 - 增加 dispatcher 边界扰动和 workload-shift 检查。
@@ -853,6 +838,6 @@ Runtime 保存 append-only 研究事件流，至少记录：
 6. major-redesign WIP 未通过正常完整评测与晋升前，不能成为 official incumbent。
 7. 隐藏输入、参数与可逆映射不能进入 Agent 可见记忆；隐藏 Shape 的有界结果可以使用 opaque ID 展示。
 8. 基础设施故障不能 refute Direction，也不能把 Kernel 标成 incorrect。
-9. 队列顺序、ownership、Runtime ref 刷新和 peer adoption 必须支持崩溃恢复。
+9. 队列顺序、ownership、Runtime ref 刷新和从 peer ref 派生的本地分支必须支持崩溃恢复。
 10. 可选研究模块不能改变测量和晋升语义。
 11. Agent Git Commit ID 和 ref 永远不能作为权威测量或晋升证据。

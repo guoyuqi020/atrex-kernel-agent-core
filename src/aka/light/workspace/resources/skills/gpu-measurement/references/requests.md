@@ -12,14 +12,14 @@ not replace a passing ordinary full Evaluate for the exact selected source.
 | --- | --- | --- |
 | Is the current candidate correct and faster? | `run --no-sync` | Official correctness and end-to-end timing across the contract. Inspect correctness before using latency. |
 | Does a numerical repair work without timing? | Atrex-Bench `run --mode correctness_only --no-sync` | Correctness evidence only; missing latency is not zero latency. |
-| How do candidate and baseline compare in one allocation? | `run --baseline-path PATH --comparison-repeats 2 --no-sync` | Paired ABBA evidence. Use the injected acceptance command for exact reuse; this does not replace ordinary full Evaluate. |
+| How do candidate and baseline compare in one allocation? | `run --baseline-commit COMMIT --comparison-repeats 2 --no-sync` | Paired ABBA evidence. Runtime exports the exact reachable Git commit privately; this does not replace ordinary full Evaluate. |
 | Which GPU resource or Kernel needs attention? | `profile --profile-level sol --no-sync` | Structured counters, not an algorithmic optimality verdict. Narrow to a Kernel/launch for `deep`. |
 | Does compilation or a sanitizer reveal a defect? | `check --no-sync`, optionally `--sanitize memcheck` | Diagnostic results; inspect inner errors even if transport completed. |
 | What code did the compiler generate? | `disassemble --format ptx --no-sync` | Generated device code, not correctness or performance validation. |
 | Can a self-contained single-file probe that reads no candidate or other workspace file resolve one question? | `dev --input scratch/probe.py --no-sync -- python3 scratch/probe.py` | Only the explicitly declared probe is uploaded; returns its output and exit status. |
 | Does custom code read the candidate, helpers, prior artifacts, or any other workspace state? | `command -- python3 scratch/experiment.py` | Bounded engineering workspace projection uploaded; `scratch/` synchronized back. Runtime control state, Skills and bulk `records/` history are excluded. |
 | What is available on the assigned GPU target? | `env` | Runtime selects the Campaign hardware and returns its GPU/environment/capability facts; this is not a fact about the Agent host or a Kernel measurement. |
-| Has this exact candidate or observation already been measured? | `record-read`, `kernel-read`, `kernel-records`, root `PROGRESS.md` | Saved facts/source; `PROGRESS.md` includes per-Shape historical winners. No new GPU allocation. See the history section below. |
+| Has this exact candidate or observation already been measured? | `records/*.json`, local Git, root `PROGRESS.md` | Saved facts and exact committed source; `PROGRESS.md` includes per-Shape historical winners. No new GPU allocation. |
 
 Read `python3 tools/sandbox.py --kind OPERATION --help` before using unfamiliar controls.
 The injected task/evaluator contract and actual Runtime validation take precedence over
@@ -61,7 +61,7 @@ python3 tools/sandbox.py --kind run --no-sync -- python3 test_kernel.py --versio
 # Atrex-Bench only: correctness-only diagnostic, not a full Evaluate.
 python3 tools/sandbox.py --kind run --mode correctness_only --no-sync
 # Generic AB/BA example; use the injected acceptance command for reuse.
-python3 tools/sandbox.py --kind run --baseline-path scratch/incumbent-kernel --comparison-repeats 2 --no-sync
+python3 tools/sandbox.py --kind run --baseline-commit <full-git-commit> --comparison-repeats 2 --no-sync
 # Atrex-Bench Typed NCU/rocprof profile; use a Shape ID returned by Runtime.
 python3 tools/sandbox.py --kind profile --profile-level sol --no-sync
 python3 tools/sandbox.py --kind profile --profile-shape-id 0 --no-sync
@@ -81,10 +81,10 @@ than querying a different product or guessing from a marketing name.
 For ABBA, optional `--comparison-run-timeout SECONDS` controls each run and must fit the
 configured allocation's complete schedule. Without that option, each run uses the smaller of
 the 300-second Performance timeout and its equal share of the configured allocation. Acceptance can
-reuse only an exact matching request, including baseline bytes, path, repeats and run timeout.
+reuse only an exact matching request, including baseline commit/source, repeats and run timeout.
 The injected acceptance block supplies the exact Agent-controlled command for the current
-configuration and a `kernel-read` command for the committed
-incumbent. Use that block instead of this generic example when seeking acceptance reuse.
+configuration and committed incumbent ID. Use that block instead of this generic example when
+seeking acceptance reuse.
 Runtime also owns Shape batch size, measurement repetitions and the derived allocation timeout; do not emulate
 them with repeated Agent requests or environment overrides. Other request/input changes can
 prevent reuse. A matching comparison is optional and does not replace the report's full Evaluate.
@@ -158,12 +158,11 @@ including OSS transfers. Missing worker NCU or empty metrics is an explicit
 Profile failure; narrow the kernel/launch selection or ask the operator to
 provision the worker, not the local Agent environment.
 Use `--profile-shape-id ID`, not `--shape-id`, to select a case from a saved result. On a
-generalized task, consult `public_shapes.json` for IDs whose exact parameters are public; other IDs
-are opaque. On an ordinary public-shape task, consult `shapes.json`.
+generalized hidden-Shape task, all evaluator Shape IDs are opaque. On an exposed task, consult
+`shapes.json` for exact parameters.
 Atrex-Bench Profile uses the Typed route by default, including Shapes whose parameters are not
 public. The Supervisor supplies exactly one evaluator case and returns its ID and projected metrics;
-for a generalized task, the ID maps to exact parameters only when it is listed in
-`public_shapes.json`.
+in hidden mode the returned ID remains opaque.
 Without a selector it uses the first sorted Shape. `--profile-shape-id` takes precedence over
 legacy `--env PROFILE_SHAPE_ID=...`; no environment override is needed.
 SSH, custom commands/wrappers, `--input`, and driver-specific `PROFILE_*` controls use Dev
@@ -182,17 +181,11 @@ subsystem-specific counters when the limiting unit remains unclear.
 
 ## Saved results and source
 
-Reuse recorded facts across Episodes. Replace these placeholder IDs with values
-returned by the Runtime; these queries do not submit GPU jobs:
+Reuse recorded facts across Episodes by reading `records/*.json`; inspect their exact Kernel commits
+with ordinary Git commands. Runtime projects a Record only when every referenced commit is reachable
+from local or imported shared refs and its committed source matches the private measurement snapshot.
 
-```bash
-python3 tools/sandbox.py --kind record-read --record-id gateway-0123456789abcdef0123456789abcdef
-python3 tools/sandbox.py --kind kernel-read --kernel-commit-id 0123456789abcdef0123456789abcdef01234567 --output-path scratch/previous-kernel
-python3 tools/sandbox.py --kind kernel-records --kernel-commit-id 0123456789abcdef0123456789abcdef01234567
-# Read root PROGRESS.md for the Research Board and per-Shape frontier.
-```
-
-Measurements and `record-read` print one JSON object with `operation`, `status`,
+Each measurement response and projected Record contains `operation`, `status`,
 `result`, `gateway_record_id`, and `kernel_commit_id` when a single Kernel is bound. ABBA uses
 `operation: evaluate`, `result.comparison`, `candidate_kernel_commit_id`, and
 `baseline_kernel_commit_id`.
@@ -203,12 +196,9 @@ or `custom`. Custom input/Shape overrides and Shape subsets are not full-contrac
 Correctness-only results have null latency summaries and an empty per-Shape latency map.
 ABBA keeps the per-side aggregate metrics, not raw schedules or repetition arrays.
 
-`record-read` prints the saved public result without executing GPU work. Its exit
-code is zero when the read succeeds, even if the saved operation has `status: failed`
-or `cancelled`. A completed evaluator can have `result.correct: false`; completion
-does not mean the Kernel passed. Old stream-only records are normalized on read.
-`kernel-read` copies exact measured source into `scratch/`. `kernel-records` lists
-that Kernel's Record IDs, operations and timestamps without loading every result.
+A completed evaluator can have `result.correct: false`; completion does not mean the Kernel passed.
+Search `records/*.json` by commit ID to find its measurements. Use `git show`, `git diff`, `git log`
+or a local branch to inspect source; imported peer history is under `refs/atrex/shared/`.
 Dev probes also produce Record IDs even when their output is not an evaluation.
 A duplicate-task error means the result already exists, not that the Kernel failed.
 
@@ -221,7 +211,7 @@ Do not infer unavailable counters or missing measurements as zero.
 | Response | Next action |
 | --- | --- |
 | Full Evaluate completed, `result.correct: true` | Compare the measured latency and per-Shape changes with your expected effect. Keep, refine or restore based on evidence; promotion still belongs to the Supervisor. |
-| Evaluate completed, `result.correct: false` | Inspect correctness diagnostics and Shape/case/output identifiers. On generalized tasks, map only IDs listed in `public_shapes.json` to public parameters; on ordinary public-shape tasks, use `shapes.json`. Repair the candidate; do not call it a Gateway outage or use its timings as a valid speedup. |
+| Evaluate completed, `result.correct: false` | Inspect correctness diagnostics and Shape/case/output identifiers. On generalized hidden-Shape tasks, treat IDs as opaque; on exposed tasks, use `shapes.json`. Repair the candidate; do not call it a Gateway outage or use its timings as a valid speedup. |
 | Dev/Check/Profile/Disassemble failure | Read `result.error` and available `stdout`/`stderr` or diagnostic fields. Compiler/import/file errors require source or declared-input repair. A successful Dev probe is not automatically a passing Evaluate. |
 | Request rejected with `issues`, `request_schema`, `recovery` or `error.next_action` | Correct the named field/path or evidence reference. Follow the supplied operation-specific guidance, not guessed flags or IDs. |
 | `duplicate_gateway_task` | Read the previous Record ID supplied by the error. Do not relabel the version or change source merely to bypass deduplication. |
@@ -251,10 +241,10 @@ Do not request control files or changes to Kernel source via remote outputs.
 
 For every workspace-dependent custom experiment, use the workspace Command wrapper. It excludes
 bulk root `records/`; if a historical result is required remotely, first copy the selected result
-into `scratch/` with `record-read` rather than uploading the entire measurement history:
+into `scratch/` with a normal local file copy rather than uploading the entire measurement history:
 
 ```bash
-python3 tools/sandbox.py --kind record-read --record-id gateway-0123456789abcdef0123456789abcdef > scratch/record.json
+cp records/gateway-0123456789abcdef0123456789abcdef.json scratch/record.json
 python3 tools/sandbox.py --kind command -- python3 scratch/probe_mma.py
 ```
 

@@ -583,11 +583,9 @@ supplemental numerical probes also receive the full candidate. Tree diagnostic
 payloads above 4 MiB use OSS with Runtime's digest-verified unpacker. HTTP uses Supervisor
 credentials from the Agate environment or operator CLI config, never Agent files.
 
-Historical `kernel-read` writes a **directory** for a tree Kernel. Use that directory
-as `--baseline-path`; a repeated read is safe if its contents are still identical.
-Single-file reads continue to write a file. `record-read` keeps the existing result
-format and Kernel binding. Changed files, removed files and fixed-file tampering
-cannot reuse an unrelated measurement.
+ABBA accepts a reachable Git commit through `--baseline-commit`; Runtime exports its exact source
+tree into private request staging. Changed files, removed files and fixed-file tampering cannot
+reuse an unrelated measurement.
 
 This option currently requires native Atrex-Bench and `package_root: "."`,
 matching Runtime's native Eval archive limitation. Tree diagnostics currently
@@ -755,7 +753,7 @@ than trusting the Agent-writable compatibility projection.
 
 ### Agent measurement results
 
-GPU calls and `record-read` return one JSON object: `operation`, `status`, `result`,
+GPU calls and projected Record files contain: `operation`, `status`, `result`,
 `gateway_record_id`, and `kernel_commit_id` when source-bound. ABBA is `operation: evaluate`
 with `result.comparison` and `baseline_kernel_commit_id`. Env uses the same result envelope
 without a measurement ID. Help, dry-run, Journal, Wiki and index-query contracts are unchanged.
@@ -798,7 +796,7 @@ not instructions to create research records. Report validation rejection leaves 
 correct the indicated fields or evidence, then resubmit. Missing/malformed IDs are repairable;
 corrupt or inaccessible private evidence is an operator/storage failure, not a reason to remeasure.
 
-Completed duplicate tasks return `previous_gateway_record_id` and a `record-read` recovery command;
+Completed duplicate tasks return `previous_gateway_record_id` and the corresponding `records/<ID>.json` path;
 in-progress duplicates tell the Agent to wait for the original call. A confirmed pre-dispatch queue
 timeout remains HTTP 429 with backoff and unchanged-request retry guidance. Post-dispatch unknown
 outcomes remain non-repairable HTTP 503 and must be reconciled before any resubmission. CLI-local
@@ -854,7 +852,7 @@ flowchart LR
 - **Task:** the existing Problem loader supplies public input, initial implementation and host-only evaluation roles. The selected SourceProvider supplies V0; it need not equal the reference implementation. CandidateWorkspace installs resources, creates isolated drafts, performs private Git operations and publishes the sealed candidate. The light implementation currently supports native Atrex-Bench and SOL, not arbitrary Setup-agent-generated evaluator layouts.
 - **Tool Runtime:** Session capabilities authorize exact workspaces. The host stages exact source and trusted evaluator inputs, then delegates to selected services. `MeasurementEffects` supplies only execution/audit/publication callbacks; Experiment does not receive the whole Runtime or Campaign. `ExecutionControl` binds deadline, liveness and slot ownership without passing Session tokens to the executor implementation.
 - **Evaluation and Experiment:** Evaluation builds the immutable-input plan and interprets results; Experiment coordinates repetitions, checkpoints and private records. Agent duplicate requests return an error with the previous Gateway Record ID; trusted acceptance can reuse compatible records. Transport replay requires persisted idempotency; accepted jobs are polled by the same ID, and explicitly failed infrastructure jobs receive replacements. Candidate-class execution timeouts remain Candidate outcomes, while explicitly infra-class timeouts use infrastructure recovery. Operator evaluator-version/dependency pins are frozen into the plan and its identity before execution.
-- **Journal and Acceptance:** `record-read`, `kernel-read`, `kernel-records` and `episode-report` retain their Light interfaces. Direction and Experiment list/load tools are removed; Runtime projects their enabled state as normal files. Runtime continuously projects root `PROGRESS.md`, including a per-Shape frontier derived from the Campaign's visible passing standard full Evaluations across Episodes and imported peer history: each Shape's observed minimum, winning Kernel/Record IDs, distinct winner IDs and counts. This file exists independently of Direction/Experiment recording, submits no GPU work, and does not imply a composite Kernel has been measured. Journal claims reference measured evidence. Acceptance receives explicit evidence/liveness callbacks through `CandidateValidation`; it does not authorize HTTP or commit Git. Invalid reports return repair instructions; identical accepted reports can be replayed. Later draft edits do not change a sealed candidate. The existing report transaction still coordinates validation and sealing through the Workspace to retain crash-recovery behavior.
+- **Journal and Acceptance:** `episode-report` remains the handoff interface. Direction/Experiment list/load tools and Record/Kernel query tools are removed; Runtime projects visible evidence as normal files and reachable Git refs. Runtime continuously projects root `PROGRESS.md`, including a per-Shape frontier derived from the Campaign's visible passing standard full Evaluations across Episodes and imported peer history: each Shape's observed minimum, winning Kernel/Record IDs, distinct winner IDs and counts. This file exists independently of Direction/Experiment recording, submits no GPU work, and does not imply a composite Kernel has been measured. Journal claims reference measured evidence. Acceptance receives explicit evidence/liveness callbacks through `CandidateValidation`; it does not authorize HTTP or commit Git. Invalid reports return repair instructions; identical accepted reports can be replayed. Later draft edits do not change a sealed candidate. The existing report transaction still coordinates validation and sealing through the Workspace to retain crash-recovery behavior.
 - **Workflow:** deterministic V0, optional framework baseline, unified Episodes, selected Agent sessions, budget/stall control, acceptance and promotion recovery. Legacy Fast/Setup flags do not select stages in this implementation. Goal Episodes and supplemental numerical planning are explicit options. The upstream Workflow remains available unchanged.
 
 Core disposes selected providers. The light Workflow closes the private servers it creates, but does not close its borrowed Agent or Task services; the composition owns them. Closing the Agent prevents further invocation. Stateless Evaluation/Acceptance/Journal factories are composition-owned; Experiment stores and Journals are scoped to Campaigns and Episodes. The private HTTP host owns Session capabilities and request concurrency.

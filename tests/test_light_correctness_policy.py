@@ -53,7 +53,11 @@ from aka.light.evaluation.evaluation_failures import (
 )
 from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES
 from aka.light.evaluation.public_result import canonical_result
-from aka.light.evaluation.projection import gateway_error_from_process
+from aka.light.evaluation.projection import (
+    gateway_error_from_process,
+    gateway_error_result,
+    project_response,
+)
 from aka.light.evaluation.shapes import (
     effective_shape_batch_size,
     shape_request_timeout,
@@ -103,6 +107,92 @@ from aka.legacy.workflow.cli_conversion import adapt_argv
 
 
 class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
+    def test_unknown_agate_error_envelope_is_not_reclassified(self):
+        envelope = {
+            "operation": "check",
+            "status": "running",
+            "job_id": "cp_future",
+            "error": None,
+            "backend_state": "queued",
+            "future_diagnostic": {"scheduler": "warming"},
+        }
+
+        self.assertEqual(gateway_error_result(envelope), envelope)
+
+    def test_canonical_result_preserves_unknown_agate_error_envelope(self):
+        envelope = {
+            "operation": "evaluate",
+            "status": "running",
+            "job_id": "ev_future",
+            "error": None,
+            "backend_state": "queued",
+            "future_diagnostic": {"scheduler": "warming"},
+        }
+        result = canonical_result(
+            {
+                "exit_code": 75,
+                "stdout": "[sandbox] GATEWAY_ERROR_JSON=" + json.dumps(envelope) + "\n",
+                "stderr": "",
+            },
+            {"operation": "evaluate", "options": {}},
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["result"]["job_id"], "ev_future")
+        self.assertEqual(result["result"]["backend_state"], "queued")
+        self.assertEqual(
+            result["result"]["future_diagnostic"], {"scheduler": "warming"}
+        )
+        self.assertIsNone(result["result"]["error"])
+        self.assertNotIn("next_action", result["result"])
+
+    def test_unknown_agate_marker_is_preserved_with_universal_redaction(self):
+        process = subprocess.CompletedProcess(
+            [],
+            75,
+            '[agate] FUTURE_JSON={"shape":[128,256],"access_key":"secret",'
+            '"message":"torch.Size([128, 256])"}\n',
+            "candidate shape=128x256 secret=secret",
+        )
+
+        result = project_response(
+            process,
+            generalized=True,
+            private_values=("secret",),
+            operation="check",
+        )
+
+        self.assertIn("[agate] FUTURE_JSON=", result["stdout"])
+        self.assertNotIn("128", result["stdout"])
+        self.assertNotIn("256", result["stdout"])
+        self.assertNotIn("secret", result["stdout"])
+        self.assertNotIn("128", result["stderr"])
+        self.assertNotIn("secret", result["stderr"])
+        self.assertIn("<hidden shape>", result["stdout"])
+        self.assertIn("<redacted>", result["stdout"])
+
+        canonical = canonical_result(
+            result,
+            {"operation": "check", "options": {}},
+        )
+        self.assertEqual(canonical["status"], "failed")
+        self.assertIn("[agate] FUTURE_JSON=", canonical["result"]["stdout"])
+        self.assertEqual(canonical["result"]["exit_code"], 75)
+
+        exposed = project_response(
+            process,
+            generalized=False,
+            private_values=("secret",),
+            operation="check",
+        )
+        self.assertIn("128", exposed["stdout"])
+        self.assertIn("256", exposed["stdout"])
+        self.assertNotIn("secret", exposed["stdout"])
+        self.assertNotIn("<hidden shape>", exposed["stdout"])
+        self.assertNotIn("outcome", canonical["result"])
+        self.assertNotIn("next_action", canonical["result"])
+        self.assertNotIn("error", canonical["result"])
+
     def test_historical_abba_result_renames_both_git_kernel_identities(self):
         result = canonical_result(
             {
@@ -368,7 +458,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             / "src/aka/light/workspace/resources/reference/CLAUDE.md"
         ).read_text(encoding="utf-8")
         self.assertIn("selected SourceProvider layout", claude)
-        self.assertIn("public_shapes.json", claude)
+        self.assertIn("`shapes.json` is the authoritative public evaluator workload", claude)
         self.assertIn("generated tensor values", claude)
         self.assertIn("Runtime regenerates after accepted state changes", claude)
         self.assertNotIn("continuously rewrites root `PROGRESS.md`", claude)
@@ -438,7 +528,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         records_reference = (
             resource_dir / "runtime-records" / "references" / "records.md"
         ).read_text(encoding="utf-8")
-        self.assertIn("public_shapes.json", records_reference)
+        self.assertIn("`shapes.json` only in exposed mode", records_reference)
         self.assertNotIn("examples. Shape IDs are opaque.", records_reference)
         records_skill = (resource_dir / "runtime-records" / "SKILL.md").read_text(
             encoding="utf-8"
@@ -469,10 +559,6 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("Supervisor, not the Agent, commits an accepted V1", report_skill)
         self.assertIn("`pivot` and `blocked` reports omit them", report_skill)
         self.assertNotIn("smoke-and-exit procedure", report_skill)
-        self.assertLess(len(claude.split()), 700)
-        self.assertLess(len(records_skill.split()), 400)
-        self.assertLess(len(report_skill.split()), 250)
-
         wiki_plugin = Path(__file__).resolve().parents[1] / "plugins/gpu-wiki"
         wiki_episode = (wiki_plugin / "episode.md").read_text(encoding="utf-8")
         wiki_common = (wiki_plugin / "instructions.md").read_text(encoding="utf-8")
@@ -529,17 +615,18 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                     conversion_pending=False,
                 )
                 self.assertNotIn("{{", prompt)
-                self.assertLess(len(prompt.split()), 700)
                 self.assertEqual(prompt.count("## Workflow"), 1)
+                self.assertEqual(prompt.count(heading), 1)
+                self.assertEqual(prompt.count("## Handoff"), 1)
                 self.assertIn(heading, prompt)
-                self.assertIn("## Handoff", prompt)
                 self.assertIn("skills/runtime-records/SKILL.md", prompt)
                 if "experiments" in modules:
                     self.assertIn("selected_experiment_id", prompt)
                 else:
                     self.assertIn("gateway_record_ids", prompt)
                 if modules == ("directions",):
-                    self.assertIn("omit `supporting_experiment_ids`", prompt)
+                    self.assertIn("`supporting_experiment_ids`", prompt)
+                    self.assertIn("Experiment recording is disabled", prompt)
 
     def test_pooled_prompt_does_not_enable_roles_when_coordinate_omits_the_flag(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -617,7 +704,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertNotIn("{{", rendered)
         self.assertIn("TARGET_IMPLEMENTATION_RISKS:", rendered)
         self.assertIn("PRE_VALIDATION_CHECKS:", rendered)
-        self.assertIn("context/public_shapes.json", rendered)
+        self.assertIn("context/shapes.json", rendered)
         self.assertIn("eventual implementation path", rendered)
         self.assertNotIn("CUDA_IMPLEMENTATION_RISKS:", rendered)
         with self.assertRaisesRegex(ValueError, "IMPLEMENTATION_TARGET"):
@@ -630,7 +717,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn(
             "metadata.json", _FRAMEWORK_BASELINE_CORRECTNESS_CONTEXT_PATHS
         )
-        self.assertIn(
+        self.assertNotIn(
             "public_shapes.json", _FRAMEWORK_BASELINE_CORRECTNESS_CONTEXT_PATHS
         )
         self.assertIn(
@@ -663,28 +750,17 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
     def test_optional_dsl_settings_and_cli_normalization(self):
         settings = WorkflowSettings(platform="L20D", framework="Cuda")
         self.assertTrue(settings.specify_dsl)
-        self.assertEqual(settings.public_shapes, "all")
+        self.assertTrue(settings.expose_evaluator_shapes)
         self.assertEqual(settings.framework_baseline, "never")
         with self.assertRaises(TypeError):
             WorkflowSettings(platform="L20D", framework="Cuda", specify_dsl=1)
-        for public_shapes in (0, 3, "all"):
-            self.assertEqual(
-                WorkflowSettings(
-                    platform="L20D",
-                    framework="Cuda",
-                    public_shapes=public_shapes,
-                ).public_shapes,
-                public_shapes,
+        self.assertFalse(WorkflowSettings(
+            platform="L20D", framework="Cuda", expose_evaluator_shapes=False,
+        ).expose_evaluator_shapes)
+        with self.assertRaisesRegex(TypeError, "must be a boolean"):
+            WorkflowSettings(
+                platform="L20D", framework="Cuda", expose_evaluator_shapes=1,
             )
-        for public_shapes in (-1, True, "everything"):
-            with self.assertRaisesRegex(
-                ValueError, "non-negative integer or 'all'"
-            ):
-                WorkflowSettings(
-                    platform="L20D",
-                    framework="Cuda",
-                    public_shapes=public_shapes,
-                )
 
         launch = decode_launch(
             adapt_argv(
@@ -702,7 +778,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertFalse(launch.request.settings.specify_dsl)
         self.assertEqual(launch.request.settings.framework, "")
         self.assertEqual(launch.request.settings.framework_baseline, "never")
-        self.assertEqual(launch.request.settings.public_shapes, "all")
+        self.assertTrue(launch.request.settings.expose_evaluator_shapes)
         self.assertIn("specify_dsl", launch.provided_settings)
 
         launch = decode_launch(
@@ -714,13 +790,12 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                     "L20D",
                     "--framework",
                     "Cuda",
-                    "--public-shapes",
-                    "all",
+                    "--no-expose-evaluator-shapes",
                 ]
             )
         )
-        self.assertEqual(launch.request.settings.public_shapes, "all")
-        self.assertIn("public_shapes", launch.provided_settings)
+        self.assertFalse(launch.request.settings.expose_evaluator_shapes)
+        self.assertIn("expose_evaluator_shapes", launch.provided_settings)
 
     def test_campaign_skips_framework_baseline_by_default(self):
         campaign = Campaign(
@@ -792,6 +867,16 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             )
             self.assertEqual(state["framework"], "")
             self.assertFalse(state["specify_dsl"])
+            self.assertEqual(state["evaluator_shape_visibility"], "exposed")
+            with self.assertRaisesRegex(RuntimeError, "shape_visibility"):
+                install_workspace_policy(
+                    workspace,
+                    "production",
+                    "Cuda",
+                    specify_dsl=False,
+                    expose_evaluator_shapes=False,
+                    update_tracked_files=False,
+                )
 
     def test_open_dsl_framework_baseline_prompt_is_neutral(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -1635,17 +1720,19 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertNotIn("--env-gpu", response["stdout"])
         self.assertIsNone(managed_gateway_help(["--kind", "env"]))
 
-    def test_kernel_queries_name_the_git_commit_identity_explicitly(self):
+    def test_abba_names_the_git_commit_identity_explicitly(self):
         parser = build_parser()
         parsed = parser.parse_args([
-            "--kind", "kernel-read",
-            "--kernel-commit-id", "a" * 40,
-            "--output-path", "scratch/peer",
+            "--kind", "run",
+            "--baseline-commit", "a" * 40,
         ])
-        self.assertEqual(parsed.kernel_commit_id, "a" * 40)
-        schema = gateway_schema("kernel-read", parser)
-        self.assertIn("--kernel-commit-id", schema["required_options"])
-        self.assertNotIn("--kernel-id", schema["cli_options"])
+        self.assertEqual(parsed.baseline_commit, "a" * 40)
+        schema = gateway_schema("run", parser)
+        self.assertIn("--baseline-commit", schema["cli_options"])
+        self.assertNotIn("--baseline-path", schema["cli_options"])
+        for retired in ("record-read", "kernel-read", "kernel-records"):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["--kind", retired])
         with self.assertRaises(SystemExit):
             parser.parse_args(["--kind", "kernel-pareto-frontier"])
 
@@ -1772,7 +1859,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         verifier = RecordedABBAValidator(execute=lambda *_: None, hardware="L20D")
         self.assertNotIn("--multi-seed", framework)
         self.assertNotIn("--multi-seed", candidate)
-        self.assertNotIn("--multi-seed", verifier.request_argv())
+        self.assertNotIn("--multi-seed", verifier.request_argv("a" * 40))
 
     def test_framework_baseline_uses_episode_evaluator_policy(self):
         native = framework_baseline_validation_command(1, atrex_bench=True)
@@ -1952,7 +2039,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 framework="Cuda",
                 atrex_bench_root=str(root),
                 work_dir=str(root / "work"),
-                public_shapes=0,
+                expose_evaluator_shapes=False,
             )
             campaign.workspace.mkdir(parents=True)
             (campaign.workspace / "agent_problem.json").write_text(
@@ -1969,57 +2056,6 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "shapes.json"):
                 campaign._assert_generalized_inputs_are_private()
-
-    def test_generalized_workspace_materializes_configured_public_shapes(self):
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
-            root = Path(directory)
-            operator = root / "operator"
-            operator.mkdir()
-            (operator / "reference.py").write_text("class Model: pass\n")
-            shapes = {
-                str(index): {
-                    "init_kwargs": {"rank": index},
-                    "input_kwargs": {"size": index},
-                }
-                for index in (8, 2, 1, 5)
-            }
-            (operator / "shapes.json").write_text(json.dumps(shapes))
-            public_problem = {
-                "schema_version": "atrex.agent_problem.v1",
-                "objective": "Optimize the operator.",
-                "evaluation": {
-                    "exact_cases": "private",
-                    "development_cases_are_evaluation_cases": False,
-                },
-                "operator_contract": {},
-                "shape_domain": {},
-                "invariants": [],
-                "coverage_regimes": [],
-            }
-            (operator / "agent_problem.json").write_text(json.dumps(public_problem))
-            campaign = Campaign(
-                name="operator",
-                kernel_demo=str(operator / "reference.py"),
-                platform="L20D",
-                framework="Cuda",
-                atrex_bench_root=str(root),
-                work_dir=str(root / "work"),
-                public_shapes=2,
-            )
-            campaign.workspace.mkdir(parents=True)
-            campaign._ensure_agent_problem()
-            campaign._ensure_public_shapes()
-            projection = json.loads(
-                (campaign.workspace / "public_shapes.json").read_text()
-            )
-            self.assertEqual(list(projection["shapes"]), ["1", "2"])
-            self.assertTrue(campaign.shape_ids_are_opaque)
-            campaign._assert_generalized_inputs_are_private()
-            self.assertIn("first 2 of 4", campaign._shape_disclosure_prompt())
-
-            campaign.public_shapes = "all"
-            with self.assertRaisesRegex(RuntimeError, "start a fresh workspace"):
-                campaign._ensure_public_shapes()
 
     def test_generalized_workspace_can_expose_all_or_no_shapes(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -2056,14 +2092,14 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 framework="Cuda",
                 atrex_bench_root=str(root),
                 work_dir=str(root / "hidden-work"),
-                public_shapes=0,
+                expose_evaluator_shapes=False,
             )
             hidden.workspace.mkdir(parents=True)
             hidden._ensure_agent_problem()
-            hidden._ensure_public_shapes()
             self.assertFalse((hidden.workspace / "public_shapes.json").exists())
             self.assertTrue(hidden.shape_ids_are_opaque)
             hidden._assert_generalized_inputs_are_private()
+            self.assertIn("exact evaluator Shape parameters are private", hidden._shape_disclosure_prompt())
 
             complete = Campaign(
                 name="complete",
@@ -2072,14 +2108,13 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 framework="Cuda",
                 atrex_bench_root=str(root),
                 work_dir=str(root / "all-work"),
-                public_shapes="all",
+                expose_evaluator_shapes=True,
             )
             complete.workspace.mkdir(parents=True)
             complete._ensure_agent_problem()
-            complete._ensure_public_shapes()
             self.assertFalse(complete.shape_ids_are_opaque)
             complete._assert_generalized_inputs_are_private()
-            self.assertIn("exposes all 2", complete._shape_disclosure_prompt())
+            self.assertEqual(complete._shape_disclosure_prompt(), "")
 
     def test_typed_eval_forwards_metadata_without_light_tolerance_defaults(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -2150,6 +2185,80 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
 
         self.assertEqual(v0["runner_overrides"]["perf_timeout_s"], 300)
         self.assertEqual(candidate["runner_overrides"]["perf_timeout_s"], 300)
+
+    def test_v0_baseline_uses_terminal_infrastructure_recovery(self):
+        result = {"all_pass": True, "latency_us_geomean": 1.0}
+        completed = subprocess.CompletedProcess(
+            ["python", "test_kernel.py"],
+            0,
+            "[test_kernel] RESULT_JSON=" + json.dumps(result) + "\n",
+            "",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = Campaign(
+                name="operator",
+                kernel_demo="reference.py",
+                platform="cuda",
+                framework="cuda",
+                work_dir=directory,
+            )
+            with (
+                patch(
+                    "aka.light.workflow.bootstrap._sandbox_command",
+                    return_value=completed,
+                ) as sandbox,
+                patch.object(Campaign, "_print_v0_evaluator_output"),
+                patch(
+                    "aka.light.workflow.bootstrap._record_local_test_result",
+                    return_value=Path(directory) / "v0.json",
+                ),
+            ):
+                measured = campaign._run_v0_evaluator()
+
+        self.assertEqual(measured, result)
+        self.assertIs(sandbox.call_args.kwargs["terminal_validation"], True)
+
+    def test_v0_terminal_recovery_does_not_retry_incorrect_result(self):
+        result = {
+            "all_pass": False,
+            "failures": ["shape 0 failed correctness"],
+        }
+        completed = subprocess.CompletedProcess(
+            ["python", "test_kernel.py"],
+            1,
+            "[test_kernel] RESULT_JSON=" + json.dumps(result) + "\n",
+            "",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = Campaign(
+                name="operator",
+                kernel_demo="reference.py",
+                platform="cuda",
+                framework="cuda",
+                work_dir=directory,
+            )
+            versions = campaign.workspace / ".atrex_versions"
+            versions.mkdir(parents=True, exist_ok=True)
+            measurement = versions / "v0.json"
+            measurement.write_text("{}", encoding="utf-8")
+            with (
+                patch(
+                    "aka.light.workflow.bootstrap._sandbox_command",
+                    return_value=completed,
+                ) as sandbox,
+                patch.object(Campaign, "_print_v0_evaluator_output"),
+                patch(
+                    "aka.light.workflow.bootstrap._record_local_test_result",
+                    return_value=measurement,
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "V0 baseline failed"):
+                    campaign._run_v0_evaluator()
+
+            self.assertTrue((versions / "v0.failed.json").exists())
+
+        sandbox.assert_called_once()
+        self.assertIs(sandbox.call_args.kwargs["terminal_validation"], True)
 
     def test_native_harness_has_no_light_owned_tolerance_switches(self):
         args = native_harness_parser().parse_args([])

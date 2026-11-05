@@ -11,7 +11,6 @@ import pytest
 
 from aka.contracts.agent import AgentRuntimeCapabilities, NativeInvocation, TokenUsage
 from aka.contracts.workspace import CandidateHandle
-from aka.legacy.task.problem.layout import public_shapes_payload, validate_public_shapes
 from aka.light.agent.home import SESSION_HOME_ROOT_ENV, prepare_agent_environment
 from aka.light.agent.runtime.model import AgentRunRequest as RuntimeAgentRunRequest
 from aka.light.agent.runtime.runtime import build_agent_runtime
@@ -34,12 +33,17 @@ from aka.light.workflow.journal_service import (
     research_projection,
     shared_research_path,
     update_direction,
+    validate_report_evidence,
 )
 from aka.light.workflow.models import EpisodeHandoff, SupervisorState
 from aka.light.workflow.bootstrap import Campaign
 from aka.light.workflow.episode import LongHorizonCampaign
 from aka.light.workflow.search import PooledSearch, SearchOptions, read_state
-from aka.light.workflow.search_driver import EpisodeSearchDriver
+from aka.light.workflow.search_driver import (
+    EpisodeSearchDriver,
+    _aggregate_direction_queue,
+    _shareable_claim,
+)
 from aka.light.workflow.session import LongSessionRunner
 from aka.light.workspace.agent_git import AgentGit, DirtyKernelWorktree
 from aka.light.workspace.episode import EpisodeWorkspace
@@ -50,8 +54,14 @@ from aka.light.workspace.shared_history import export_epoch, import_exports
 from aka.light.workspace.sources import default_tree, install, pack, snapshot
 
 
-def _measurement(store: MeasurementStore, source: bytes, marker: str) -> tuple[str, str]:
-    kernel_id = hashlib.sha1((marker + "\0").encode() + source).hexdigest()
+def _measurement(
+    store: MeasurementStore,
+    source: bytes,
+    marker: str,
+    *,
+    kernel_id: str | None = None,
+) -> tuple[str, str]:
+    kernel_id = kernel_id or hashlib.sha1((marker + "\0").encode() + source).hexdigest()
     identity = store.kernel(source, kernel_id)
     request = {
         "operation": "evaluate",
@@ -71,8 +81,12 @@ def _passing_full_measurement(
     source: bytes,
     marker: str,
     latencies: dict[str, float],
+    *,
+    kernel_commit_id: str | None = None,
 ) -> tuple[str, str]:
-    kernel_commit_id = hashlib.sha1((marker + "\0").encode() + source).hexdigest()
+    kernel_commit_id = kernel_commit_id or hashlib.sha1(
+        (marker + "\0").encode() + source
+    ).hexdigest()
     identity = store.kernel(source, kernel_commit_id)
     request = {
         "operation": "evaluate",
@@ -99,6 +113,61 @@ def _passing_full_measurement(
     with store.reserve(request, {"candidate": identity}) as task:
         record = task.finish(response, cacheable=True)
     return record["gateway_record_id"], identity["kernel_id"]
+
+
+def test_unresolved_direction_closure_may_omit_supporting_experiments(tmp_path):
+    journals = tmp_path / "journals"
+    journal = journals / "episodes" / "e00000001" / "journal.json"
+    initialize_journal(
+        journal,
+        episode=1,
+        base_commit="a" * 40,
+        branch="work",
+        tool_modules=("directions", "experiments"),
+    )
+    direction_id = update_direction(
+        journal,
+        journals,
+        {
+            "action": "propose",
+            "name": "Capability probe",
+            "change_scope": "major_redesign",
+            "hypothesis": "The target instruction family may be available.",
+            "applicability": "The configured target architecture.",
+            "expected_benefit": "Unlock a higher-throughput implementation path.",
+            "plan": ["Compile one bounded capability probe."],
+        },
+    )["direction_id"]
+    update_direction(
+        journal,
+        journals,
+        {
+            "action": "start",
+            "direction_id": direction_id,
+            "analysis": "Run the bounded probe.",
+        },
+    )
+    update_direction(
+        journal,
+        journals,
+        {
+            "action": "block",
+            "direction_id": direction_id,
+            "analysis": "The external compiler service is unavailable.",
+            "hypothesis_status": "unresolved",
+            "reopen_condition": "Resume after the compiler service recovers.",
+        },
+    )
+    closure = load_journal(journal)["direction_events"][-1]
+    assert closure["supporting_experiment_ids"] == []
+    schema = journal_schema(
+        "direction_update",
+        {"action": "block"},
+        directions_enabled=True,
+        experiments_enabled=True,
+    )
+    assert "supporting_experiment_ids" in schema["properties"]
+    assert "supporting_experiment_ids" not in schema["required"]
 
 
 def test_research_records_are_projected_as_normal_workspace_files(tmp_path):
@@ -147,10 +216,6 @@ def test_research_records_are_projected_as_normal_workspace_files(tmp_path):
     assert started["archive_path"] == (
         f"directions/in_progress/{direction_id}.json"
     )
-    service.execute({
-        "operation": "direction_progress",
-        "request": {"direction_id": direction_id, "plan_step": 0},
-    })
     (workspace / "scratch" / "probe.md").parent.mkdir(parents=True)
     (workspace / "scratch" / "probe.md").write_text("probe evidence\n", encoding="utf-8")
     (workspace / "scratch" / "analysis" / "empty").mkdir(parents=True)
@@ -159,12 +224,22 @@ def test_research_records_are_projected_as_normal_workspace_files(tmp_path):
     )
 
     store = MeasurementStore(tmp_path / "scope" / "measurements")
-    record_id, kernel_id = _measurement(store, b"def kernel():\n    return 1\n", "probe")
+    first_source = b"def kernel():\n    return 1\n"
+    (workspace / "kernel.py").write_bytes(first_source)
+    agent_git = AgentGit(workspace, tmp_path / "agent.bundle")
+    agent_git.prepare()
+    record_id, kernel_id = _measurement(
+        store, first_source, "probe", kernel_id=agent_git.head()
+    )
+    second_source = b"def kernel():\n    return 2\n"
+    (workspace / "kernel.py").write_bytes(second_source)
+    second_commit = agent_git.checkpoint("second measured Kernel")
     pareto_record_id, pareto_kernel_commit_id = _passing_full_measurement(
         store,
-        b"def kernel():\n    return 2\n",
+        second_source,
         "full",
         {"shape_a": 12.5, "shape_b": 8.25},
+        kernel_commit_id=second_commit,
     )
     recorded = service.execute({
         "operation": "experiment_record",
@@ -198,20 +273,25 @@ def test_research_records_are_projected_as_normal_workspace_files(tmp_path):
     )
     assert direction["status"] == "in_progress"
     assert direction["proposed_by"] == "T1"
+    assert direction["access"] == "local_writable"
     assert direction["applicability"] == (
         "Long-context attention shapes on the target GPU."
     )
     assert direction["expected_benefit"] == (
         "Reduce full-workload geometric-mean latency."
     )
-    assert direction["completed_plan_steps"] == [0]
-    assert direction["next_step"] == "Evaluate the complete workload"
-    assert direction["queue_rank"] == 1
+    assert "completed_plan_steps" not in direction
+    assert "next_step" not in direction
+    assert direction["local_rank"] == 1
+    assert "associated_experiment_ids" not in direction
     assert experiment["direction_id"] == direction_id
+    assert experiment["recorded_by"] == "T1"
+    assert experiment["access"] == "local_writable"
     assert set(experiment) == {
         "experiment_id", "name", "intent", "gateway_record_ids", "interpretation",
-        "direction_id", "references", "revision",
+        "direction_id", "references", "revision", "recorded_by", "access",
     }
+    assert not (workspace / "experiments" / "index.json").exists()
     archived_probe = (
         workspace / "experiments" / experiment_id / "references" / "scratch" / "probe.md"
     )
@@ -259,9 +339,14 @@ def test_research_records_are_projected_as_normal_workspace_files(tmp_path):
     assert '"revision"' not in progress
     assert '"recent_experiments"' not in progress
     assert "# Current state" in progress
+    assert "## Handoff readiness" not in progress
     assert "## Lineages" in progress
     assert "## Directions" in progress
-    assert "### In Progress" in progress
+    assert "### Local work queue" in progress
+    assert "local rank #1" in progress
+    assert "### Shared direction pool\n\n_None._" in progress
+    assert "### Terminal directions" in progress
+    assert "### Closed" not in progress
     assert direction_id in progress
 
     assert "**Best verified Kernel commit ID:**" in progress
@@ -458,11 +543,6 @@ def test_open_local_direction_can_be_revised_with_stable_identity(tmp_path):
             "analysis": "Highest expected benefit.",
         },
     })
-    service.execute({
-        "operation": "direction_progress",
-        "request": {"direction_id": direction_id, "plan_step": 0},
-    })
-
     revised = service.execute({
         "operation": "direction_update",
         "request": {
@@ -495,9 +575,9 @@ def test_open_local_direction_can_be_revised_with_stable_identity(tmp_path):
     assert projected["revision"] == 2
     assert projected["hypothesis"].endswith("K crossover.")
     assert projected["status"] == "in_progress"
-    assert projected["completed_plan_steps"] == [1]
-    assert projected["next_step"] == "Measure the crossover"
-    assert len(list((evidence / "claim-audit").glob("*/submission.json"))) == 4
+    assert "completed_plan_steps" not in projected
+    assert "next_step" not in projected
+    assert len(list((evidence / "claim-audit").glob("*/submission.json"))) == 3
 
     service.execute({
         "operation": "direction_update",
@@ -633,10 +713,9 @@ def test_claim_revisions_resume_the_prior_review_session(tmp_path):
 
     assert review_calls[0] == ("propose", None, "review-session-1")
     assert review_calls[1] == ("revise", "review-session-1", "review-session-1")
-    assert review_calls[2][0:2] == ("start", None)
-    assert review_calls[3][0:2] == ("experiment", None)
-    assert review_calls[4] == (
-        "experiment", review_calls[3][2], review_calls[3][2]
+    assert review_calls[2][0:2] == ("experiment", None)
+    assert review_calls[3] == (
+        "experiment", review_calls[2][2], review_calls[2][2]
     )
 
 
@@ -762,8 +841,9 @@ def test_research_mutation_receipts_include_archive_and_inline_qwen_review(tmp_p
     })
     direction_id = proposed["direction_id"]
     assert proposed["archive_path"] == f"directions/proposed/{direction_id}.json"
-    assert proposed["review"]["accepted"] is True
-    assert proposed["review"]["verdict"] == "supported"
+    assert proposed["review"]["archive_status"] == "archived"
+    assert proposed["review"]["evidence_eligible"] is True
+    assert proposed["review"]["claim_review_quality"] == "supported"
     assert "review_path" not in proposed
     assert "evidence_manifest" not in proposed["review"]
     assert "_review_session_audit" not in proposed["review"]
@@ -796,29 +876,33 @@ def test_research_mutation_receipts_include_archive_and_inline_qwen_review(tmp_p
     assert "_review_session_audit" not in recorded["review"]
     assert "session_audit" not in recorded["review"]
     assert not (workspace / "experiments" / experiment_id / "review.json").exists()
-    assert len(reviewed_targets) == 3
+    assert len(reviewed_targets) == 2
     audit_outcomes = [
         json.loads(path.read_text())
         for path in (evidence / "claim-audit").glob("*/outcome.json")
     ]
     assert len(audit_outcomes) == 3
     assert {item["status"] for item in audit_outcomes} == {"archived"}
-    assert all(item["result"]["review"]["verdict"] == "supported"
-               for item in audit_outcomes)
+    reviewed_outcomes = [
+        item for item in audit_outcomes if "review" in item.get("result", {})
+    ]
+    assert len(reviewed_outcomes) == 2
+    assert all(item["result"]["review"]["claim_review_quality"] == "supported"
+               for item in reviewed_outcomes)
     private_reviews = [
         json.loads(path.read_text())
         for path in (evidence / "claim-reviews").glob("review_*.json")
     ]
-    assert len(private_reviews) == 3
+    assert len(private_reviews) == 2
     assert {
         row["session_audit"]["attempts"][0]["session_id"]
         for row in private_reviews
-    } == {"review-session-1", "review-session-2", "review-session-3"}
+    } == {"review-session-1", "review-session-2"}
     audit_links = [
         json.loads(path.read_text())
         for path in (evidence / "claim-audit").glob("*/review.json")
     ]
-    assert len(audit_links) == 3
+    assert len(audit_links) == 2
     assert all(
         row["review_archive_path"].startswith("claim-reviews/review_")
         and row["session_audit"]["attempts"][0]["conversation_path"].endswith(
@@ -993,9 +1077,9 @@ def test_unsupported_research_claims_are_not_archived(tmp_path):
         })
     response = direction_rejected.value.response
     assert response["error"]["code"] == "research_claim_unsupported"
-    assert response["error"]["review"]["verdict"] == "unsupported"
+    assert response["error"]["review"]["claim_review_quality"] == "unsupported"
     assert "evidence_manifest" not in response["error"]["review"]
-    assert "will not be archived" in response["error"]["review"]["next_action"]
+    assert "will not be archived" in response["error"]["review"]["runtime_action"]
     assert load_journal(evidence / "journal.json")["direction_events"] == []
     assert not (workspace / "directions").exists()
 
@@ -1031,7 +1115,7 @@ def test_unsupported_research_claims_are_not_archived(tmp_path):
         })
     response = experiment_rejected.value.response
     assert response["error"]["code"] == "research_claim_unsupported"
-    assert response["error"]["review"]["verdict"] == "unsupported"
+    assert response["error"]["review"]["claim_review_quality"] == "unsupported"
     assert load_journal(experiment_evidence / "journal.json")["experiments"] == []
     assert not (workspace / "experiments").exists()
     assert not (evidence / "claim-reviews").exists()
@@ -1044,7 +1128,7 @@ def test_unsupported_research_claims_are_not_archived(tmp_path):
     for path in (*direction_audit, *experiment_audit):
         outcome = json.loads(path.read_text())
         assert outcome["status"] == "unsupported"
-        assert outcome["error"]["error"]["review"]["verdict"] == "unsupported"
+        assert outcome["error"]["error"]["review"]["claim_review_quality"] == "unsupported"
         assert outcome["private_review"]["evidence_manifest"]["claim_type"] in {
             "direction", "experiment"
         }
@@ -1064,6 +1148,110 @@ def test_unsupported_research_claims_are_not_archived(tmp_path):
         experiment_audit_root / "references" / "files"
         / "scratch" / "unsupported-probe.py"
     ).read_text() == "print('audit me')\n"
+
+
+def test_partial_experiment_is_projected_but_cannot_support_terminal_verdict(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    journals = tmp_path / "scope" / "journals"
+    evidence = journals / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    initialize_journal(
+        evidence / "journal.json",
+        episode=1,
+        base_commit="a" * 40,
+        branch="work",
+    )
+
+    def reviewer(root):
+        target = json.loads((root / "submissions" / "target.json").read_text())
+        partial = "experiment_id" in target
+        verdict = "partially_supported" if partial else "supported"
+        return {
+            "verdict": verdict,
+            "primary_issue": (
+                "The mechanism is not isolated." if partial else "The proposal is bounded."
+            ),
+            "findings": [{
+                "claim": "The submitted research statement.",
+                "judgment": verdict,
+                "decision_critical": True,
+                "reason": "The measurement supports only a narrower interpretation.",
+                "evidence": ["submissions/target.json"],
+            }],
+            "scope_safe_interpretation": "Treat the result as a bounded observation only.",
+            "next_check": "Run one mechanism-isolating comparison.",
+            "confidence": "high",
+        }
+
+    service = SupervisorJournalService(
+        workspace=workspace,
+        campaign_root=journals,
+        evidence_root=evidence,
+        research_root=tmp_path / "research",
+        claim_reviewer=reviewer,
+    )
+    direction_id = service.execute({
+        "operation": "direction_update",
+        "request": {
+            "action": "propose",
+            "name": "Split KV",
+            "change_scope": "major_redesign",
+            "hypothesis": "Split KV may reduce long-context latency.",
+            "applicability": "Long-context shapes.",
+            "expected_benefit": "Reduce latency.",
+            "plan": ["Measure one bounded candidate."],
+        },
+    })["direction_id"]
+    service.execute({
+        "operation": "direction_update",
+        "request": {
+            "action": "start",
+            "direction_id": direction_id,
+            "analysis": "Run the bounded candidate.",
+        },
+    })
+    record_id, _ = _passing_full_measurement(
+        MeasurementStore(tmp_path / "scope" / "measurements"),
+        b"def kernel():\n    return 1\n",
+        "partial-review",
+        {"shape_a": 1.0},
+    )
+    recorded = service.execute({
+        "operation": "experiment_record",
+        "request": {
+            "name": "Split KV observation",
+            "intent": "Measure whether the candidate runs.",
+            "gateway_record_ids": [record_id],
+            "interpretation": "The candidate ran, but the mechanism remains unisolated.",
+        },
+    })
+    experiment_id = recorded["experiment_id"]
+    projected = json.loads(
+        (workspace / "experiments" / experiment_id / "experiment.json").read_text()
+    )
+    assert projected["claim_review_quality"] == "partially_supported"
+    assert projected["scope_safe_interpretation"] == (
+        "Treat the result as a bounded observation only."
+    )
+    assert projected["scientific_next_check"] == "Run one mechanism-isolating comparison."
+    assert "review_safe_interpretation" not in projected
+    assert "review_scientific_next_check" not in projected
+
+    with pytest.raises(AgentRequestError) as rejected:
+        service.execute({
+            "operation": "direction_update",
+            "request": {
+                "action": "complete",
+                "direction_id": direction_id,
+                "analysis": "Treat the observation as proof.",
+                "hypothesis_status": "supported",
+                "supporting_experiment_ids": [experiment_id],
+            },
+        })
+    assert rejected.value.response["error"]["code"] == (
+        "direction_support_review_incomplete"
+    )
 
 
 def test_missing_experiment_reference_is_repairable_and_records_nothing(tmp_path):
@@ -1181,8 +1369,9 @@ def test_direction_projection_moves_between_status_directories(tmp_path):
     assert json.loads(active.read_text())["status"] == "in_progress"
 
     progress = (workspace / "PROGRESS.md").read_text()
-    assert "### Proposed\n\n_None._" in progress
-    assert "### In Progress" in progress
+    assert "### Local work queue" in progress
+    assert "status `in_progress`" in progress
+    assert "### Shared direction pool\n\n_None._" in progress
     assert direction_id in progress
 
     service.execute({
@@ -1280,7 +1469,7 @@ def test_episode_handoff_requires_terminal_direction_or_enabled_peer_share(tmp_p
             "action": "complete",
             "direction_id": direction_id,
             "analysis": "The planned probes and candidate family are exhausted.",
-            "hypothesis_status": "unresolved",
+            "hypothesis_status": "supported",
         },
     })
     accepted = standalone.execute({
@@ -1355,7 +1544,7 @@ def test_episode_handoff_requires_terminal_direction_or_enabled_peer_share(tmp_p
             "action": "complete",
             "direction_id": completed_direction,
             "analysis": "The planned Direction work is complete.",
-            "hypothesis_status": "unresolved",
+            "hypothesis_status": "supported",
         },
     })
     completed_blocker = completed.execute({
@@ -1369,6 +1558,63 @@ def test_episode_handoff_requires_terminal_direction_or_enabled_peer_share(tmp_p
     })
     assert completed_blocker["status"] == "accepted"
     assert load_journal(completed_journal)["outcome"]["handoff_reason"] == "blocked"
+
+
+def test_candidate_handoff_accepts_selected_direction_closed_before_another(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    journals = tmp_path / "scope" / "journals"
+    evidence = journals / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    journal = evidence / "journal.json"
+    initialize_journal(
+        journal,
+        episode=1,
+        base_commit="a" * 40,
+        branch="work",
+    )
+    first = "direction_" + "1" * 32
+    second = "direction_" + "2" * 32
+    experiment_id = "experiment_" + "3" * 32
+    current = load_journal(journal)
+    current["direction_events"] = [
+        {"direction_id": first, "action": "complete"},
+        {"direction_id": second, "action": "complete"},
+    ]
+    current["experiments"] = [{
+        "experiment_id": experiment_id,
+        "direction_id": first,
+        "gateway_record_ids": [],
+        "name": "candidate evidence",
+        "intent": "Nominate the measured candidate.",
+        "interpretation": "The exact candidate passed.",
+    }]
+    directions = {
+        first: {"direction_id": first, "name": "first", "status": "completed"},
+        second: {"direction_id": second, "name": "second", "status": "completed"},
+    }
+    monkeypatch.setattr(
+        "aka.light.workflow.journal_service.validate_report_evidence",
+        lambda *args, **kwargs: (current, directions, None),
+    )
+    service = SupervisorJournalService(
+        workspace=workspace,
+        campaign_root=journals,
+        evidence_root=evidence,
+        supervisor_git=True,
+    )
+
+    result = service._submit_report(
+        {
+            "status": "candidate_ready",
+            "handoff_reason": "direction_terminal",
+            "summary": "Both local Directions are terminal.",
+            "selected_experiment_id": experiment_id,
+        },
+        agent_kernel_id="b" * 40,
+    )
+
+    assert result["status"] == "accepted"
 
 
 def test_episode_report_schema_and_prompt_require_explicit_handoff_reason():
@@ -1397,7 +1643,7 @@ def test_episode_report_schema_and_prompt_require_explicit_handoff_reason():
     [
         (
             "candidate_ready",
-            "Select a current-Episode Experiment that cites a passing standard full Evaluate",
+            "Select a fully supported visible Experiment that cites a passing standard full Evaluate",
         ),
         (
             "pivot",
@@ -1442,6 +1688,8 @@ def test_episode_report_recovery_guidance_matches_status_schema(status, expected
     guidance = projected["error"]["next_action"]
     assert expected in guidance
     assert "Only candidate_ready may use cross_trajectory_share" in guidance
+    assert "selected Experiment must belong to a Direction completed or abandoned" in guidance
+    assert "For cross_trajectory_share, it must belong to an in-progress Direction" in guidance
 
 
 def test_direction_proposal_schema_requires_applicability_and_expected_benefit():
@@ -1501,12 +1749,62 @@ def test_episode_may_sequentially_start_more_than_three_directions(tmp_path):
                 "action": "complete",
                 "direction_id": direction_id,
                 "analysis": "The bounded probe resolved this choice.",
-                "hypothesis_status": "unresolved",
+                "hypothesis_status": "supported",
             },
         )
 
     events = load_journal(journal)["direction_events"]
     assert sum(event["action"] == "start" for event in events) == 6
+
+
+def test_paused_direction_can_restart_but_terminal_direction_cannot(tmp_path):
+    campaign = tmp_path / "scope" / "journals"
+    evidence = campaign / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    journal = evidence / "journal.json"
+    initialize_journal(
+        journal,
+        episode=1,
+        base_commit="a" * 40,
+        branch="work",
+        tool_modules=("directions",),
+    )
+    direction_id = update_direction(
+        journal,
+        campaign,
+        {
+            "action": "propose",
+            "name": "Capability probe",
+            "change_scope": "major_redesign",
+            "hypothesis": "The capability may unlock a faster Kernel.",
+            "applicability": "The target GPU.",
+            "expected_benefit": "Enable the structural redesign.",
+            "plan": ["Compile the bounded probe."],
+        },
+    )["direction_id"]
+    update_direction(journal, campaign, {
+        "action": "start", "direction_id": direction_id, "analysis": "Run the probe."
+    })
+    update_direction(journal, campaign, {
+        "action": "defer",
+        "direction_id": direction_id,
+        "analysis": "The required compiler is temporarily unavailable.",
+        "hypothesis_status": "unresolved",
+        "reopen_condition": "The compiler becomes available.",
+    })
+    assert update_direction(journal, campaign, {
+        "action": "start", "direction_id": direction_id, "analysis": "Compiler restored."
+    })["status"] == "recorded"
+    update_direction(journal, campaign, {
+        "action": "abandon",
+        "direction_id": direction_id,
+        "analysis": "The path is no longer relevant.",
+        "hypothesis_status": "unresolved",
+    })
+    with pytest.raises(ValueError, match="cannot start from status abandoned"):
+        update_direction(journal, campaign, {
+            "action": "start", "direction_id": direction_id, "analysis": "Try again."
+        })
 
 
 def test_second_local_direction_start_returns_precise_recovery(tmp_path):
@@ -1657,10 +1955,15 @@ def test_progress_is_projected_even_when_research_modules_are_disabled(tmp_path)
         evidence_root=evidence,
         research_root=tmp_path / "research",
     )
+    source = b"def kernel():\n    return 1\n"
+    (workspace / "kernel.py").write_bytes(source)
+    agent_git = AgentGit(workspace, tmp_path / "agent.bundle")
+    agent_git.prepare()
     record_id, _ = _measurement(
         MeasurementStore(tmp_path / "scope" / "measurements"),
-        b"def kernel():\n    return 1\n",
+        source,
         "unrecorded-mode",
+        kernel_id=agent_git.head(),
     )
 
     service.publish_research_files()
@@ -1698,7 +2001,19 @@ def test_measurements_checkpoint_working_and_best_lineage_commits(tmp_path):
         research_root=tmp_path / "research",
         origin={"trajectory": 1, "episode": 1},
     )
-    first, slower, diagnostic = "1" * 40, "2" * 40, "3" * 40
+    agent_git = AgentGit(workspace, tmp_path / "agent.bundle")
+    (workspace / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
+    agent_git.prepare()
+    first = agent_git.head()
+    (workspace / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
+    slower = agent_git.checkpoint("slower measured Kernel")
+    (workspace / "kernel.py").write_text("VALUE = 3\n", encoding="utf-8")
+    diagnostic = agent_git.checkpoint("diagnostic Kernel")
+    (workspace / "kernel.py").write_text("VALUE = 4\n", encoding="utf-8")
+    comparison_candidate = agent_git.checkpoint("ABBA candidate")
+    assert all(isinstance(value, str) for value in (
+        first, slower, diagnostic, comparison_candidate
+    ))
     service.observe_measurement({
         "operation": "evaluate",
         "status": "completed",
@@ -1731,7 +2046,7 @@ def test_measurements_checkpoint_working_and_best_lineage_commits(tmp_path):
     service.observe_measurement({
         "operation": "evaluate",
         "status": "completed",
-        "candidate_kernel_commit_id": "4" * 40,
+        "candidate_kernel_commit_id": comparison_candidate,
         "baseline_kernel_commit_id": first,
         "result": {"correct": True, "mode": "full", "input_scope": "contract"},
     })
@@ -1745,6 +2060,45 @@ def test_measurements_checkpoint_working_and_best_lineage_commits(tmp_path):
     progress = (workspace / "PROGRESS.md").read_text()
     assert f"**Last measured working Kernel commit ID:** `{diagnostic}`" in progress
     assert f"**Best verified lineage Kernel commit ID:** `{first}`" in progress
+
+
+def test_private_historical_kernel_snapshot_is_not_projected_without_git_commit(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = b"def kernel():\n    return 1\n"
+    (workspace / "kernel.py").write_bytes(source)
+    AgentGit(workspace, tmp_path / "agent.bundle").prepare()
+    journals = tmp_path / "scope" / "journals"
+    evidence = journals / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    initialize_journal(
+        evidence / "journal.json",
+        episode=1,
+        base_commit="a" * 40,
+        branch="work",
+        tool_modules=(),
+    )
+    service = SupervisorJournalService(
+        workspace=workspace,
+        campaign_root=journals,
+        evidence_root=evidence,
+        research_root=tmp_path / "research",
+    )
+    store = MeasurementStore(tmp_path / "scope" / "measurements")
+    record_id, private_kernel_id = _measurement(
+        store,
+        source,
+        "legacy-private-snapshot",
+        kernel_id="f" * 40,
+    )
+
+    service.publish_research_files(synchronize=False)
+
+    assert store.read(record_id)["kernels"]["candidate"]["kernel_id"] == private_kernel_id
+    assert not (workspace / "records" / f"{record_id}.json").exists()
+    progress = (workspace / "PROGRESS.md").read_text(encoding="utf-8")
+    assert private_kernel_id not in progress
+    assert record_id not in progress
 
 
 def test_progress_projection_mentions_only_enabled_experiment_module(tmp_path):
@@ -1771,9 +2125,38 @@ def test_progress_projection_mentions_only_enabled_experiment_module(tmp_path):
 
     progress = (workspace / "PROGRESS.md").read_text()
     assert "experiments/<experiment_id>/experiment.json" in progress
+    assert "experiments/index.json" in progress
+    assert (workspace / "experiments" / "index.json").is_file()
     assert "## Directions" not in progress
     assert "directions/<status>" not in progress
     assert "**Hypothesis:**" not in progress
+
+
+def test_combined_research_mode_removes_stale_experiment_only_index(tmp_path):
+    workspace = tmp_path / "workspace"
+    (workspace / "experiments").mkdir(parents=True)
+    stale_index = workspace / "experiments" / "index.json"
+    stale_index.write_text('[{"experiment_id":"stale"}]\n')
+    journals = tmp_path / "scope" / "journals"
+    evidence = journals / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    initialize_journal(
+        evidence / "journal.json",
+        episode=1,
+        base_commit="a" * 40,
+        branch="work",
+        tool_modules=("directions", "experiments"),
+    )
+    service = SupervisorJournalService(
+        workspace=workspace,
+        campaign_root=journals,
+        evidence_root=evidence,
+        research_root=tmp_path / "research",
+    )
+
+    service.publish_research_files()
+
+    assert not stale_index.exists()
 
 
 @pytest.mark.parametrize(
@@ -2347,7 +2730,7 @@ def test_shared_research_is_visible_without_agent_facing_origin_fields(tmp_path)
                     "hypothesis": "shared hypothesis",
                     "plan": ["test it"],
                     "stop_conditions": [],
-                    "status": "deferred",
+                    "status": "proposed",
                     "analysis": "shared analysis",
                     "supporting_experiment_ids": [],
                     "associated_experiment_ids": [shared_experiment],
@@ -2357,6 +2740,7 @@ def test_shared_research_is_visible_without_agent_facing_origin_fields(tmp_path)
             "experiments": [
                 {
                     "experiment_id": shared_experiment,
+                    "recorded_by": "T2",
                     "sequence": 1,
                     "name": "shared experiment",
                     "hypothesis": "shared hypothesis",
@@ -2366,6 +2750,7 @@ def test_shared_research_is_visible_without_agent_facing_origin_fields(tmp_path)
                     "direction_id": shared_direction,
                 }
             ],
+            "research_queue": [shared_direction],
         },
     )
     current = journals / "episodes" / "e00000002" / "journal.json"
@@ -2385,7 +2770,7 @@ def test_shared_research_is_visible_without_agent_facing_origin_fields(tmp_path)
     service.publish_research_files()
     loaded = json.loads(
         (
-            workspace / "directions" / "deferred" / f"{shared_direction}.json"
+            workspace / "directions" / "proposed" / f"{shared_direction}.json"
         ).read_text(encoding="utf-8")
     )
     experiment = json.loads(
@@ -2395,7 +2780,12 @@ def test_shared_research_is_visible_without_agent_facing_origin_fields(tmp_path)
     )
 
     assert loaded["direction_id"] == shared_direction
+    assert "associated_experiment_ids" not in loaded
+    assert loaded["access"] == "peer_read_only"
+    assert loaded["shared_rank"] == 1
     assert experiment["experiment_id"] == shared_experiment
+    assert experiment["recorded_by"] == "T2"
+    assert experiment["access"] == "peer_read_only"
     assert "origin" not in loaded and "shared" not in loaded
     assert "origin" not in experiment and "shared" not in experiment
     with pytest.raises(AgentRequestError) as rejected:
@@ -2410,6 +2800,15 @@ def test_shared_research_is_visible_without_agent_facing_origin_fields(tmp_path)
             }
         )
     assert rejected.value.response["error"]["code"] == "shared_direction_read_only"
+    with pytest.raises(AgentRequestError) as peer_mutation:
+        service.execute({
+            "operation": "direction_prioritize",
+            "request": {
+                "direction_id": shared_direction,
+                "reason": "try to rank peer work locally",
+            },
+        })
+    assert peer_mutation.value.response["error"]["code"] == "shared_direction_read_only"
     with pytest.raises(AgentRequestError) as experiment_rejected:
         service.execute(
             {
@@ -2425,6 +2824,14 @@ def test_shared_research_is_visible_without_agent_facing_origin_fields(tmp_path)
             }
         )
     assert experiment_rejected.value.response["error"]["code"] == "shared_direction_read_only"
+    progress = (workspace / "PROGRESS.md").read_text(encoding="utf-8")
+    assert "access `peer_read_only`" in progress
+    assert "### Local work queue\n\n_None._" in progress
+    assert "### Shared direction pool" in progress
+    assert "shared rank #1" in progress
+    assert "absorb compatible peer mechanisms and evidence" in progress
+    assert "`derived_from_direction_ids`" in progress
+    assert "Experiment files declare `recorded_by` and `access`" in progress
 
     proposed = service.execute(
         {
@@ -2484,11 +2891,6 @@ def test_search_epoch_seals_other_trajectory_research_and_measurements(tmp_path)
                 reason="continue the highest-impact redesign first",
                 origin={"epoch": 1, "trajectory": number, "episode": 1},
             )
-            research.progress(
-                identities[number][0],
-                0,
-                origin={"epoch": 1, "trajectory": number, "episode": 1},
-            )
         records[number], kernels[number] = record_id, kernel_id
 
     jobs = [
@@ -2504,11 +2906,12 @@ def test_search_epoch_seals_other_trajectory_research_and_measurements(tmp_path)
         shared = json.loads(shared_research_path(runtime_root / "journals").read_text())
         assert set(shared["directions"]) == {identities[other][0]}
         assert shared["directions"][identities[other][0]]["proposed_by"] == f"T{other}"
-        assert shared["research_queue"] == [identities[2][0], identities[1][0]]
+        assert shared["research_queue"] == sorted(
+            [identities[1][0], identities[2][0]]
+        )
         assert {row["experiment_id"] for row in shared["experiments"]} == {identities[other][1]}
+        assert shared["experiments"][0]["recorded_by"] == f"T{other}"
         assert "origin" not in shared["directions"][identities[other][0]]
-        if other == 2:
-            assert shared["directions"][identities[other][0]]["completed_plan_steps"] == [0]
         store = MeasurementStore(runtime_root / "measurements")
         assert set(store.record_ids()) == set(records.values())
         assert store.read_kernel(kernels[other]).startswith(b"def kernel_")
@@ -2516,6 +2919,217 @@ def test_search_epoch_seals_other_trajectory_research_and_measurements(tmp_path)
     receipt = json.loads((driver.root / "epochs" / "e00000001-shared.json").read_text())
     assert set(receipt["gateway_record_ids"]) == set(records.values())
     assert driver.epoch_sealed(1)
+
+
+def test_shared_direction_queue_averages_normalized_trajectory_ranks():
+    directions = {
+        name: {"direction_id": name, "status": "proposed"}
+        for name in ("a", "b", "c", "new")
+    }
+    states = {
+        1: {"queue": ["a", "b", "new", "c"]},
+        2: {"queue": ["b", "a", "c"]},
+        3: {"queue": ["b", "c", "a"]},
+    }
+
+    # b wins the average vote.  The new Direction is not treated as last by
+    # trajectories that had no opportunity to observe it; it keeps T1's rank.
+    assert _aggregate_direction_queue(states, directions) == ["b", "a", "new", "c"]
+
+
+def test_shared_direction_queue_ties_are_deterministic_and_ignore_closed_items():
+    directions = {
+        "a": {"direction_id": "a", "status": "proposed"},
+        "b": {"direction_id": "b", "status": "in_progress"},
+        "done": {"direction_id": "done", "status": "completed"},
+    }
+    states = {
+        1: {"queue": ["a", "b", "done"]},
+        2: {"queue": ["b", "a"]},
+    }
+
+    assert _aggregate_direction_queue(states, directions) == ["a", "b"]
+
+
+def test_shared_direction_queue_uses_peer_pool_votes_without_overwriting_local_order():
+    directions = {
+        name: {"direction_id": name, "status": "proposed"}
+        for name in ("a", "b", "c")
+    }
+    states = {
+        1: {"queue": ["a"], "shared_queue": ["b", "c"]},
+        2: {"queue": ["b"], "shared_queue": ["a", "c"]},
+        3: {"queue": ["c"], "shared_queue": ["b", "a"]},
+    }
+
+    assert _aggregate_direction_queue(states, directions) == ["a", "b", "c"]
+    assert states[1]["queue"] == ["a"]
+    assert states[2]["queue"] == ["b"]
+    assert states[3]["queue"] == ["c"]
+
+
+def test_only_explicitly_low_quality_reviewed_claims_are_withheld_from_sharing():
+    assert _shareable_claim({"claim_review_quality": "supported"}) is True
+    assert _shareable_claim({}) is True  # legacy/pre-review compatibility
+    assert _shareable_claim({"claim_review_quality": "partially_supported"}) is False
+    assert _shareable_claim({"claim_review_quality": "unreviewed"}) is False
+
+
+def test_multiple_active_directions_require_explicit_experiment_binding(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    journals = tmp_path / "scope" / "journals"
+    evidence = journals / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    initialize_journal(
+        evidence / "journal.json", episode=1, base_commit="a" * 40, branch="work"
+    )
+    service = SupervisorJournalService(
+        workspace=workspace,
+        campaign_root=journals,
+        evidence_root=evidence,
+        research_root=tmp_path / "research",
+    )
+    directions = []
+    for name in ("incremental", "redesign"):
+        direction_id = service.execute({
+            "operation": "direction_update",
+            "request": {
+                "action": "propose",
+                "name": name,
+                "change_scope": "incremental" if name == "incremental" else "major_redesign",
+                "hypothesis": f"{name} path may improve latency.",
+                "applicability": "The target workload.",
+                "expected_benefit": "Resolve a consequential optimization choice.",
+                "plan": ["Run one bounded probe."],
+            },
+        })["direction_id"]
+        service.execute({
+            "operation": "direction_update",
+            "request": {
+                "action": "start",
+                "direction_id": direction_id,
+                "analysis": "Start bounded work.",
+            },
+        })
+        directions.append(direction_id)
+
+    service.execute({
+        "operation": "direction_prioritize",
+        "request": {
+            "direction_id": directions[0],
+            "before_direction_id": directions[1],
+            "reason": "Prefer the cheaper discriminator first.",
+        },
+    })
+    with pytest.raises(AgentRequestError) as ambiguous:
+        service.execute({
+            "operation": "experiment_record",
+            "request": {
+                "name": "Unbound observation",
+                "intent": "Record a result without choosing concurrent work.",
+                "interpretation": "The intended Direction is ambiguous.",
+            },
+        })
+    assert ambiguous.value.response["error"]["code"] == "direction_ambiguous"
+    assert ambiguous.value.response["error"]["active_direction_ids"] == directions
+
+    recorded = service.execute({
+        "operation": "experiment_record",
+        "request": {
+            "direction_id": directions[0],
+            "name": "Bound observation",
+            "intent": "Record evidence for the incremental path.",
+            "interpretation": "The observation belongs only to that Direction.",
+        },
+    })
+    projected = json.loads(
+        (workspace / "experiments" / recorded["experiment_id"] / "experiment.json").read_text()
+    )
+    assert projected["direction_id"] == directions[0]
+
+
+def test_candidate_preflight_reuses_supported_historical_experiment(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = b"def run():\n    return 1\n"
+    install(workspace, source)
+    journals = tmp_path / "scope" / "journals"
+    old = journals / "episodes" / "e00000000" / "journal.json"
+    old.parent.mkdir(parents=True)
+    initialize_journal(old, episode=0, base_commit="a" * 40, branch="old")
+    direction_id = "direction_" + "1" * 32
+    experiment_id = "experiment_" + "2" * 32
+    record_id, kernel_commit_id = _passing_full_measurement(
+        MeasurementStore(tmp_path / "scope" / "measurements"),
+        source,
+        "historical-supported",
+        {"shape_a": 1.0},
+    )
+    old_value = load_journal(old)
+    old_value["direction_events"] = [
+        {
+            "direction_id": direction_id,
+            "action": "propose",
+            "revision": 1,
+            "name": "Historical path",
+            "change_scope": "incremental",
+            "hypothesis": "The measured implementation is viable.",
+            "applicability": "The target workload.",
+            "expected_benefit": "Provide a reusable exact candidate.",
+            "plan": ["Evaluate the exact candidate."],
+            "stop_conditions": [],
+            "recorded_at": "2026-01-01T00:00:00Z",
+            "claim_review_quality": "supported",
+        },
+        {
+            "direction_id": direction_id,
+            "action": "start",
+            "analysis": "Measure it.",
+            "recorded_at": "2026-01-01T00:00:01Z",
+            "supporting_experiment_ids": [],
+            "hypothesis_status": None,
+            "reopen_condition": None,
+        },
+        {
+            "direction_id": direction_id,
+            "action": "complete",
+            "analysis": "The exact candidate passed.",
+            "recorded_at": "2026-01-01T00:00:02Z",
+            "supporting_experiment_ids": [experiment_id],
+            "hypothesis_status": "supported",
+            "reopen_condition": None,
+            "claim_review_quality": "supported",
+        },
+    ]
+    old_value["experiments"] = [{
+        "experiment_id": experiment_id,
+        "revision": 1,
+        "sequence": 1,
+        "direction_id": direction_id,
+        "name": "Historical full Evaluate",
+        "intent": "Validate the exact candidate.",
+        "gateway_record_ids": [record_id],
+        "interpretation": "The candidate passed the complete workload.",
+        "claim_review_quality": "supported",
+    }]
+    old_value["finalized_at"] = "2026-01-01T00:00:03Z"
+    private_write(old, old_value)
+
+    current = journals / "episodes" / "e00000001" / "journal.json"
+    current.parent.mkdir(parents=True)
+    initialize_journal(current, episode=1, base_commit="b" * 40, branch="work")
+    value, directions, selected_source = validate_report_evidence(
+        current,
+        journals,
+        workspace,
+        status="candidate_ready",
+        selected_id=experiment_id,
+        kernel_id=kernel_commit_id,
+    )
+    assert value["episode"] == 1
+    assert directions[direction_id]["status"] == "completed"
+    assert selected_source == source
 
 
 def test_pooled_search_seals_before_publishing(tmp_path):
@@ -2800,10 +3414,11 @@ def _controller_repository(workspace: Path, text: str) -> Path:
     return workspace
 
 
-def test_research_store_rebuilds_queue_progress_and_adoption(tmp_path):
+def test_research_store_rebuilds_queue_ignores_legacy_progress_and_adoption(tmp_path):
     store = ResearchStore(tmp_path / "research")
     first = "direction_" + "1" * 32
     second = "direction_" + "2" * 32
+    peer = "direction_" + "3" * 32
     for direction_id, name in ((first, "local"), (second, "redesign")):
         store.observe_direction(
             {
@@ -2812,11 +3427,20 @@ def test_research_store_rebuilds_queue_progress_and_adoption(tmp_path):
                 "change_scope": "major_redesign" if direction_id == second else "local",
                 "status": "proposed",
                 "plan": ["probe", "measure"],
+                # Older projections may feed these derived fields back into
+                # an observed Direction. Runtime must retire both fields.
+                "completed_plan_steps": [0],
+                "next_step": "measure",
             },
             origin={"trajectory": 1},
         )
     store.prioritize(second, before_direction_id=first, reason="higher impact")
-    store.progress(second, 0, origin={"trajectory": 1})
+    # Historical logs may still contain the retired direction.progressed event.
+    store.append(
+        "direction.progressed",
+        {"direction_id": second, "plan_step": 0},
+        origin={"trajectory": 1},
+    )
     store.observe_direction(
         {
             "direction_id": second,
@@ -2852,24 +3476,48 @@ def test_research_store_rebuilds_queue_progress_and_adoption(tmp_path):
         },
         origin={"trajectory": 1},
     )
-    store.adopt_kernel(
-        "3" * 40,
-        source_ref="refs/atrex/shared/T2/e0001/head",
-        reason="continue the peer implementation",
+    # Historical logs may still contain the retired kernel.adopted event.
+    # Rebuilds must remain compatible even though Agents can no longer create it.
+    store.append(
+        "kernel.adopted",
+        {
+            "kernel_id": "3" * 40,
+            "source": {"git_ref": "refs/atrex/shared/T2/e0001/head"},
+            "reason": "historical event",
+        },
         origin={"trajectory": 1},
     )
-    store.synchronize_queue([first, second], origin={"epoch": 2})
-    store.prioritize(second, before_direction_id=first, reason="local temporary reorder")
-    store.synchronize_queue([first, second], origin={"epoch": 3})
+    store.observe_direction(
+        {
+            "direction_id": peer,
+            "name": "peer redesign",
+            "change_scope": "major_redesign",
+            "status": "proposed",
+            "plan": ["probe peer idea"],
+            "proposed_by": "T2",
+            "access": "peer_read_only",
+        },
+        origin={"trajectory": 2},
+    )
+    store.synchronize_shared_queue([peer, first, second], origin={"epoch": 2})
+    store.prioritize(second, before_direction_id=first, reason="local durable reorder")
+    store.synchronize_shared_queue([peer, first, second], origin={"epoch": 3})
 
     rebuilt = ResearchStore(tmp_path / "research").read()
-    assert rebuilt["queue"] == [first, second]
-    assert rebuilt["directions"][second]["completed_plan_steps"] == [0]
+    assert rebuilt["queue"] == [second, first]
+    assert rebuilt["shared_queue"] == [peer]
+    assert "completed_plan_steps" not in rebuilt["directions"][second]
+    assert "next_step" not in rebuilt["directions"][second]
     assert rebuilt["lineages"]["T1"]["working_kernel_id"] == "3" * 40
+    assert rebuilt["lineages"]["T1"]["adopted_from"] == {
+        "git_ref": "refs/atrex/shared/T2/e0001/head",
+        "kernel_commit_id": "3" * 40,
+    }
     board = store.board(trajectory=1)
-    assert [item["direction_id"] for item in board["open_queue"]] == [first, second]
-    assert board["open_queue"][1]["status"] == "in_progress(T1)"
-    assert board["open_queue"][1]["next_step"] == "measure"
+    assert [item["direction_id"] for item in board["open_queue"]] == [second, first]
+    assert board["open_queue"][0]["status"] == "in_progress(T1)"
+    assert "next_step" not in board["open_queue"][0]
+    assert [item["direction_id"] for item in board["shared_direction_pool"]] == [peer]
     assert board["lineages"]["T1"]["working_kernel_commit_id"] == "3" * 40
     assert "working_kernel_id" not in board["lineages"]["T1"]
 
@@ -2887,14 +3535,21 @@ def test_research_store_terminal_projection_excludes_newer_live_episode(tmp_path
         },
         origin={"trajectory": 1, "episode": 1},
     )
-    store.progress(direction_id, 0, origin={"trajectory": 1, "episode": 2})
+    # Replay remains compatible with historical progress events even though
+    # Agents can no longer create them.
+    store.append(
+        "direction.progressed",
+        {"direction_id": direction_id, "plan_step": 0},
+        origin={"trajectory": 1, "episode": 2},
+    )
 
     terminal = store.read_through_episode(1)
 
-    assert terminal["directions"][direction_id]["completed_plan_steps"] == []
-    assert terminal["directions"][direction_id]["next_step"] == "probe"
+    assert "completed_plan_steps" not in terminal["directions"][direction_id]
+    assert "next_step" not in terminal["directions"][direction_id]
     assert len(store.events_through_episode(1)) == 1
-    assert store.read()["directions"][direction_id]["completed_plan_steps"] == [0]
+    assert "completed_plan_steps" not in store.read()["directions"][direction_id]
+    assert "next_step" not in store.read()["directions"][direction_id]
 
 
 def test_research_store_tracks_multiple_active_directions_per_lineage(tmp_path):
@@ -2981,70 +3636,6 @@ def test_journal_repair_hint_mentions_only_enabled_modules(modules, included, ex
     assert excluded not in hint
 
 
-def test_public_shapes_are_canonical_first_five_and_tamper_evident(tmp_path):
-    shapes = {
-        str(index): {"init_kwargs": {"rank": index}, "input_kwargs": {"size": index * 2}}
-        for index in (10, 2, 1, 8, 4, 3, 6)
-    }
-    private = tmp_path / "shapes.json"
-    private.write_text(json.dumps(shapes), encoding="utf-8")
-    payload = public_shapes_payload(private, count=5)
-    assert list(payload["shapes"]) == ["1", "2", "3", "4", "6"]
-    assert payload["selection"] == {
-        "policy": "canonical_prefix", "count": 5, "total_shape_count": 7
-    }
-    public = tmp_path / "public_shapes.json"
-    public.write_text(json.dumps(payload), encoding="utf-8")
-    assert validate_public_shapes(
-        public, private_shapes_path=private, count=5
-    ) == payload
-    payload["shapes"]["1"]["input_kwargs"]["size"] = 999
-    public.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ValueError, match="exact deterministic"):
-        validate_public_shapes(public, private_shapes_path=private, count=5)
-
-
-def test_public_shapes_support_none_prefix_and_all(tmp_path):
-    shapes = {
-        str(index): {"init_kwargs": {"rank": index}, "input_kwargs": {"size": index * 2}}
-        for index in (10, 2, 1, 8, 4, 3, 6)
-    }
-    private = tmp_path / "shapes.json"
-    private.write_text(json.dumps(shapes), encoding="utf-8")
-
-    assert public_shapes_payload(private)["shapes"] == shapes
-    hidden = public_shapes_payload(private, count=0)
-    assert hidden["shapes"] == {}
-    assert hidden["selection"]["count"] == 0
-
-    prefix = public_shapes_payload(private, count=2)
-    assert list(prefix["shapes"]) == ["1", "2"]
-
-    complete = public_shapes_payload(private, count="all")
-    assert list(complete["shapes"]) == ["1", "2", "3", "4", "6", "8", "10"]
-    assert complete["selection"] == {
-        "policy": "canonical_prefix", "count": 7, "total_shape_count": 7
-    }
-    public = tmp_path / "public_shapes.json"
-    public.write_text(json.dumps(complete), encoding="utf-8")
-    assert validate_public_shapes(
-        public, private_shapes_path=private, count="all"
-    ) == complete
-    with pytest.raises(ValueError, match="exact deterministic"):
-        validate_public_shapes(public, private_shapes_path=private, count=2)
-
-
-@pytest.mark.parametrize("value", [-1, True, "five", None])
-def test_public_shapes_reject_invalid_selection(value, tmp_path):
-    private = tmp_path / "shapes.json"
-    private.write_text(
-        json.dumps({"1": {"init_kwargs": {}, "input_kwargs": {}}}),
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="non-negative integer or 'all'"):
-        public_shapes_payload(private, count=value)
-
-
 def test_agent_git_persists_work_and_installs_runtime_source_refs(tmp_path):
     workspace = tmp_path / "workspace"
     source = _install(workspace, "def run():\n    return 1\n")
@@ -3063,6 +3654,13 @@ def test_agent_git_persists_work_and_installs_runtime_source_refs(tmp_path):
         ["git", "rev-parse", "refs/tags/atrex/incumbent"], cwd=workspace,
         text=True, capture_output=True, check=True,
     ).stdout.strip() == runtime_commit
+    with pytest.raises(ValueError, match="private source snapshot"):
+        repo.install_runtime_ref(
+            "refs/tags/atrex/historical-private",
+            source,
+            message="must not expose a synthetic historical commit",
+            commit_id="f" * 40,
+        )
 
     restored = tmp_path / "restored"
     restored_source = _install(restored, "def run():\n    return 1\n")
@@ -3577,42 +4175,6 @@ def test_epoch_projection_replays_local_active_direction_beside_peer_active_dire
     assert projection["directions"][peer]["status"] == "in_progress"
     assert projection["directions"][peer]["owner"] == "T2"
     assert projection["directions"][local]["status"] == "in_progress"
-
-
-def test_kernel_adoption_requires_exact_materialized_source(tmp_path):
-    workspace = tmp_path / "workspace"
-    source = _install(workspace, "def run():\n    return 1\n")
-    journals = tmp_path / "journals"
-    journal = journals / "episodes" / "e00000001" / "journal.json"
-    initialize_journal(journal, episode=1, base_commit="a" * 40, branch="episode")
-    agent_git = AgentGit(workspace, tmp_path / "agent.bundle")
-    agent_git.prepare()
-    identity = MeasurementStore(tmp_path / "measurements").kernel(
-        source, agent_git.head()
-    )
-    service = SupervisorJournalService(
-        workspace=workspace,
-        campaign_root=journals,
-        evidence_root=journal.parent,
-        research_root=tmp_path / "research",
-        origin={"trajectory": 1, "episode": 1},
-    )
-    request = {
-        "operation": "kernel_adopt",
-        "request": {
-            "kernel_commit_id": identity["kernel_id"],
-            "source_ref": "refs/atrex/shared/T2/e0001/head",
-            "reason": "continue peer work",
-        },
-    }
-    assert service.execute(request) == {
-        "status": "recorded",
-        "kernel_commit_id": identity["kernel_id"],
-    }
-    (workspace / "kernel.py").write_text("def run():\n    return 2\n", encoding="utf-8")
-    with pytest.raises(AgentRequestError) as mismatch:
-        service.execute(request)
-    assert mismatch.value.response["error"]["code"] == "kernel_adoption_source_mismatch"
 
 
 def test_pooled_search_keeps_each_lineage_instead_of_broadcasting_winner(tmp_path):
