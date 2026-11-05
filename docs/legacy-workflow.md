@@ -227,9 +227,9 @@ verifying any deferred remote cleanup.
 1. **Resolve and isolate the campaign.** The Workflow validates the operator and explicitly selected
    resources, probes the runtime GPU architecture, and creates or resumes
    `kernel_opt_<name>_<framework>_<platform>/` below `--workspace` or the current directory.
-2. **Prepare production inputs.** Native production campaigns validate a supplied
-   `agent_problem.json` or derive one in a clean preprocessing session, then keep detailed evaluator
-   shapes private.
+2. **Prepare production inputs.** Native production campaigns install the detailed evaluator
+   contract by default. `--no-expose-evaluator-shapes` instead validates or derives
+   `agent_problem.json` and keeps exact shapes private.
 3. **Establish V0.** The supervisor commits the evaluator-owned reference wrapper, runs one official
    full-workload base-seed evaluation, and records canonical `memory/v0.json` without launching a
    coding Agent.

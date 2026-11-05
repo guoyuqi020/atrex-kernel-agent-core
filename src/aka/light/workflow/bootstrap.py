@@ -297,6 +297,7 @@ class Campaign:
     optimization_mode: str = (
         "leaderboard"  # permissive contest flow or strict production gate
     )
+    expose_evaluator_shapes: bool = True
     framework_baseline: str = (
         "never"  # direct V0 -> Episode by default; auto | always opt into V1 bring-up
     )
@@ -1385,9 +1386,9 @@ class Campaign:
             cwd=str(self.workspace.parent),
             check=True,
         )
-        # Production native tasks always expose a generalized public contract. Exact shapes and
-        # release metadata remain in the source operator directory and are injected only at the
-        # sandbox boundary. A missing public contract is authored before the baseline session.
+        # Production native tasks expose the detailed contract by default. The explicit hidden
+        # shape setting arrives as a generalized Problem while retaining production candidate
+        # and promotion policy.
         generalized = self.private_reference_dir is not None
         for name in agent_visible_operator_files(op_dir, generalized=generalized):
             source = op_dir / name

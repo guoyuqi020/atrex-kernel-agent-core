@@ -227,16 +227,28 @@ def gateway_schema(kind, parser):
     if kind in {"run", "profile", "dev", "command", "check", "disassemble"}:
         allowed |= {"--input", "--sync", "--no-sync", "--env", "--inline-output", "--keep-pod", "--dry-run"}
     options = {}
+    from aka.light.evaluation.agate_native import COMMAND_BY_KIND
+    native_command = COMMAND_BY_KIND.get(kind)
     for action in parser._actions:
+        native_for_kind = native_command in getattr(action, "agate_commands", ())
         for flag in action.option_strings:
-            if flag not in allowed:
+            if flag not in allowed and not native_for_kind:
                 continue
-            item = {"type": "boolean" if action.nargs == 0 else
-                    "integer" if action.type is int else "number" if action.type is float else "string"}
+            value_type = getattr(action, "agate_value_type", action.type)
+            schema_type = getattr(action, "agate_schema_type", None)
+            item = {"type": schema_type or (
+                "boolean" if action.nargs == 0 else
+                "integer" if value_type is int else
+                "number" if value_type is float else "string"
+            )}
             if action.choices is not None:
                 item["enum"] = list(action.choices)
             if isinstance(action, argparse._AppendAction):
                 item["repeatable"] = True
+            if native_for_kind and flag.startswith("--"):
+                item["source"] = "agate"
+            if isinstance(action.help, str) and action.help:
+                item["description"] = action.help
             options[flag] = item
     options["--kind"] = {"const": kind}
     required = ["--kind"]

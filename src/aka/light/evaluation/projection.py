@@ -38,7 +38,6 @@ _SOURCE_VIOLATION = re.compile(
     r"|Forbidden string literal matching: [A-Za-z_]\w*"
 )
 
-
 def source_error_result(value: dict[str, Any]) -> dict[str, Any]:
     """Only public candidate-source rules, never raw validation/evaluator text."""
     error = value.get("error")

@@ -113,6 +113,9 @@ from aka.legacy.execution.gateway.request_values import (
 )
 
 from aka.legacy.task.persistence import durable_write_json  # noqa: E402
+from aka.legacy.workflow.policy import (  # noqa: E402
+    workspace_uses_hidden_shapes as _is_generalized_workspace,
+)
 from aka.light.agent.home import open_private_directory  # noqa: E402
 from aka.light.agent.session_tail import read_regular_bytes  # noqa: E402
 from aka.light.execution.config import queue_wait_grace  # noqa: E402
@@ -419,27 +422,46 @@ def _run_environment_query(args: argparse.Namespace) -> int:
         url=args.url,
         profile=args.gateway_profile,
     )
-    if url:
+    from aka.light.evaluation.agate_native import cli_arguments
+    native_arguments = cli_arguments(args, "env")
+    use_cli = executable is not None
+    if not use_cli:
+        if not url:
+            raise SystemExit("sandbox: agate not found and no explicit --url was provided")
+        if native_arguments:
+            names = " ".join(native_arguments[::2])
+            raise ValueError(
+                f"Native Agate env options ({names}) require the installed agate CLI; "
+                "the direct HTTP fallback cannot represent them"
+            )
         path = "/v1/env"
         if args.env_gpu:
             encoded = urllib.parse.quote(args.env_gpu, safe="")
             path = f"/v1/env/{encoded}"
-            if args.env_capabilities:
+            if args.env_capabilities or args.frameworks or args.counters or args.limits:
                 path += "/capabilities"
         if args.env_force:
             path += "?force=true"
     else:
-        if executable is None:
-            raise SystemExit("sandbox: agate not found and no explicit --url was provided")
         command = [executable, "env"]
-        if args.gateway_profile:
+        if args.url:
+            command += ["--url", args.url]
+        elif args.gateway_profile:
             command += ["--profile", args.gateway_profile]
         if args.env_gpu:
             command.append(args.env_gpu)
         if args.env_capabilities:
             command += ["--frameworks", "--limits"]
+        else:
+            if args.frameworks:
+                command.append("--frameworks")
+            if args.counters:
+                command += ["--counters", args.counters]
+            if args.limits:
+                command.append("--limits")
         if args.env_force:
             command.append("--force")
+        command += native_arguments
         command.append("--json")
     deadline = time.monotonic() + args.timeout
     failures = 0
@@ -449,7 +471,7 @@ def _run_environment_query(args: argparse.Namespace) -> int:
             raise EvidenceUnavailable("Environment discovery timed out; no GPU job was submitted")
         retry_after = 0.0
         try:
-            if url:
+            if not use_cli:
                 value = _gateway_json(url, "GET", path, None, min(remaining, 120 if args.env_force else 30))
                 completed = subprocess.CompletedProcess([], 0, json.dumps(value), "")
             else:
@@ -499,6 +521,19 @@ def _run_environment_query(args: argparse.Namespace) -> int:
             raise EvidenceUnavailable("Environment discovery retry deadline reached; no GPU job was submitted")
         print(f"[sandbox] Environment service unavailable; retrying in {delay:g}s", file=sys.stderr, flush=True)
         time.sleep(delay)
+    if not args.env_capabilities and args.env_gpu and any(
+        (args.frameworks, args.counters, args.limits)
+    ):
+        selected: dict[str, Any] = {}
+        if args.frameworks:
+            selected["frameworks"] = value.get("frameworks", {})
+        if args.counters:
+            profiler = (value.get("profilers") or {}).get(args.counters)
+            selected["profiler"] = args.counters
+            selected["capabilities"] = profiler or {"available": False}
+        if args.limits:
+            selected["limits"] = value.get("limits", {})
+        value = selected
     print(ENV_RESULT_PREFIX + json.dumps(value, ensure_ascii=False))
     return 0
 
@@ -2024,7 +2059,7 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
         ),
     )
     parser.add_argument(
-        "--profile-level",
+        "--profile-level", "--level",
         choices=("survey", "sol", "deep"),
         default="sol",
         help="Typed profile funnel level (default: sol).",
@@ -2036,7 +2071,7 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
         help="Typed profile backend (default: gateway vendor auto-detection).",
     )
     parser.add_argument(
-        "--profile-counter",
+        "--profile-counter", "--counter",
         action="append",
         default=[],
         metavar="METRIC",
@@ -2076,7 +2111,9 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
         default=512,
         help="Skip individual returned artifacts larger than this (default: 512 MiB).",
     )
-    parser.add_argument("-e", "--env", action="append", default=[], metavar="KEY=VALUE")
+    parser.add_argument(
+        "-e", "--env", "--env-var", action="append", default=[], metavar="KEY=VALUE"
+    )
     parser.add_argument(
         "--keep-pod",
         action="store_true",
@@ -2170,7 +2207,7 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
             help="Typed profile exact kernel name (mutually exclusive with --kernel-regex).",
         )
     parser.add_argument(
-            "--profile-source",
+            "--profile-source", "--source",
             action="store_true",
             help="Request source-correlated profiler output.",
         )
@@ -2223,7 +2260,7 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
             ),
         )
     parser.add_argument(
-            "--format",
+            "--format", "--fmt",
             dest="disassembly_format",
             choices=("sass", "ptx", "isa", "auto"),
             default="auto",
@@ -2241,11 +2278,28 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
             help="With --kind env --env-gpu, return frameworks, profilers, and limits.",
         )
     parser.add_argument(
-            "--env-force",
+            "--env-force", "--force",
             action="store_true",
             help="With --kind env, request a fresh Gateway environment probe.",
         )
-    return parser
+    parser.add_argument(
+            "--frameworks",
+            action="store_true",
+            help="Native Agate env: return installed framework capabilities.",
+        )
+    parser.add_argument(
+            "--counters",
+            default=None,
+            metavar="TOOL",
+            help="Native Agate env: return counters for one profiler.",
+        )
+    parser.add_argument(
+            "--limits",
+            action="store_true",
+            help="Native Agate env: return server submission limits.",
+        )
+    from aka.light.evaluation.agate_native import extend_parser
+    return extend_parser(parser)
 
 
 class SSHTransportError(RuntimeError):
@@ -3517,6 +3571,8 @@ def build_typed_agate_command(
         ]
         for item in args.env:
             command += ["--env-var", item]
+        from aka.light.evaluation.agate_native import cli_arguments
+        command += cli_arguments(args, kind)
         return command
 
     options = request["options"]
@@ -3608,6 +3664,8 @@ def build_typed_agate_command(
             command += ["--launch-count", str(args.launch_count)]
         if args.top_kernels is not None:
             command += ["--top-kernels", str(args.top_kernels)]
+    from aka.light.evaluation.agate_native import cli_arguments
+    command += cli_arguments(args, kind)
     return command
 
 
@@ -3877,6 +3935,14 @@ def _top_level_evaluation_options(args: argparse.Namespace) -> list[str]:
 
 def validate_evaluation_options(args: argparse.Namespace) -> None:
     """Reject ignored top-level evaluator controls before either entry point executes."""
+    from aka.light.evaluation.agate_native import values as native_values
+    native_values(args, args.kind)
+    if args.kind != "env" and any(
+        (args.env_force, args.frameworks, args.counters, args.limits)
+    ):
+        raise ValueError(
+            "--env-force/--force, --frameworks, --counters and --limits require --kind env"
+        )
     if args.profile_shape_id is not None:
         if args.kind != "profile":
             raise ValueError("--profile-shape-id requires --kind profile; use --shape-id for --kind run")
@@ -3912,12 +3978,14 @@ def validate_evaluation_options(args: argparse.Namespace) -> None:
 
 def _requires_typed_request(args: argparse.Namespace, *, private_profile_shape: bool = False) -> bool:
     """New explicit typed controls cannot be silently discarded by Dev fallback."""
+    from aka.light.evaluation.agate_native import values as native_values
     return any((_top_level_evaluation_options(args),
                 args.evaluation_input_path, args.evaluation_shapes_path, args.evaluation_mode,
                 args.kernel_name, args.profile_source,
                 args.profile_shape_id is not None and not private_profile_shape,
                 args.launch_skip is not None, args.launch_count is not None,
-                args.requirement, args.deps_mode))
+                args.requirement, args.deps_mode,
+                native_values(args, args.kind)))
 
 
 def _run_typed_gateway(
@@ -3960,6 +4028,8 @@ def _run_typed_gateway(
                 DEFAULT_EVALUATION_STEP_TIMEOUT,
             ),
         )
+        from aka.light.evaluation.agate_native import apply_request
+        request = apply_request(request, args, kind)
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         if kind == "run" or source_tree or _requires_typed_request(args):
             raise ValueError(f"Invalid typed {kind} request: {exc}; no Dev fallback was submitted") from exc
@@ -3983,7 +4053,7 @@ def _run_typed_gateway(
                 performance_timeout=performance_timeout,
             ),
         )
-        if kind == "run"
+        if kind == "run" and native_shape_shards is None
         else [expected_shape_ids]
     )
     batched = len(shape_batches) > 1
@@ -4345,8 +4415,13 @@ def _main(argv: list[str] | None = None) -> int:
         args.health_command, args.runtime_health_command
     )
     if args.kind == "env":
-        if args.command or (args.env_capabilities and not args.env_gpu):
-            raise SystemExit("sandbox: env takes no command; --env-capabilities requires --env-gpu")
+        if args.command or (
+            any((args.env_capabilities, args.frameworks, args.counters, args.limits))
+            and not args.env_gpu
+        ):
+            raise SystemExit(
+                "sandbox: env takes no command; capability flags require --env-gpu"
+            )
         return _run_environment_query(args)
     if args.baseline_commit:
         raise SystemExit(
@@ -4711,14 +4786,13 @@ def _main(argv: list[str] | None = None) -> int:
             dev_intent = "custom_harness"
         else:
             dev_intent = "other"
-        agate = [
-            agate_executable or "agate",
-            "dev",
-            "--intent",
-            dev_intent,
-            "--note",
-            f"tools/sandbox.py {args.kind} compatibility path",
-        ]
+        from aka.light.evaluation.agate_native import cli_arguments, values as native_values
+        supplied_native = native_values(args, "dev")
+        agate = [agate_executable or "agate", "dev"]
+        if "intent" not in supplied_native:
+            agate += ["--intent", dev_intent]
+        if "note" not in supplied_native:
+            agate += ["--note", f"tools/sandbox.py {args.kind} compatibility path"]
         if args.url:
             agate += ["--url", args.url]
         elif args.gateway_profile:
@@ -4726,6 +4800,7 @@ def _main(argv: list[str] | None = None) -> int:
         agate += ["--gpu", args.hardware]
         if num_gpus > 1:
             agate += ["--num-gpus", str(num_gpus)]
+        agate += cli_arguments(args, "dev")
         agate += [
             "--dev-timeout",
             str(args.timeout),
@@ -5002,7 +5077,9 @@ def _main(argv: list[str] | None = None) -> int:
                     # and remote exit code because one receipt is malformed.
                     continue
                 projected.append(line)
-            elif not hide_evaluator_details or line.startswith((TEST_RESULT_PREFIX, ABBA_RESULT_PREFIX)):
+            elif not hide_evaluator_details or line.startswith(
+                (TEST_RESULT_PREFIX, ABBA_RESULT_PREFIX)
+            ):
                 projected.append(line)
         command_stdout = "\n".join(projected)
     if command_stdout:

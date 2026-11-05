@@ -64,6 +64,8 @@ class WorkflowSettings:
             raise ValueError(
                 "review_trace_mode must be one of: off, errors, all"
             )
+        if type(self.expose_evaluator_shapes) is not bool:
+            raise TypeError("expose_evaluator_shapes must be a boolean")
 
 
 @dataclass(frozen=True)
