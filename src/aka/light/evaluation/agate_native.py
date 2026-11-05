@@ -390,4 +390,3 @@ def apply_request(request: dict[str, Any], args: argparse.Namespace, kind: str) 
             raise ValueError(f"Agate option {key!r} conflicts with the Runtime request")
         request[key] = value
     return request
-

@@ -3976,16 +3976,23 @@ def validate_evaluation_options(args: argparse.Namespace) -> None:
         )
 
 
-def _requires_typed_request(args: argparse.Namespace, *, private_profile_shape: bool = False) -> bool:
+def _requires_typed_request(
+    args: argparse.Namespace,
+    *,
+    kind: str | None = None,
+    private_profile_shape: bool = False,
+) -> bool:
     """New explicit typed controls cannot be silently discarded by Dev fallback."""
     from aka.light.evaluation.agate_native import values as native_values
+    request_kind = kind or getattr(args, "kind", None)
+    native = native_values(args, request_kind) if request_kind is not None else {}
     return any((_top_level_evaluation_options(args),
                 args.evaluation_input_path, args.evaluation_shapes_path, args.evaluation_mode,
                 args.kernel_name, args.profile_source,
                 args.profile_shape_id is not None and not private_profile_shape,
                 args.launch_skip is not None, args.launch_count is not None,
                 args.requirement, args.deps_mode,
-                native_values(args, args.kind)))
+                native))
 
 
 def _run_typed_gateway(
@@ -4001,7 +4008,9 @@ def _run_typed_gateway(
     from aka.light.workspace.sources import layout_at
     source_tree = layout_at(workspace).archived
     compatible_fallback = not source_tree and not _requires_typed_request(
-        args, private_profile_shape=(kind == "profile" and generalized and _is_profile_command(command_parts)),
+        args,
+        kind=kind,
+        private_profile_shape=(kind == "profile" and generalized and _is_profile_command(command_parts)),
     )
     try:
         request = build_typed_request(
@@ -4031,7 +4040,7 @@ def _run_typed_gateway(
         from aka.light.evaluation.agate_native import apply_request
         request = apply_request(request, args, kind)
     except (OSError, UnicodeDecodeError, ValueError) as exc:
-        if kind == "run" or source_tree or _requires_typed_request(args):
+        if kind == "run" or source_tree or _requires_typed_request(args, kind=kind):
             raise ValueError(f"Invalid typed {kind} request: {exc}; no Dev fallback was submitted") from exc
         print(
             f"[sandbox] {kind} interface unsupported for this workspace: {exc}; using dev",
@@ -4040,6 +4049,7 @@ def _run_typed_gateway(
         return None
 
     expected_shape_ids = _request_shape_ids(request)
+    native_shape_shards = request.get("options", {}).get("shape_shards")
     performance_timeout = int(
         request.get("runner_overrides", {}).get("perf_timeout_s", PERFORMANCE_TIMEOUT)
     )
@@ -4569,7 +4579,11 @@ def _main(argv: list[str] | None = None) -> int:
         from aka.light.workspace.sources import layout_at
         if layout_at(workspace).typed_only:
             raise SystemExit(f"sandbox: candidate requires the typed Agate {gateway_kind} route ({typed_limitation}); no Dev fallback was submitted")
-        if _requires_typed_request(args, private_profile_shape=private_profile_shape):
+        if _requires_typed_request(
+            args,
+            kind=gateway_kind,
+            private_profile_shape=private_profile_shape,
+        ):
             raise SystemExit(
                 f"sandbox: explicit typed {gateway_kind} options cannot be honored "
                 f"({typed_limitation}); no Dev fallback was submitted. "

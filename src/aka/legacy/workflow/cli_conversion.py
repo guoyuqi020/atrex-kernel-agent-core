@@ -155,17 +155,6 @@ def parse_arguments(argv):
         "framework, compute-provenance, dependency, loader, and manifest review.",
     )
     ap.add_argument(
-        "--expose-evaluator-shapes",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Expose native Atrex-Bench shapes.json and detailed evaluator metadata to the "
-            "Agent. Production source review and promotion gates remain enabled, and Runtime "
-            "results remain compact, but shape dimensions are not redacted (default: on; "
-            "use --no-expose-evaluator-shapes for the generalized hidden-shape flow)."
-        ),
-    )
-    ap.add_argument(
         "--framework",
         default="",
         help="Target DSL, e.g. Triton / CuteDSL / Cuda / FlyDSL / TileLang. When omitted, "

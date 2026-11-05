@@ -23,18 +23,10 @@ def requested_evaluator_shape_visibility(
     mode: str,
     expose_evaluator_shapes: bool,
 ) -> str:
-    """Return the visibility of the evaluator flow actually staged in workspace.
-
-    Hidden-shape handling is active only after production staging has produced
-    ``agent_problem.json``.  This mirrors the generalized-problem predicate and
-    prevents SOL or non-Atrex workspaces from being mislabeled hidden merely
-    because a visibility flag was false.
-    """
+    """Return the evaluator visibility requested for this workspace."""
     return (
         "hidden"
-        if mode == "production"
-        and not expose_evaluator_shapes
-        and (workspace / "agent_problem.json").is_file()
+        if mode == "production" and not expose_evaluator_shapes
         else "exposed"
     )
 
