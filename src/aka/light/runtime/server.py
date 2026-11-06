@@ -398,6 +398,7 @@ class JournalBinding:
     lock: threading.Lock = field(default_factory=threading.Lock)
     view: EpisodeWorkspace | None = None
     require_gluon: bool = False
+    baseline_kernel_commit_id: str | None = None
 
 
 @dataclass
@@ -796,6 +797,24 @@ class SupervisorRuntime:
         """
         return load_journal(self.episode_journal_path(episode))
 
+    def baseline_kernel_commit(self, workspace: Path) -> str:
+        """Return this Episode's canonical baseline in Agent-visible Git."""
+        workspace = workspace.resolve(strict=True)
+        with self.lock:
+            binding = self.journals.get(workspace)
+            baseline = (
+                binding.baseline_kernel_commit_id if binding is not None else None
+            )
+        if not baseline:
+            raise RuntimeError(
+                "Episode baseline is not registered in the Agent-visible Git repository"
+            )
+        if binding.view is None or not binding.view.agent_git.commit_reachable(baseline):
+            raise RuntimeError(
+                "Registered Episode baseline is not reachable from Agent-visible Git"
+            )
+        return baseline
+
     def register_episode(self, workspace: Path, *, episode: int, base_commit: str,
                          branch: str, memory_version: int,
                          supervisor_git: bool = False,
@@ -826,6 +845,7 @@ class SupervisorRuntime:
                 return existing.view.prepare() if existing.view else workspace
             view = None
             agent_workspace = workspace
+            baseline_kernel_commit_id = None
             if supervisor_git:
                 from aka.light.evaluation.hardware import hardware_vendor
                 from aka.light.workspace.history import EpisodeHistory
@@ -849,6 +869,30 @@ class SupervisorRuntime:
                                         workspace_policy=self.config.workspace_policy,
                                         persistent_root=persistent_root)
                 agent_workspace = view.prepare()
+                from aka.light.workspace.sources import from_git
+                incumbent_source = from_git(workspace, base_commit)
+                baseline_ref = f"refs/atrex/baselines/e{episode:08d}"
+                baseline_kernel_commit_id = view.agent_git.install_runtime_ref(
+                    baseline_ref,
+                    incumbent_source,
+                    message=(
+                        f"Runtime: Episode {episode} incumbent from controller "
+                        f"{base_commit}"
+                    ),
+                )
+                # The moving convenience tag and the immutable per-Episode ref
+                # both point at the same source-only Agent commit. Do not try to
+                # reuse the private controller SHA: it belongs to another Git
+                # history even when the Kernel bytes are identical.
+                view.agent_git.install_runtime_ref(
+                    "refs/tags/atrex/incumbent",
+                    incumbent_source,
+                    message=f"Runtime: Episode {episode} incumbent",
+                    commit_id=baseline_kernel_commit_id,
+                )
+                self.measurements.kernel(
+                    incumbent_source, baseline_kernel_commit_id
+                )
                 trajectory = (
                     origin.get("trajectory", 1) if isinstance(origin, Mapping) else 1
                 )
@@ -867,7 +911,6 @@ class SupervisorRuntime:
                     else None
                 )
                 for ref, kernel_id, label in (
-                    ("refs/tags/atrex/incumbent", incumbent_id, "official incumbent"),
                     ("refs/tags/atrex/global-best", incumbent_id, "global best"),
                     ("refs/tags/atrex/lineage-best", lineage_id, "lineage best"),
                 ):
@@ -893,7 +936,8 @@ class SupervisorRuntime:
                 research_root=(self.audit_root or self.root) / "research",
                 origin=origin,
                 claim_reviewer=getattr(self, "research_claim_reviewer", None),
-            ), view=view, require_gluon=require_gluon)
+            ), view=view, require_gluon=require_gluon,
+                baseline_kernel_commit_id=baseline_kernel_commit_id)
             # Rebuild normal-file research projections at every Episode bind,
             # including recovery and Epoch-shared history import.
             binding.service.publish_research_files()

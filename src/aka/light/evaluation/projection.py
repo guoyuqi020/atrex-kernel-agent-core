@@ -136,7 +136,26 @@ def gateway_error_result(value: dict[str, Any]) -> dict[str, Any]:
     ) if key in value and (value[key] is None or type(value[key]) in {str, int})}
     result["error"] = bounded_error(value["error"])
     error = value["error"]
-    if value.get("outcome") == "unknown":
+    if (
+        isinstance(error, dict)
+        and error.get("reason") == "gateway_collection_timeout"
+    ):
+        timeout_s = error.get("timeout_s")
+        duration = (
+            f" after waiting {timeout_s:g} seconds"
+            if isinstance(timeout_s, (int, float))
+            and not isinstance(timeout_s, bool)
+            and math.isfinite(timeout_s)
+            and timeout_s > 0
+            else ""
+        )
+        result["next_action"] = (
+            f"Runtime timed out while collecting the Agate response{duration}; this is not a "
+            "Kernel correctness or performance verdict. The current Runtime call has ended. "
+            "If the result is still needed, retry the same Runtime operation later; Runtime "
+            "retains the private accepted-job checkpoint and will not blindly submit a duplicate."
+        )
+    elif value.get("outcome") == "unknown":
         from aka.light.runtime.request_errors import UNKNOWN_OUTCOME
         result["next_action"] = UNKNOWN_OUTCOME
     elif (
@@ -159,6 +178,16 @@ def gateway_error_result(value: dict[str, Any]) -> dict[str, Any]:
             "smaller bounded requests, then measure the changed request. Do not resubmit the "
             "unchanged slow command. Use Evaluate or ABBA for complete Kernel measurements "
             "instead of reproducing a full benchmark inside Dev."
+        )
+    elif (
+        isinstance(error, dict)
+        and error.get("reason") == "agate_clock_configuration_invalid"
+    ):
+        result["next_action"] = (
+            "Agate worker clock management is misconfigured; this is not a Kernel verdict. "
+            "Ask the operator to provide a positive graphics clock for manage mode or change "
+            "the worker to external/off clock management. Do not change the Kernel, invent a "
+            "clock frequency, or repeatedly resubmit the unchanged request."
         )
     elif isinstance(error, dict) and error.get("error_class") == "infra":
         result["next_action"] = (

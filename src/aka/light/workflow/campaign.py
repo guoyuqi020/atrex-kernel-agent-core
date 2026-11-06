@@ -165,8 +165,7 @@ class ManagedCampaign(Campaign):
             self._link_runtime()
             from aka.light.workspace.state import v0_baseline_commit
             result = self._run_v0_evaluator_with_correctness_prefetch()
-            self._finalize_v0_measurement(result, v0_baseline_commit(self.workspace),
-                                         extra_paths=("CLAUDE.md", ".gitignore"))
+            self._finalize_v0_measurement(result, v0_baseline_commit(self.workspace))
             return
         self.candidate_workspace.initialize_at(self.workspace, content)
         self.candidate_workspace.install_files(self.workspace, self.problem.agent.files)

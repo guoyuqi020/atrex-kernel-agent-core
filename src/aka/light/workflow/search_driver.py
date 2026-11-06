@@ -20,6 +20,7 @@ from aka.light.workflow.episode import LongHorizonCampaign
 from aka.light.workspace.git import git_blob, git_head
 from aka.legacy.task.persistence import durable_write_json, durable_replace
 from aka.light.workspace.versions import version_record_path
+from aka.light.workspace.baseline import read_baseline_record, write_baseline_record
 from .search import latency, read_state
 from .search_git import commit_files, git
 from aka.light.workspace.sources import from_git, unpack, snapshot as source_snapshot
@@ -477,6 +478,9 @@ class EpisodeSearchDriver:
             )
 
     def initialize(self, bootstrap, trajectories):
+        baseline = read_baseline_record(self.campaign.workspace)
+        if not isinstance(baseline, dict):
+            raise RuntimeError("Pooled search requires private V0 baseline evidence")
         for number in range(1, trajectories + 1):
             workspace = self.root / "trajectories" / f"t{number:04d}"
             marker = workspace / ".git/atrex-search-origin.json"
@@ -506,6 +510,10 @@ class EpisodeSearchDriver:
             child.tokens_spent = 0
             child.search_coordinate = None
             child.search_cancel = self.cancel_event
+            # Trajectory repositories contain source/version Git history only.
+            # Copy V0 evaluator facts into each trajectory's private Supervisor
+            # scope so scoring and validation never depend on a tracked V0 file.
+            write_baseline_record(workspace, baseline)
             self.children[number] = child
 
     def _publish(self, workspace, epoch, kernel, label):

@@ -362,8 +362,9 @@ metadata, not candidate files. Production runs use a separate
 `kernel_opt_<name>_<framework>_<platform>_production` workspace and cannot accidentally resume a
 leaderboard campaign.
 
-The default `--framework-baseline=never` starts optimization directly from the measured V0. Use
-`--framework-baseline=auto` or `always` to insert a dedicated framework bring-up Session after V0.
+The default `--framework-baseline=auto` inserts a dedicated framework bring-up Session after V0
+when the measured baseline is still a reference wrapper. Use `always` to force the stage or `never`
+to start optimization directly from V0.
 When enabled, optional isolated Codex/Qoder correctness reviewers may provide bounded advice from the
 public contract and immutable reference. The implementation Agent creates one complete `kernel.py +
 impl/` candidate and leaves a clean Git commit; it does not submit an Episode report. The Supervisor then
@@ -401,7 +402,7 @@ Rerunning the same command keeps the interrupted worktree and resumes V1 from th
                                                     Configure full ask-qoder (default: off)
 --optimization-mode MODE         leaderboard (default) or production
 --framework DSL                  Explicit DSL; omit for automatic parallel dispatch
---framework-baseline MODE        never (default), auto, or always
+--framework-baseline MODE        auto (default), always, or never
 --framework-baseline-timeout S   Framework bring-up wall-clock budget (default: 28800)
 --target-util PCT                Peak-utilization short-circuit (default: 90)
 --setup-timeout S                Legacy V0/problem-authoring session timeout (default: 7200)

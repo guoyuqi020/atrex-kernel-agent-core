@@ -941,6 +941,8 @@ def _git_visible_record_ids(
     for record_id in store.record_ids():
         try:
             record = store.read(record_id)
+            if record.get("request", {}).get("visibility") == "supervisor_private_v0":
+                continue
             kernels = record.get("kernels")
             if not isinstance(kernels, Mapping) or not kernels:
                 continue
@@ -1548,6 +1550,8 @@ def _progress_markdown(
     measured_best = measured_best if isinstance(measured_best, Mapping) else {}
     latest = board.get("latest_result")
     latest = latest if isinstance(latest, Mapping) else {}
+    baseline = board.get("v0_baseline")
+    baseline = baseline if isinstance(baseline, Mapping) else {}
     current_lineage = board.get("current_lineage")
     current_lineage = current_lineage if isinstance(current_lineage, str) else "T1"
     lineages = board.get("lineages")
@@ -1635,6 +1639,21 @@ def _progress_markdown(
     )
     best_commit = measured_best.get("kernel_commit_id")
     incumbent_commit = incumbent.get("kernel_commit_id")
+    baseline_latency = baseline.get("latency_us_geomean")
+    baseline_latency_text = (
+        f"{baseline_latency:g} us"
+        if type(baseline_latency) in {int, float}
+        and math.isfinite(float(baseline_latency))
+        else "not measured"
+    )
+    baseline_line = (
+        f"- **V0 baseline source commit ID:** {commit(baseline.get('kernel_commit_id'))}; "
+        f"GeoMean: **{baseline_latency_text}**; correctness: "
+        f"`{text(baseline.get('correctness_status'), empty='unknown')}`; measured Shapes: "
+        f"{text(baseline.get('measured_shape_count'), empty='unknown')}; private Gateway Record: "
+        f"{commit(baseline.get('gateway_record_id'))}."
+        if baseline else "- **V0 baseline:** private evidence is unavailable."
+    )
     best_line = (
         f"- **Best verified Kernel commit ID:** {commit(best_commit)}; "
         f"GeoMean: **{best_latency_text}**; evidence: "
@@ -1742,6 +1761,7 @@ def _progress_markdown(
         "",
         best_line,
         *([incumbent_line] if incumbent_line is not None else []),
+        baseline_line,
         f"- **Current lineage:** `{current_lineage}`.",
         f"- **Last measured working Kernel commit ID:** {commit(current.get('working_kernel_commit_id'))}.",
         f"- **Best verified lineage Kernel commit ID:** {commit(current.get('lineage_best_kernel_commit_id'))}.",
@@ -3337,6 +3357,23 @@ class SupervisorJournalService:
         board["latest_result"] = latest_gateway_result(
             store, record_ids=visible_record_ids
         )
+        from aka.light.workspace.baseline import (
+            ensure_baseline_gateway_record,
+            read_baseline_record,
+        )
+        ensure_baseline_gateway_record(self.workspace)
+        baseline = read_baseline_record(self.workspace) or {}
+        performance = baseline.get("performance")
+        performance = performance if isinstance(performance, Mapping) else {}
+        correctness = baseline.get("correctness")
+        correctness = correctness if isinstance(correctness, Mapping) else {}
+        board["v0_baseline"] = {
+            "kernel_commit_id": baseline.get("git_commit_hash"),
+            "latency_us_geomean": performance.get("latency_us_geomean"),
+            "measured_shape_count": performance.get("measured_shape_count"),
+            "correctness_status": correctness.get("status"),
+            "gateway_record_id": baseline.get("gateway_record_id"),
+        }
         board = _git_reachable_projection(board, commit_reachable)
         publish_if_changed(
             self.workspace,

@@ -58,11 +58,10 @@ fi
 
 # Step 3: Initialize the unified editable source tree
 cp "$KERNEL_DEMO" "$WORKSPACE/kernel.py"
-mkdir -p "$WORKSPACE/impl"
-touch "$WORKSPACE/impl/__init__.py"
 
 # Step 4: Create .gitignore
 cat > "$WORKSPACE/.gitignore" << 'EOF'
+# Runtime-managed Agent repository exclusions
 __pycache__/
 *.pyc
 *.ncu-rep
@@ -70,6 +69,22 @@ profiles/*/att/*.att
 profiles/*/att/*.out
 profiles/*/att/*.pftrace
 profiles/*/att/*.otf2
+/scratch
+/tools
+/skills
+/reference
+/reference-projects
+/references
+/gpu-wiki
+/.claude
+/.qoder
+/.agents
+/.orchestrator_mode.json
+/.orchestrator_state.json
+/.atrex_long_horizon/
+/verification_artifacts/.atrex_long_horizon_verify/
+/memory/live.json
+/atrex-bench
 EOF
 
 # Step 5: Deploy the orchestrator's Agent behavior constraints.

@@ -19,6 +19,9 @@ class WorkflowSettings:
     framework: str
     specify_dsl: bool = True
     expose_evaluator_shapes: bool = True
+    # Operator-supplied read-only engineering references.  The CLI derives each
+    # stable mount name from the directory basename and freezes absolute paths.
+    agent_reference_paths: tuple[tuple[str, str], ...] = ()
     notes: str = "none"
     arch: str = ""
     max_iters: int = 20
@@ -31,10 +34,9 @@ class WorkflowSettings:
     convert_after: int = 3
     agent_cli: str = "claude"
     optimization_mode: str = "leaderboard"
-    # Optimization Episodes start directly from the measured V0 by default.
-    # ``auto`` and ``always`` remain explicit compatibility modes for callers
-    # that still want the dedicated framework bring-up Session.
-    framework_baseline: str = "never"
+    # Translate a reference-wrapper V0 into the target framework before normal
+    # optimization Episodes. ``never`` remains an explicit opt-out.
+    framework_baseline: str = "auto"
     gateway_candidate_recovery: str = "disabled"
     framework_baseline_timeout: int = 28800
     handoff_resumes: int = 2
@@ -52,6 +54,28 @@ class WorkflowSettings:
             raise TypeError("specify_dsl must be a boolean")
         if type(self.expose_evaluator_shapes) is not bool:
             raise TypeError("expose_evaluator_shapes must be a boolean")
+        references = tuple(tuple(item) for item in self.agent_reference_paths)
+        names = []
+        for item in references:
+            if len(item) != 2 or not all(isinstance(value, str) for value in item):
+                raise TypeError("agent_reference_paths must contain (name, path) pairs")
+            name, raw_path = item
+            path = Path(raw_path).expanduser()
+            if (
+                not name
+                or name in {".", ".."}
+                or "/" in name
+                or "\\" in name
+                or not path.is_absolute()
+                or not path.is_dir()
+            ):
+                raise ValueError(
+                    "agent_reference_paths require unique safe names and existing absolute directories"
+                )
+            names.append(name)
+        if len(names) != len(set(names)):
+            raise ValueError("agent_reference_paths contain duplicate mount names")
+        object.__setattr__(self, "agent_reference_paths", references)
         for name in (
             "setup_timeout",
             "framework_baseline_timeout",

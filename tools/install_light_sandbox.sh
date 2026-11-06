@@ -13,6 +13,7 @@ IFS=$'\t' read -r required_agate_version required_atrex_bench_version < <(
   python3 - "${deployment_config}" <<'PY'
 import json
 import pathlib
+import re
 import sys
 
 path = pathlib.Path(sys.argv[1])
@@ -30,6 +31,23 @@ for key in ("agate_client", "atrex_bench_version"):
     if any(character.isspace() for character in value):
         raise SystemExit(f"deployment version contract requires a whitespace-free {key!r}")
     values.append(value)
+match = re.fullmatch(
+    r"(?P<release>\d+(?:\.\d+)+)(?P<suffix>(?:(?:a|b|rc)\d+|\.dev\d+|\.post\d+)?)"
+    r"(?:\+[0-9A-Za-z.-]+)?",
+    values[0],
+)
+if match is None:
+    raise SystemExit(
+        f"deployment version contract has invalid 'agate_client': {values[0]!r}"
+    )
+release = tuple(int(component) for component in match.group("release").split("."))
+release += (0,) * (3 - len(release))
+stable = not match.group("suffix") or match.group("suffix").startswith(".post")
+if release < (0, 14, 30) or (release == (0, 14, 30) and not stable):
+    raise SystemExit(
+        "deployment version contract requires agate_client>=0.14.30; "
+        f"configured {values[0]}"
+    )
 print("\t".join(values))
 PY
 )

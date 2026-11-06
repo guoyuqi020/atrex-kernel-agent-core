@@ -548,17 +548,12 @@ def _test_result_from_stdout(stdout: str) -> dict:
     raise RuntimeError("sandbox test output has no structured RESULT_JSON line")
 
 
-def _record_local_test_result(workspace: Path, version: str, result: dict, *, generate_memory: bool = False) -> Path:
-    """Persist evaluator facts; publish an Agent memory summary only on opt-in."""
-    from aka.light.workspace.versions import save_version_record, version_record_path
+def _local_test_record(workspace: Path, version: str, result: dict, *, existing: dict | None = None) -> dict:
+    """Build normalized evaluator facts without choosing their storage boundary."""
     if not re.fullmatch(r"v[0-9]+", version):
         raise ValueError("Invalid canonical version")
     number = int(version[1:])
-    path = version_record_path(workspace, number, prefer_summary=generate_memory)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except (OSError, json.JSONDecodeError):
-        data = {}
+    data = dict(existing or {})
     data.setdefault("version", version)
     data.setdefault("masked", False)
     data["timestamp"] = datetime.now(timezone.utc).isoformat()
@@ -589,7 +584,7 @@ def _record_local_test_result(workspace: Path, version: str, result: dict, *, ge
     perf["speedup_vs_ref_mean"] = result.get("speedup_vs_ref_mean")
     perf["speedup_vs_ref_geomean"] = (
         None
-        if performance_objective == "shape_speedup_arithmetic_mean"
+        if number == 0 or performance_objective == "shape_speedup_arithmetic_mean"
         else speedup_vs_reference(
             workspace,
             result.get("latency_us_geomean"),
@@ -605,6 +600,21 @@ def _record_local_test_result(workspace: Path, version: str, result: dict, *, ge
     gate["result"] = "PASS" if all_pass else "FAIL"
     failures = result.get("failures") or []
     gate["failure_reason"] = None if all_pass else "; ".join(map(str, failures))[:2000]
+    return data
+
+
+def _record_local_test_result(workspace: Path, version: str, result: dict, *, generate_memory: bool = False) -> Path:
+    """Persist non-V0 evaluator facts; V0 belongs to Supervisor-private state."""
+    from aka.light.workspace.versions import save_version_record, version_record_path
+    number = int(version[1:]) if re.fullmatch(r"v[0-9]+", version) else -1
+    if number == 0:
+        raise ValueError("V0 evaluator facts must use Supervisor-private baseline storage")
+    path = version_record_path(workspace, number, prefer_summary=generate_memory)
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        existing = {}
+    data = _local_test_record(workspace, version, result, existing=existing)
     return save_version_record(workspace, number, data, generate_memory=generate_memory)
 
 

@@ -9,13 +9,20 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 from typing import Mapping
 
-
 ATREX_BENCH_VERSION_ENV = "ATREX_SANDBOX_ATREX_BENCH_VERSION"
+MINIMUM_AGATE_VERSION = "0.14.30"
+_RELEASE_VERSION = re.compile(
+    r"^(?P<release>\d+(?:\.\d+)+)"
+    r"(?P<suffix>(?:(?:a|b|rc)\d+|\.dev\d+|\.post\d+)?)"
+    r"(?:\+[0-9A-Za-z.-]+)?$"
+)
+
 
 def check_projected_proc() -> None:
     """Verify the packaged shim and compiler without launching an Agent."""
@@ -45,6 +52,54 @@ def _agate_version(*, executable: str = "agate") -> str:
     return __version__.strip()
 
 
+def _minimum_version_key(value: str) -> tuple[tuple[int, ...], int]:
+    """Parse the stable release ordering needed by the minimum SDK gate."""
+    match = _RELEASE_VERSION.fullmatch(value)
+    if match is None:
+        raise RuntimeError(f"invalid Agate SDK version: {value!r}")
+    release = tuple(int(component) for component in match.group("release").split("."))
+    suffix = match.group("suffix")
+    if not suffix or suffix.startswith(".post"):
+        stage = 0
+    else:
+        stage = -1
+    return release, stage
+
+
+def _release_at_least(actual: str, minimum: str) -> bool:
+    actual_release, actual_stage = _minimum_version_key(actual)
+    minimum_release, minimum_stage = _minimum_version_key(minimum)
+    width = max(len(actual_release), len(minimum_release))
+    actual_release += (0,) * (width - len(actual_release))
+    minimum_release += (0,) * (width - len(minimum_release))
+    return (actual_release, actual_stage) >= (minimum_release, minimum_stage)
+
+
+def check_minimum_agate_version(
+    *,
+    actual_version: str | None = None,
+    minimum_version: str = MINIMUM_AGATE_VERSION,
+    agate_executable: str = "agate",
+) -> str:
+    """Return the installed SDK version after enforcing Light's minimum."""
+    actual_version = (
+        _agate_version(executable=agate_executable)
+        if actual_version is None
+        else actual_version.strip()
+    )
+    minimum_version = minimum_version.strip()
+    if not actual_version:
+        raise RuntimeError("Agate SDK reported no package version")
+    if not minimum_version:
+        raise ValueError("minimum Agate version must not be empty")
+    if not _release_at_least(actual_version, minimum_version):
+        raise RuntimeError(
+            "Agate SDK version is too old: "
+            f"requires >= {minimum_version}, found {actual_version}"
+        )
+    return actual_version
+
+
 def check_required_versions(
     required_agate_version: str,
     required_atrex_bench_version: str,
@@ -52,7 +107,7 @@ def check_required_versions(
     environment: Mapping[str, str] | None = None,
     agate_executable: str = "agate",
 ) -> dict[str, str]:
-    """Fail unless the local client and remote evaluator pin match exactly."""
+    """Enforce the SDK minimum and exact deployment/evaluator pins."""
     required_agate_version = required_agate_version.strip()
     required_atrex_bench_version = required_atrex_bench_version.strip()
     if not required_agate_version:
@@ -60,7 +115,10 @@ def check_required_versions(
     if not required_atrex_bench_version:
         raise ValueError("required Atrex-Bench version must not be empty")
 
-    actual_agate_version = _agate_version(executable=agate_executable)
+    check_minimum_agate_version(actual_version=required_agate_version)
+    actual_agate_version = check_minimum_agate_version(
+        agate_executable=agate_executable
+    )
     if actual_agate_version != required_agate_version:
         raise RuntimeError(
             "Agate version mismatch: "

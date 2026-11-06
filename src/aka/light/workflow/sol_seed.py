@@ -32,7 +32,7 @@ Produces (under `kernel_opt_<name>/`):
     profile_driver.py   # the immutable external profiling entry (copied from reference/)
     CLAUDE.md           # agent constraints (copied from reference/)
     README.md, .gitignore
-    memory/v0.json      # baseline metrics (written by test_kernel.py)  [unless --no-bench]
+    # V0 metrics are stored under the Supervisor-private runtime root.
 
 Usage:
     python reference/sol_seed.py --op-dir <sol-op-dir> --name <name> \
@@ -52,6 +52,7 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from aka.legacy.evaluation.resources import profile_driver_script
 
+from aka.light.workspace.agent_git import gitignore_contents
 from aka.light.workspace.resource_catalog import resource
 
 SCRIPT_DIR = resource("reference/CLAUDE.md").parent
@@ -150,23 +151,7 @@ def _readme(name: str, defn: dict, framework: str, platform: str, n_workloads: i
     )
 
 
-GITIGNORE = """__pycache__/
-*.pyc
-traces.jsonl
-.finalize_traces.jsonl
-submission.json
-*.ncu-rep
-profiles/*/att/*.att
-profiles/*/att/*.out
-profiles/*/att/*.pftrace
-profiles/*/att/*.otf2
-# orchestrator runtime symlinks (not part of the workspace)
-/tools
-/reference
-/skills
-/reference-projects
-/gpu-wiki
-"""
+GITIGNORE = gitignore_contents()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -176,9 +161,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workspace", default="", help="Explicit workspace path (default: ./kernel_opt_<name>).")
     ap.add_argument("--framework", default="pytorch", help="Target framework the loop should migrate to.")
     ap.add_argument("--platform", default="LOCAL", help="Target hardware token, e.g. B200 (default: LOCAL).")
-    ap.add_argument("--no-bench", action="store_true", help="Skip the V0 test_kernel.py bench (no memory/v0.json).")
+    ap.add_argument("--no-bench", action="store_true", help="Skip the V0 test_kernel.py bench.")
     ap.add_argument("--skip-bench-if-v0-exists", action="store_true",
-                    help="If memory/v0.json already exists (e.g. produced by a synthetic seed), "
+                    help="If private V0 evidence already exists (e.g. from recovery), "
                          "skip the V0 bench step entirely. Used to unblock the optimizer "
                          "for ops whose torch reference is too slow to bench within a reasonable budget.")
     args = ap.parse_args(argv)
@@ -261,16 +246,29 @@ def main(argv: list[str] | None = None) -> int:
     (ws / "README.md").write_text(_readme(args.name, defn, args.framework, args.platform, n_wl), encoding="utf-8")
     (ws / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
 
-    # 5) V0 baseline metrics (real evaluator)
-    pre_existing_v0 = (ws / "memory" / "v0.json").exists() and args.skip_bench_if_v0_exists
+    # 5) V0 baseline metrics (real evaluator). The candidate repository never
+    # receives the resulting measurement file.
+    from aka.light.workspace.baseline import read_baseline_record
+    pre_existing_v0 = read_baseline_record(ws) is not None and args.skip_bench_if_v0_exists
+    v0_result = None
     if pre_existing_v0:
-        print("[sol_seed] skipping V0 bench — memory/v0.json already provided "
-              "(synthetic seed); ground-truth files refreshed in-place.", file=sys.stderr)
+        print("[sol_seed] skipping V0 bench — private evidence already exists; "
+              "ground-truth files refreshed in-place.", file=sys.stderr)
     elif not args.no_bench:
-        r = subprocess.run([sys.executable, str(ws / "test_kernel.py"), "--version", "v0"], cwd=str(ws))
+        r = subprocess.run(
+            [sys.executable, str(ws / "test_kernel.py"), "--version", "v0", "--no-memory"],
+            cwd=str(ws), capture_output=True, text=True,
+        )
+        if r.stdout:
+            print(r.stdout, end="" if r.stdout.endswith("\n") else "\n")
+        if r.stderr:
+            print(r.stderr, end="" if r.stderr.endswith("\n") else "\n", file=sys.stderr)
         if r.returncode != 0:
             print("[sol_seed] WARNING: V0 baseline did not pass all workloads — check solution.json / reference.",
                   file=sys.stderr)
+        else:
+            from aka.light.workflow.session_io import _test_result_from_stdout
+            v0_result = _test_result_from_stdout(r.stdout)
 
     # 6) Git source commit. Keep memory out of this commit so its stable SHA can
     # be recorded without an impossible self-referential amend loop.
@@ -293,22 +291,16 @@ def main(argv: list[str] | None = None) -> int:
     subprocess.run(["git", "add", *source_paths], cwd=str(ws), check=True)
     subprocess.run(["git", "commit", "-m", "V0: baseline (SOL reference wrapper)"], cwd=str(ws), check=True,
                    stdout=subprocess.DEVNULL)
-    # 7) Record measurement metadata in a second commit. This deliberately leaves
-    # kernel.py untouched, so memory can point at the immutable source commit.
-    v0 = ws / "memory" / "v0.json"
-    if v0.exists():
+    # 7) Record measurement metadata privately. Git remains at the source commit.
+    if v0_result is not None:
         h = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(ws), capture_output=True, text=True).stdout.strip()
-        mem = json.loads(v0.read_text(encoding="utf-8"))
+        from aka.light.workflow.session_io import _local_test_record
+        from aka.light.workspace.baseline import write_baseline_record
+        from aka.light.workspace.versions import objective_score_report
+        mem = _local_test_record(ws, "v0", v0_result)
         mem["git_commit_hash"] = h
         mem.setdefault("optimization", {})["action_category"] = "baseline"
-        v0.write_text(json.dumps(mem, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        subprocess.run(["git", "add", "memory/v0.json"], cwd=str(ws), check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "V0: record baseline measurement"],
-            cwd=str(ws),
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
+        write_baseline_record(ws, objective_score_report(ws, 0, mem))
 
     print(f"[sol_seed] workspace ready: {ws}")
     return 0

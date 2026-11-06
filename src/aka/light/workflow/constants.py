@@ -72,8 +72,6 @@ IMMUTABLE_BASELINE_PATHS = (
     # The profiling entry lives outside kernel.py so no candidate rewrite can silently
     # remove the ability to profile; it is ground truth like the evaluator harness.
     "profile_driver.py",
-    "memory/v0.json",
-    ".atrex_versions/v0.json",
 )
 TEST_RESULT_PREFIX = "[test_kernel] RESULT_JSON="
 AGENT_CLI_CHOICES = _agent_runtime.SUPPORTED_RUNTIME_IDS

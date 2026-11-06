@@ -13,6 +13,18 @@ def supervisor_campaign_root(workspace: Path) -> Path:
     return workspace.parent / ".atrex-supervisor-runtime" / scope
 
 
+def supervisor_agent_control_root(workspace: Path) -> Path:
+    """Return Session-control storage outside the Agent's Kernel repository.
+
+    Hooks need a small writable rendezvous for active-time reminders and
+    output-limit recovery.  Keeping it below the Kernel workspace used to make
+    Supervisor state Agent-visible and dirty Git.  The control directory is
+    mounted explicitly for managed bwrap Sessions; it is never candidate
+    source or projected research evidence.
+    """
+    return supervisor_campaign_root(workspace) / "agent-control"
+
+
 def legacy_resource_root() -> Path:
     """Return the profile-selected public checkout used by legacy resource adapters.
 

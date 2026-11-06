@@ -269,6 +269,38 @@ def annotate_deadline_timeout(
     )
 
 
+def gateway_collection_timeout(
+    process: subprocess.CompletedProcess,
+    timeout_s: float,
+) -> subprocess.CompletedProcess:
+    """Return an Agent-safe timeout while retaining the accepted Job privately.
+
+    The physical Job ID remains only in the durable ``accepted`` checkpoint.
+    A later identical Runtime request can probe that checkpoint, but the current
+    request ends immediately and does not expose the ID or manufacture an
+    ``unknown`` Kernel verdict.
+    """
+    duration = max(0.0, float(timeout_s))
+    error = {
+        "error_class": "timeout",
+        "reason": "gateway_collection_timeout",
+        "message": "Runtime timed out while waiting for the Agate response.",
+    }
+    if math.isfinite(duration) and duration > 0:
+        error["timeout_s"] = duration
+    payload = {
+        "status": "timed_out",
+        "outcome": "timeout",
+        "error": error,
+    }
+    return subprocess.CompletedProcess(
+        process.args,
+        75,
+        json.dumps(payload),
+        "Runtime timed out while waiting for the Agate response.",
+    )
+
+
 def bundle_digest(data: bytes) -> str:
     """Ignore gzip/tar timestamps, but retain exact uploaded bytes and modes."""
     entries = {}
@@ -378,18 +410,16 @@ def execute_job(
     device_retry_delay: float | None = None,
     max_wait_retries: int = 1,
 ) -> subprocess.CompletedProcess:
-    """Persist each submission before polling and recover one exhausted wait.
+    """Persist each submission and return a bounded collection timeout.
 
     A fresh invocation starts by reading the durable accepted Job ID when one
     exists.  That old Job receives exactly one non-waiting recovery probe.  A
-    terminal result is returned directly; a missing, unreadable, queued or
-    running old Job causes one bounded fresh submission.  This deliberately
-    favors bounded recovery latency over remote GPU efficiency: the polling
-    abstraction has no authenticated ownership/cancellation handle, so it cannot
-    safely cancel the saved Job before replacing it, and one recovery may leave
-    that Job running concurrently.  Newly submitted Jobs still receive the
-    complete poll budget.  A prior CLI submission without a confirmed ID also
-    gets one bounded fresh submission on the later invocation.
+    terminal result is returned directly.  An unreadable, queued or running
+    accepted Job produces a structured collection timeout immediately after the
+    current bounded wait; its ID remains private so a later identical Runtime
+    request can probe the same Job.  A definitively missing Job may still use the
+    bounded fresh-submission recovery path.  A prior CLI submission without a
+    confirmed ID also gets one bounded fresh submission on the later invocation.
 
     Explicit infrastructure terminal failures are retried only while
     ``max_infra_retries`` allows another attempt.  When that value is ``None``,
@@ -504,6 +534,12 @@ def execute_job(
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            if state.get("phase") == "accepted":
+                data = state["process"]
+                accepted = subprocess.CompletedProcess(
+                    [], data["returncode"], data["stdout"], data["stderr"]
+                )
+                return gateway_collection_timeout(accepted, wait_budget)
             if retry_wait(previous_job_id=saved_job_id()):
                 continue
             raise EvidenceUnavailable(
@@ -570,10 +606,10 @@ def execute_job(
                         "saved request requires reconciliation"
                     ) from error
                 except EvidenceUnavailable:
-                    previous_job_id = job.get("job_id") if isinstance(job, dict) else None
-                    if retry_wait(previous_job_id=previous_job_id):
-                        continue
-                    raise
+                    # The accepted Job and its ID remain in the private
+                    # checkpoint.  Do not resubmit or turn collection failure
+                    # into an ``unknown`` Kernel verdict.
+                    return gateway_collection_timeout(process, wait_budget)
                 job = job_from_process(process)
                 if not job or job.get("status") not in {"succeeded", "failed", "cancelled", "canceled"}:
                     poll_rejection = submission_rejection(process)
@@ -581,15 +617,10 @@ def execute_job(
                         missing_job_id = saved_job_id()
                         if isinstance(missing_job_id, str) and retry_wait(previous_job_id=missing_job_id):
                             continue
-                    previous_job_id = (
-                        job.get("job_id") if isinstance(job, dict)
-                        else saved_job_id()
-                    )
-                    if retry_wait(previous_job_id=previous_job_id):
-                        continue
-                    # Keep the accepted ID so a later request polls that same
-                    # Job before resubmitting the Agate task.
-                    return process
+                    # Keep the accepted ID privately so a later identical
+                    # request can probe the same Job.  Agent-visible output is
+                    # a timeout and intentionally contains no physical Job ID.
+                    return gateway_collection_timeout(process, wait_budget)
                 state = save("terminal", process)
             kind = retry_classifier(job)
             diagnostic = (embedded_device_failure(job)

@@ -269,17 +269,6 @@ def install_workspace_policy(
         current = current.rstrip() + ("\n\n" if current.strip() else "") + generated
     claude_path.write_text(current, encoding="utf-8")
 
-    gitignore = workspace / ".gitignore"
-    ignored = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    entry = f"/{MODE_STATE_FILE}"
-    if entry not in ignored.splitlines():
-        with gitignore.open("a", encoding="utf-8") as handle:
-            if ignored and not ignored.endswith("\n"):
-                handle.write("\n")
-            handle.write("\n# orchestrator optimization-mode identity (local policy state)\n")
-            handle.write(entry + "\n")
-
-
 def production_structure_violations(
     workspace: Path,
     framework: str,

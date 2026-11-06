@@ -52,6 +52,10 @@ from aka.light.evaluation.evaluation_failures import (
     embedded_candidate_wall_clock_timeouts,
 )
 from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES
+from aka.light.evaluation.native_abba import (
+    _clock_configuration_error,
+    _clock_configuration_process,
+)
 from aka.light.evaluation.public_result import canonical_result
 from aka.light.evaluation.projection import (
     gateway_error_from_process,
@@ -72,6 +76,7 @@ from aka.light.execution.gateway_jobs import (
     execute_job,
     retry_kind,
 )
+from aka.light.experiment.store import JOB_ROOT_ENV, EvidenceUnavailable
 from aka.light.runtime.server import (
     RuntimeConfig,
     SupervisorRuntime,
@@ -107,6 +112,48 @@ from aka.legacy.workflow.cli_conversion import adapt_argv
 
 
 class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
+    def test_native_abba_preserves_agate_managed_clock_configuration_error(self):
+        raw = {
+            "job_id": "ev_private",
+            "status": "failed",
+            "error": {
+                "error_class": "infra",
+                "reason": "execution_failed",
+                "details": {
+                    "cause_class": "AtrexConfigError",
+                    "message": (
+                        "manage mode requires a positive integer graphics_mhz value"
+                    ),
+                },
+            },
+        }
+        process = _clock_configuration_process(
+            raw, subprocess.CompletedProcess([], 1, json.dumps(raw), "private stderr")
+        )
+
+        self.assertIsNotNone(process)
+        self.assertEqual(process.returncode, 75)
+        projected = gateway_error_from_process(process, "same_allocation_abba")
+        self.assertNotIn("job_id", projected)
+        self.assertEqual(
+            projected["error"],
+            {
+                "error_class": "infra",
+                "reason": "agate_clock_configuration_invalid",
+                "message": "manage mode requires a positive integer graphics_mhz value",
+            },
+        )
+        self.assertIn("not a Kernel verdict", projected["next_action"])
+        self.assertIn("Do not change the Kernel", projected["next_action"])
+
+    def test_native_abba_clock_error_does_not_scan_candidate_output(self):
+        self.assertIsNone(_clock_configuration_error({
+            "result": {
+                "stdout": "manage mode requires a positive integer graphics_mhz value",
+                "source": "# manage mode requires a positive integer graphics_mhz value",
+            }
+        }))
+
     def test_unknown_agate_error_envelope_is_not_reclassified(self):
         envelope = {
             "operation": "check",
@@ -751,7 +798,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         settings = WorkflowSettings(platform="L20D", framework="Cuda")
         self.assertTrue(settings.specify_dsl)
         self.assertTrue(settings.expose_evaluator_shapes)
-        self.assertEqual(settings.framework_baseline, "never")
+        self.assertEqual(settings.framework_baseline, "auto")
         with self.assertRaises(TypeError):
             WorkflowSettings(platform="L20D", framework="Cuda", specify_dsl=1)
         self.assertFalse(WorkflowSettings(
@@ -777,7 +824,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         )
         self.assertFalse(launch.request.settings.specify_dsl)
         self.assertEqual(launch.request.settings.framework, "")
-        self.assertEqual(launch.request.settings.framework_baseline, "never")
+        self.assertEqual(launch.request.settings.framework_baseline, "auto")
         self.assertTrue(launch.request.settings.expose_evaluator_shapes)
         self.assertIn("specify_dsl", launch.provided_settings)
 
@@ -797,15 +844,57 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertFalse(launch.request.settings.expose_evaluator_shapes)
         self.assertIn("expose_evaluator_shapes", launch.provided_settings)
 
-    def test_campaign_skips_framework_baseline_by_default(self):
+    def test_cli_mounts_one_or_many_reference_directories_by_basename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nvidia = root / "nvidia"
+            cuda_guides = root / "cuda-guides"
+            nvidia.mkdir()
+            cuda_guides.mkdir()
+
+            launch = decode_launch(
+                adapt_argv(
+                    [
+                        "--op-dir",
+                        str(Path.cwd()),
+                        "--platform",
+                        "L20D",
+                        "--framework",
+                        "Cuda",
+                        "--agent-reference-dir",
+                        str(nvidia),
+                        str(cuda_guides),
+                    ]
+                )
+            )
+
+            self.assertEqual(
+                launch.request.settings.agent_reference_paths,
+                (
+                    ("nvidia", str(nvidia.resolve())),
+                    ("cuda-guides", str(cuda_guides.resolve())),
+                ),
+            )
+            self.assertIn("agent_reference_paths", launch.provided_settings)
+
+    def test_reference_directories_require_bwrap_at_campaign_boundary(self):
+        with self.assertRaisesRegex(ValueError, "requires.*sandbox=bwrap"):
+            Campaign(
+                name="operator",
+                kernel_demo="reference.py",
+                platform="L20D",
+                framework="Cuda",
+                agent_reference_paths=(("nvidia", "/knowledge/nvidia"),),
+            )
+
+    def test_campaign_uses_framework_baseline_auto_policy_by_default(self):
         campaign = Campaign(
             name="operator",
             kernel_demo="reference.py",
             platform="cuda",
             framework="cuda",
         )
-        self.assertEqual(campaign.framework_baseline, "never")
-        self.assertEqual(campaign._framework_baseline_decision(), ("skip", ""))
+        self.assertEqual(campaign.framework_baseline, "auto")
 
     def test_open_dsl_policy_is_neutral_and_disables_conversion(self):
         directive = optimization_mode_directive(
@@ -902,6 +991,28 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             self.assertNotIn("- DSL: `Cuda`", prompt)
             self.assertNotIn("yourself in `Cuda`", prompt)
             self.assertNotIn("{{", prompt)
+
+    def test_named_reference_knowledge_is_explained_without_becoming_evidence(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            campaign = Campaign(
+                name="op",
+                kernel_demo=str(Path(directory) / "reference.py"),
+                platform="L20D",
+                framework="Cuda",
+                work_dir=directory,
+                agent_sandbox="bwrap",
+                agent_reference_paths=(("nvidia", "/knowledge/nvidia"),),
+            )
+            campaign.tool_runtime = SimpleNamespace(
+                wiki=False,
+                pause_agent_during_requests=True,
+            )
+            campaign.plugin_directive = lambda _phase: ""
+            campaign._framework_baseline_correctness_guidance_text = lambda: ""
+            prompt = campaign._framework_baseline_prompt(1)
+        self.assertIn("`references/nvidia/`", prompt)
+        self.assertIn("read-only engineering references", prompt)
+        self.assertIn("not the task contract, measurement evidence, or candidate source", prompt)
 
     def test_disabled_framework_correctness_review_has_no_prompt_section(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -1396,6 +1507,95 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             [{"instruction": projected["next_action"]}],
         )
 
+    def test_collection_timeout_returns_immediately_without_job_id_or_resubmission(self):
+        submitted = []
+        polled = []
+
+        def submit():
+            submitted.append("submit")
+            return subprocess.CompletedProcess(
+                [], 0, json.dumps({"job_id": "ev_private", "status": "queued"}), ""
+            )
+
+        def poll(process, _remaining, *, recovery_probe=False):
+            polled.append(recovery_probe)
+            return subprocess.CompletedProcess(
+                [], 0, json.dumps({"job_id": "ev_private", "status": "running"}), ""
+            )
+
+        process = execute_job(
+            {"request": "collection-timeout"},
+            submit,
+            poll,
+            wait_budget=37,
+        )
+
+        self.assertEqual(submitted, ["submit"])
+        self.assertEqual(polled, [False])
+        self.assertEqual(process.returncode, 75)
+        payload = json.loads(process.stdout)
+        self.assertEqual(payload["status"], "timed_out")
+        self.assertEqual(payload["outcome"], "timeout")
+        self.assertEqual(payload["error"]["reason"], "gateway_collection_timeout")
+        self.assertEqual(payload["error"]["timeout_s"], 37)
+        self.assertNotIn("job_id", payload)
+        self.assertNotIn("ev_private", process.stderr)
+
+        projected = gateway_error_from_process(process, "check")
+        self.assertNotIn("job_id", projected)
+        self.assertIn("not a Kernel correctness or performance verdict", projected["next_action"])
+        self.assertIn("current Runtime call has ended", projected["next_action"])
+
+    def test_collection_transport_timeout_keeps_private_checkpoint_for_later_probe(self):
+        submitted = []
+        polls = []
+
+        def submit():
+            submitted.append("submit")
+            return subprocess.CompletedProcess(
+                [], 0, json.dumps({"job_id": "ev_private", "status": "queued"}), ""
+            )
+
+        def first_poll(_process, _remaining, *, recovery_probe=False):
+            polls.append(("first", recovery_probe))
+            raise EvidenceUnavailable("Gateway collection transport unavailable")
+
+        def resumed_poll(_process, _remaining, *, recovery_probe=False):
+            polls.append(("resumed", recovery_probe))
+            return subprocess.CompletedProcess(
+                [], 0, json.dumps({
+                    "job_id": "ev_private",
+                    "status": "succeeded",
+                    "result": {"ok": True},
+                }), ""
+            )
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {JOB_ROOT_ENV: str(Path(directory).resolve())}
+        ):
+            timed_out = execute_job(
+                {"request": "recover-private-job"},
+                submit,
+                first_poll,
+                wait_budget=37,
+            )
+            recovered = execute_job(
+                {"request": "recover-private-job"},
+                submit,
+                resumed_poll,
+                wait_budget=37,
+            )
+
+            state_path = next(Path(directory).glob("jobs/*/state.json"))
+            state = json.loads(state_path.read_text())
+
+        self.assertEqual(json.loads(timed_out.stdout)["error"]["reason"], "gateway_collection_timeout")
+        self.assertNotIn("job_id", json.loads(timed_out.stdout))
+        self.assertEqual(submitted, ["submit"])
+        self.assertEqual(polls, [("first", False), ("resumed", True)])
+        self.assertEqual(json.loads(recovered.stdout)["status"], "succeeded")
+        self.assertEqual(state["phase"], "terminal")
+
     def test_only_terminal_eval_selects_unbounded_deadline_retries(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop(TERMINAL_VALIDATION_ENV, None)
@@ -1693,7 +1893,12 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
     def test_managed_env_uses_campaign_hardware_only(self):
         parser = build_parser()
         schema = gateway_schema("env", parser)
-        self.assertEqual(schema["cli_options"], {"--kind": {"const": "env"}})
+        self.assertEqual(
+            set(schema["cli_options"]),
+            {"--kind", "--env-force", "--force", "--frameworks", "--counters", "--limits"},
+        )
+        self.assertNotIn("--env-gpu", schema["cli_options"])
+        self.assertNotIn("--env-capabilities", schema["cli_options"])
         parsed = parse_gateway(["--kind", "env"])
         argv = managed_gateway_argv(["--kind", "env"], parsed, "L20D")
         self.assertEqual(
@@ -1715,7 +1920,10 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIsNotNone(response)
         payload = json.loads(response["stdout"])
         schema = payload["managed_runtime_request_schema"]
-        self.assertEqual(schema["cli_options"], {"--kind": {"const": "env"}})
+        self.assertEqual(
+            set(schema["cli_options"]),
+            {"--kind", "--env-force", "--force", "--frameworks", "--counters", "--limits"},
+        )
         self.assertNotIn("--hardware", response["stdout"])
         self.assertNotIn("--env-gpu", response["stdout"])
         self.assertIsNone(managed_gateway_help(["--kind", "env"]))
@@ -1924,7 +2132,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             contract = framework_baseline_workspace_contract(workspace).decode()
 
         self.assertIn("# Framework Baseline workspace contract", contract)
-        self.assertIn("Editable kernel.py and impl/ form one Kernel", contract)
+        self.assertIn("Editable kernel.py and optional impl/ form one Kernel", contract)
         self.assertIn("References there to Runtime measurement or reporting", contract)
         self.assertIn("Do not create Git commits, submit episode-report", contract)
         self.assertNotIn("trajectory-private local Git repository", contract)
@@ -2187,7 +2395,11 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertEqual(candidate["runner_overrides"]["perf_timeout_s"], 300)
 
     def test_v0_baseline_uses_terminal_infrastructure_recovery(self):
-        result = {"all_pass": True, "latency_us_geomean": 1.0}
+        result = {
+            "all_pass": True,
+            "latency_us_geomean": 1.0,
+            "latency_us_by_shape": {"0": 1.0},
+        }
         completed = subprocess.CompletedProcess(
             ["python", "test_kernel.py"],
             0,
@@ -2208,12 +2420,16 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                     return_value=completed,
                 ) as sandbox,
                 patch.object(Campaign, "_print_v0_evaluator_output"),
-                patch(
-                    "aka.light.workflow.bootstrap._record_local_test_result",
-                    return_value=Path(directory) / "v0.json",
-                ),
             ):
                 measured = campaign._run_v0_evaluator()
+
+            from aka.light.workspace.baseline import baseline_record_path
+            private_record = json.loads(
+                baseline_record_path(campaign.workspace).read_text(encoding="utf-8")
+            )
+            self.assertEqual(private_record["version"], "v0")
+            self.assertFalse((campaign.workspace / "memory/v0.json").exists())
+            self.assertFalse((campaign.workspace / ".atrex_versions/v0.json").exists())
 
         self.assertEqual(measured, result)
         self.assertIs(sandbox.call_args.kwargs["terminal_validation"], True)
@@ -2237,28 +2453,183 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 framework="cuda",
                 work_dir=directory,
             )
-            versions = campaign.workspace / ".atrex_versions"
-            versions.mkdir(parents=True, exist_ok=True)
-            measurement = versions / "v0.json"
-            measurement.write_text("{}", encoding="utf-8")
             with (
                 patch(
                     "aka.light.workflow.bootstrap._sandbox_command",
                     return_value=completed,
                 ) as sandbox,
                 patch.object(Campaign, "_print_v0_evaluator_output"),
-                patch(
-                    "aka.light.workflow.bootstrap._record_local_test_result",
-                    return_value=measurement,
-                ),
             ):
                 with self.assertRaisesRegex(RuntimeError, "V0 baseline failed"):
                     campaign._run_v0_evaluator()
 
-            self.assertTrue((versions / "v0.failed.json").exists())
+            from aka.light.workspace.baseline import baseline_failure_path
+            failure = json.loads(
+                baseline_failure_path(campaign.workspace).read_text(encoding="utf-8")
+            )
+            self.assertEqual(failure["quality_gate"]["result"], "FAIL")
+            self.assertFalse((campaign.workspace / ".atrex_versions/v0.failed.json").exists())
 
         sandbox.assert_called_once()
         self.assertIs(sandbox.call_args.kwargs["terminal_validation"], True)
+
+    def test_legacy_v0_record_migrates_to_private_supervisor_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            legacy = workspace / ".atrex_versions" / "v0.json"
+            legacy.parent.mkdir(parents=True)
+            record = {
+                "version": "v0",
+                "performance": {"latency_us_geomean": 2.0},
+                "correctness": {"status": "PASS"},
+            }
+            legacy.write_text(json.dumps(record), encoding="utf-8")
+
+            from aka.light.workspace.baseline import baseline_record_path
+            from aka.light.workspace.state import latest_version, read_memory
+
+            self.assertEqual(read_memory(workspace, 0), record)
+            self.assertEqual(latest_version(workspace), 0)
+            self.assertEqual(
+                json.loads(baseline_record_path(workspace).read_text(encoding="utf-8")),
+                record,
+            )
+
+    def test_v0_progress_exposes_gateway_record_but_keeps_backend_jobs_private(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            workspace.mkdir()
+            (workspace / "kernel.py").write_text(
+                "class Model:\n    pass\n", encoding="utf-8"
+            )
+            subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+            subprocess.run(
+                ["git", "config", "user.name", "test"], cwd=workspace, check=True
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.com"],
+                cwd=workspace,
+                check=True,
+            )
+            subprocess.run(["git", "add", "kernel.py"], cwd=workspace, check=True)
+            subprocess.run(
+                ["git", "commit", "-qm", "V0"], cwd=workspace, check=True
+            )
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=workspace,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            from aka.light.experiment.store import MeasurementStore
+            from aka.light.runtime.paths import supervisor_campaign_root
+            from aka.light.workflow.journal_service import (
+                _git_visible_record_ids,
+                _progress_markdown,
+            )
+            from aka.light.workspace.baseline import (
+                ensure_baseline_gateway_record,
+                read_baseline_record,
+                write_baseline_record,
+            )
+
+            write_baseline_record(
+                workspace,
+                {
+                    "version": "v0",
+                    "git_commit_hash": commit,
+                    "backend_job_ids": ["ev_part_a", "ev_part_b"],
+                    "performance": {
+                        "latency_us_geomean": 5.86,
+                        "latency_us_arith_mean": 6.0,
+                        "latency_us_by_shape": {"0": 5.86},
+                        "measured_shape_count": 1,
+                        "performance_objective": "latency_us_geomean",
+                    },
+                    "correctness": {
+                        "status": "PASS",
+                        "max_abs_err": 0.0,
+                        "max_rel_err": 0.0,
+                    },
+                    "quality_gate": {"result": "PASS"},
+                },
+            )
+            gateway_record_id = ensure_baseline_gateway_record(workspace)
+
+            self.assertIsNotNone(gateway_record_id)
+            self.assertTrue(gateway_record_id.startswith("gateway-"))
+            private = read_baseline_record(workspace)
+            self.assertEqual(private["gateway_record_id"], gateway_record_id)
+            self.assertEqual(private["backend_job_ids"], ["ev_part_a", "ev_part_b"])
+            store = MeasurementStore(
+                supervisor_campaign_root(workspace) / "measurements"
+            )
+            saved = store.read(gateway_record_id)
+            self.assertEqual(
+                saved["request"]["visibility"], "supervisor_private_v0"
+            )
+            self.assertIn("ev_part_a,ev_part_b", saved["response"]["stderr"])
+            self.assertNotIn(
+                gateway_record_id, _git_visible_record_ids(store, workspace)
+            )
+
+            progress = _progress_markdown(
+                {
+                    "v0_baseline": {
+                        "kernel_commit_id": commit,
+                        "latency_us_geomean": 5.86,
+                        "measured_shape_count": 1,
+                        "correctness_status": "PASS",
+                        "gateway_record_id": gateway_record_id,
+                    }
+                }
+            ).decode()
+            self.assertIn(
+                f"private Gateway Record: `{gateway_record_id}`", progress
+            )
+            self.assertNotIn("ev_part_a", progress)
+            self.assertNotIn("ev_part_b", progress)
+
+    def test_v0_finalization_keeps_git_at_source_commit(self):
+        source_commit = "a" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = Campaign(
+                name="operator",
+                kernel_demo="reference.py",
+                platform="cuda",
+                framework="cuda",
+                work_dir=directory,
+            )
+            from aka.light.workspace.baseline import read_baseline_record, write_baseline_record
+            write_baseline_record(
+                campaign.workspace,
+                {
+                    "version": "v0",
+                    "performance": {
+                        "latency_us_geomean": 1.0,
+                        "latency_us_by_shape": {"0": 1.0},
+                        "measurement_status": "complete",
+                        "measured_shape_count": 1,
+                    },
+                    "correctness": {"status": "PASS"},
+                    "quality_gate": {"result": "PASS"},
+                },
+            )
+            with (
+                patch("aka.light.workflow.bootstrap.git_head", return_value=source_commit),
+                patch("aka.light.workspace.sources.from_git", return_value=b"source"),
+                patch("aka.light.workspace.sources.snapshot", return_value=b"source"),
+            ):
+                campaign._finalize_v0_measurement({}, source_commit)
+
+            self.assertEqual(
+                read_baseline_record(campaign.workspace)["git_commit_hash"],
+                source_commit,
+            )
+            self.assertFalse((campaign.workspace / "memory/v0.json").exists())
+            self.assertFalse((campaign.workspace / ".atrex_versions/v0.json").exists())
 
     def test_native_harness_has_no_light_owned_tolerance_switches(self):
         args = native_harness_parser().parse_args([])

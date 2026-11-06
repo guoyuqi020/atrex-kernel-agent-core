@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -76,11 +77,24 @@ def sandbox_executable(environment: dict[str, str]) -> str | None:
     if environment.get("ATREX_AGENT_PROC_MODE", "private") not in {"private", "projected"}:
         raise ValueError("ATREX_AGENT_PROC_MODE must be private or projected")
     mode = environment.get("ATREX_AGENT_SANDBOX", "none")
+    if mode not in {"none", "bwrap"}:
+        raise ValueError("ATREX_AGENT_SANDBOX must be none or bwrap")
+    claim_review = (
+        environment.get("ATREX_AGENT_WORKSPACE_ROLE")
+        == "research-claim-review"
+    )
+    if claim_review and mode != "bwrap":
+        raise RuntimeError(
+            "Research claim review requires Bubblewrap; native execution is not permitted"
+        )
     if mode == "none":
         return None
-    if mode != "bwrap":
-        raise ValueError("ATREX_AGENT_SANDBOX must be none or bwrap")
     if platform.system() != "Linux":
+        if claim_review:
+            raise RuntimeError(
+                "Research claim review requires Bubblewrap on a Linux coordinator; "
+                "native execution is not permitted"
+            )
         raise RuntimeError(
             "Agent Bubblewrap requires a Linux coordinator; use Lima/Linux, "
             "or set sandbox=none on the selected aka.light.agent.plugin module"
@@ -88,6 +102,12 @@ def sandbox_executable(environment: dict[str, str]) -> str | None:
     executable = environment.get("ATREX_BWRAP_EXECUTABLE", "bwrap")
     resolved = shutil.which(executable, path=environment.get("PATH"))
     if not resolved:
+        if claim_review:
+            raise RuntimeError(
+                f"Research claim review requires Bubblewrap, but the executable "
+                f"was not found: {executable}. Install bwrap or configure "
+                "bwrap_executable; native execution is not permitted"
+            )
         raise RuntimeError(
             f"Agent Bubblewrap executable not found: {executable}. "
             "Install bwrap or configure the Agent module's bwrap_executable; "
@@ -101,6 +121,41 @@ def read_only_grants(environment: dict[str, str]) -> tuple[Path, ...]:
     if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
         raise ValueError("ATREX_AGENT_READ_ONLY_PATHS must be a JSON array of paths")
     return tuple(Path(value).expanduser().resolve(strict=True) for value in raw)
+
+
+REFERENCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+def reference_grants(
+    environment: dict[str, str], workspace: Path
+) -> tuple[tuple[str, Path, Path], ...]:
+    """Resolve named knowledge roots to read-only workspace mountpoints."""
+    raw = json.loads(environment.get("ATREX_AGENT_REFERENCE_PATHS", "{}"))
+    if not isinstance(raw, dict) or any(
+        not isinstance(name, str)
+        or not REFERENCE_NAME.fullmatch(name)
+        or not isinstance(value, str)
+        for name, value in raw.items()
+    ):
+        raise ValueError("ATREX_AGENT_REFERENCE_PATHS must map safe names to paths")
+    root = workspace / "references"
+    if raw:
+        root.mkdir(exist_ok=True)
+        if root.is_symlink() or root.resolve(strict=True) != root:
+            raise ValueError("Agent references mountpoint must be a real workspace directory")
+    grants = []
+    for name, value in sorted(raw.items()):
+        source = Path(value).expanduser().resolve(strict=True)
+        if not source.is_dir():
+            raise ValueError(f"Agent reference must be a directory: {source}")
+        destination = root / name
+        destination.mkdir(exist_ok=True)
+        if destination.is_symlink() or destination.resolve(strict=True) != destination:
+            raise ValueError(f"Agent reference mountpoint must be a real directory: {destination}")
+        if any(destination.iterdir()):
+            raise ValueError(f"Agent reference mountpoint must be empty: {destination}")
+        grants.append((name, source, destination))
+    return tuple(grants)
 
 
 def _mount(argv: list[str], source: Path, destination: Path, *, writable=False) -> None:
@@ -203,10 +258,25 @@ def wrap_agent_command(
     private_paths = tuple(Path(value) for value in json.loads(
         environment.get("ATREX_EPISODE_PRIVATE_PATHS", "[]")
     )) if managed else ()
+    from aka.light.agent.claude_tools import CONTROL_ROOT_ENV
+    raw_control_root = environment.get(CONTROL_ROOT_ENV, "")
+    control_root = None
+    if raw_control_root:
+        control_root = Path(raw_control_root)
+        if not control_root.is_absolute():
+            raise ValueError("Agent control root must be absolute")
+        control_root = control_root.resolve(strict=True)
+        if not control_root.is_dir() or control_root.is_symlink():
+            raise ValueError("Agent control root must be a real directory")
+        private_paths = (*private_paths, control_root)
     host_home = Path(environment[HOST_HOME_ENV]).resolve()
     role = environment.get(WORKSPACE_ROLE_ENV, "optimizer")
     if role != "optimizer" and role not in WORKSPACE_LAYOUTS:
         raise ValueError(f"Unknown Agent workspace role: {role}")
+    # Operator-provided knowledge is available only to the optimization Agent.
+    # Independent reviewers receive their own bounded evidence view and must
+    # not be influenced by the optimizer's optional reference library.
+    references = reference_grants(environment, workspace) if role == "optimizer" else ()
     if role == "optimizer" and auxiliary_input_files:
         raise ValueError("Explicit auxiliary inputs require an auxiliary workspace role")
     view = (
@@ -251,6 +321,15 @@ def wrap_agent_command(
             argv.extend(("--proc", "/proc"))
         _mount(argv, view.root if view else workspace, workspace, writable=True)
         _mount(argv, home, home, writable=True)
+        if control_root is not None:
+            # Hooks receive only their narrow rendezvous directory, never the
+            # containing Supervisor campaign tree.
+            _mount(argv, control_root, control_root, writable=True)
+        legacy_control = workspace / ".atrex_long_horizon"
+        if environment.get("ATREX_AKA_RUNTIME_URL") and legacy_control.is_dir():
+            # Resumed workspaces can retain pre-migration controller files.
+            # Hide those files from the Agent without deleting audit state.
+            argv.extend(("--tmpfs", str(legacy_control)))
         # HTTP sessions carry their reviewed tool/Skill copies in the workspace.
         # Do not re-expose the repository's retired workflows or evaluator code.
         assets = PUBLIC_ASSETS if view is None and not environment.get("ATREX_AKA_RUNTIME_URL") else ()
@@ -348,7 +427,12 @@ def wrap_agent_command(
                 host_home=host_home, session_home_root=home.parent,
                 private_paths=private_paths,
             )
-        forbidden = (workspace, home.parent, REPOSITORY_ROOT / ".git", *private_paths)
+        forbidden = (
+            workspace,
+            home.parent,
+            REPOSITORY_ROOT / ".git",
+            *private_paths,
+        )
         installations = projected_backends(environment)
         if view is None and not environment.get("ATREX_AKA_RUNTIME_URL"):
             installations += ("agate",)
@@ -380,12 +464,21 @@ def wrap_agent_command(
             if path in {Path("/"), host_home, REPOSITORY_ROOT}:
                 raise ValueError(f"Read-only grant is too broad: {path}")
             _mount(argv, path, path)
+        for _, source, destination in references:
+            if any(
+                root.is_relative_to(source) or source.is_relative_to(root)
+                for root in (workspace, home.parent, *private_paths)
+            ):
+                raise ValueError(f"Agent reference overlaps Agent workspace/state: {source}")
+            if source in {Path("/"), host_home, REPOSITORY_ROOT}:
+                raise ValueError(f"Agent reference is too broad: {source}")
+            _mount(argv, source, destination)
         # Preserve the pre-PR CLI command and cwd; no prompt rewriting is needed.
         # Secrets are set by bwrap from an anonymous FD, never KEY=value argv.
         values = {
             key: value
             for key, value in environment.items()
-            if key not in {HOST_HOME_ENV, PREPARED_ENV, "PWD", "OLDPWD", "ATREX_EPISODE_PRIVATE_PATHS"}
+            if key not in {HOST_HOME_ENV, PREPARED_ENV, "PWD", "OLDPWD", "ATREX_EPISODE_PRIVATE_PATHS", "ATREX_AGENT_REFERENCE_PATHS"}
             and (
                 not key.startswith("GIT_")
                 or key

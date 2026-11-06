@@ -1,14 +1,15 @@
-"""Controller version facts, independent of optional Agent memory summaries.
+"""Controller v1+ facts, independent of optional Agent memory summaries.
 
 These Git-tracked facts retain atomic Kernel/version promotion and recovery when
-memory generation is disabled. They are never projected into Agent drafts or
-GPU bundles. Existing memory-only campaigns remain readable without migration.
+memory generation is disabled. V0 evaluator facts are Supervisor-private; they
+must not create a metadata-only source commit. Existing workspace records remain
+readable through the baseline migration adapter.
 """
 from pathlib import Path
-import json
 import math
 
 from aka.legacy.task.persistence import durable_write_json
+from aka.light.workspace.baseline import read_baseline_record
 
 STATE_DIRECTORY = ".atrex_versions"
 FACT_FIELDS = frozenset({
@@ -28,6 +29,8 @@ def version_record_path(workspace: Path, version: int, *, prefer_summary: bool =
 
 
 def save_version_record(workspace: Path, version: int, record: dict, *, generate_memory: bool = False) -> Path:
+    if version == 0:
+        raise ValueError("V0 facts belong to Supervisor-private baseline storage")
     if record.get("version") != f"v{version}":
         raise ValueError("Version record identity does not match")
     version_record_path(workspace, version)  # Validate before constructing paths.
@@ -56,8 +59,7 @@ def objective_score_report(workspace: Path, version: int, record: dict) -> dict:
     if version == 0:
         baseline = record
     else:
-        path = version_record_path(workspace, 0)
-        baseline = json.loads(path.read_text()) if path.is_file() else {}
+        baseline = read_baseline_record(workspace) or {}
     base = baseline.get("performance", {})
     values = (performance.get("performance_score"), base.get("performance_score"))
     complete = all(row.get("performance", {}).get("measurement_status") == "complete"
@@ -72,6 +74,8 @@ def objective_score_report(workspace: Path, version: int, record: dict) -> dict:
 
 
 def version_commit_paths(workspace: Path, version: int, *, generate_memory: bool) -> list[str]:
+    if version == 0:
+        raise ValueError("V0 facts are not committed to the candidate repository")
     paths = [str(version_record_path(workspace, version).relative_to(workspace))]
     summary = f"memory/v{version}.json"
     if generate_memory and summary not in paths and (workspace / summary).exists():

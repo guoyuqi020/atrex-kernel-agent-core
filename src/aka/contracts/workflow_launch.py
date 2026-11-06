@@ -121,6 +121,10 @@ def decode_launch(argv) -> WorkflowLaunch:
     for name in ("framework_baseline_reviewers", "fast_episode_reviewers", "full_episode_reviewers"):
         if name in settings:
             settings[name] = tuple(settings[name])
+    if "agent_reference_paths" in settings:
+        settings["agent_reference_paths"] = tuple(
+            tuple(item) for item in settings["agent_reference_paths"]
+        )
     request["workspace"] = Path(request["workspace"])
     campaign = CampaignRequest(problem=ProblemSource(**source), settings=WorkflowSettings(**settings),
         runtime=CampaignRuntimeSettings(**request.pop("runtime", {})), **request)

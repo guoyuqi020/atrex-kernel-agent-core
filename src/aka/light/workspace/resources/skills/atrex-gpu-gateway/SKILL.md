@@ -42,7 +42,7 @@ Use `eval` and `env` for new commands; legacy aliases `test`, `run`, `sol` and `
 ## Installation and authentication
 
 ```bash
-pip install -U atrex-gateway-client \
+pip install -U 'atrex-gateway-client>=0.14.30,<0.15' \
   --index-url http://artlab.alibaba-inc.com/1/pypi/pypi-releases \
   --trusted-host artlab.alibaba-inc.com
 export AGATE_AK='<ak>'
@@ -56,7 +56,7 @@ Alternatively, store `ak`/`sk` in `~/.atrex/config.json`. The CLI uses AK/SK sig
 Do not configure `AGATE_TOKEN`, which the server does not accept. `author` and a self-reported employee ID confer no permissions.
 Switch to preproduction only when the user explicitly requests it. Examples here use production.
 
-Use `agate update --check` to check for updates and `agate update` to install them. Older clients without this subcommand can use the pip command above.
+Use `agate update --check` to check for updates and `agate update` to install them. Older clients without this subcommand can use the pip command above. Atrex AKA Light rejects Agate SDK versions older than 0.14.30 before submitting any Gateway operation.
 
 ## From compilation to evaluation
 

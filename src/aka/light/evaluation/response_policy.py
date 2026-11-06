@@ -10,6 +10,7 @@ KNOWN_GATEWAY_ERROR_CLASSES = frozenset({
     "compilation",
     "correctness",
     "infra",
+    "timeout",
     "validation",
 })
 

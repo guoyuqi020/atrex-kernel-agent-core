@@ -15,20 +15,26 @@ Config = {"type": "object", "properties": {
 Defaults = {"sandbox": "none", "capture": False, "bwrap_executable": "bwrap", "read_only_paths": [], "proc_mode": "private", "timeout_seconds": 28800}
 
 
+def _options(config):
+    from .provider import AgentOptions
+    values = dict(config)
+    values["read_only_paths"] = tuple(values.pop("read_only_paths"))
+    return AgentOptions(**values)
+
+
 def validate_config(config):
     from pathlib import Path
     from aka.light.agent.sandbox import sandbox_executable
-    from .provider import AgentOptions
     for value in config["read_only_paths"]:
         path = Path(value).expanduser()
         if not path.is_absolute() or not path.exists():
             raise ValueError("Agent read_only_paths must name existing absolute paths")
     # Explicit isolation fails before a Campaign is launched, including on macOS.
-    sandbox_executable(AgentOptions(**{**config, "read_only_paths": tuple(config["read_only_paths"])}).environment())
+    sandbox_executable(_options(config).environment())
 
 
 def apply(ctx, config):
-    from .provider import AgentOptions, LightAgent
-    agent = LightAgent(AgentOptions(**{**config, "read_only_paths": tuple(config["read_only_paths"])}))
+    from .provider import LightAgent
+    agent = LightAgent(_options(config))
     ctx.effect(agent.close, label="close optional Agent")
     ctx.provide(AGENT, agent)

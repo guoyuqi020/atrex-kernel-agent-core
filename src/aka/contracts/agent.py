@@ -143,7 +143,7 @@ class AgentRuntimeCapabilities:
 class AgentRunRequest:
     workspace: Path
     prompt: str
-    timeout_s: int
+    timeout_s: int | None
     reasoning_effort: str = "max"
     session_id: str | None = None
     resume_session: bool = False

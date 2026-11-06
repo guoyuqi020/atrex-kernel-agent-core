@@ -11,7 +11,7 @@ from pathlib import Path
 
 from aka.light.workspace.skill_manifest import SKILL_MANIFEST
 from aka.light.workspace.resource_catalog import resource
-from aka.light.workflow.constants import REPO_ROOT, STALL_STATE_FILE
+from aka.light.workflow.constants import REPO_ROOT
 
 RETIRED_SKILL_NAMES = frozenset({
     "humanize", "humanize-gen-plan", "humanize-refine-plan", "humanize-rlcr",
@@ -213,17 +213,6 @@ def link_runtime(workspace: Path, atrex_bench_root: Path | None = None, *, is_pp
                 os.symlink(target, name, dir_fd=directory)
     if atrex_bench_root is not None:
         _install_atrex_bench_runtime(workspace, atrex_bench_root)
-    gi = workspace / ".gitignore"
-    from aka.light.agent.session_tail import read_regular_bytes
-    try:
-        existing = read_regular_bytes(gi, limit=1024 * 1024).decode()
-    except FileNotFoundError:
-        existing = ""
-    ignores = ("/tools", "/skills", "/reference", "/reference-projects", "/gpu-wiki", "/.claude", "/.qoder", "/.agents", "/" + STALL_STATE_FILE)
-    # Preserve the committed ignore file of resumed SOL workspaces, which never
-    # installed Atrex-Bench. Episode-boundary dirty checks must remain strict.
-    if atrex_bench_root is not None:
-        ignores += ("/atrex-bench",)
-    missing = [name for name in ignores if name not in existing.splitlines()]
-    if missing:
-        publish(workspace, ".gitignore", (existing.rstrip() + "\n" + "\n".join(missing) + "\n").encode())
+    # Runtime assets are covered by the tracked policy installed when the
+    # workspace is created, plus .git/info/exclude for resumed old workspaces.
+    # Never mutate an already tracked .gitignore while installing a Session.

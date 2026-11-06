@@ -94,7 +94,8 @@ class ManagedCandidateWorkspace(GitCandidateWorkspace):
             publish(workspace, name, resource(f"reference/{name}").read_bytes())
         publish(workspace, "profile_driver.py", profile_driver_script().read_bytes())
         publish(workspace, "README.md", b"# Kernel optimization workspace\n")
-        publish(workspace, ".gitignore", b"__pycache__/\n*.pyc\n/scratch\n")
+        from aka.light.workspace.agent_git import initialize_gitignore
+        initialize_gitignore(workspace)
         (workspace / "memory").mkdir(exist_ok=True)
         if not (workspace / ".git").exists():
             subprocess.run(["git", "init", "-q", str(workspace)], check=True)

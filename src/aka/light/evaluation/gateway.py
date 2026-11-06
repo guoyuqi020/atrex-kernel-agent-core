@@ -204,6 +204,7 @@ INPUT_SKIP_DIRS = {
     ".agents",
     "gpu-wiki",
     "reference-projects",
+    "references",
     "skills",
     # Plans are local campaign inputs for the agent, never runtime inputs for
     # the command executing in the GPU pod. In particular, preserved
@@ -3146,7 +3147,6 @@ def run_direct_job(
             finally:
                 _forget_agate_job(job_id)
         deadline = time.monotonic() + remaining
-        failures = 0
         try:
             while True:
                 if job.get("status") in ("succeeded", "failed", "cancelled", "canceled"):
@@ -3158,7 +3158,6 @@ def run_direct_job(
                 try:
                     job = _gateway_json(url, "GET", f"/v1/jobs/{job_id}?wait=true&timeout={wait_for:.3f}",
                                         None, wait_for + 10)
-                    failures = 0
                 except InvalidURL:
                     raise
                 except (OSError, GatewayHTTPError, GatewayResponseError) as error:
@@ -3169,9 +3168,9 @@ def run_direct_job(
                             and error.status not in {408, 429} and not request_is_infrastructure(
                                 subprocess.CompletedProcess([], 1, error.detail, ""))):
                         raise
-                    # An accepted job keeps its ID across polling outages.
-                    failures += 1
-                    time.sleep(min(retry_delay(failures), max(0, deadline - time.monotonic())))
+                    raise EvidenceUnavailable(
+                        "Gateway collection transport unavailable"
+                    ) from error
         except (KeyboardInterrupt, SystemExit):
             try:
                 _gateway_json(url, "POST", f"/v1/jobs/{job_id}/cancel", {}, 10)
@@ -3408,7 +3407,6 @@ def _resume_interrupted_agate_wait(
         )
     deadline = time.monotonic() + remaining
     resumed = initial
-    failures = 0
     while (remaining := int(deadline - time.monotonic())) > 0:
         try:
             resumed = subprocess.run(
@@ -3438,10 +3436,10 @@ def _resume_interrupted_agate_wait(
             rejection = submission_rejection(resumed)
             if rejection is not None and not rejection.retryable:
                 break
-            failures += 1
-            time.sleep(min(retry_delay(failures), max(0, deadline - time.monotonic())))
-        else:
-            failures = 0
+            # Collection transport failure is returned to execute_job, which
+            # emits a bounded Agent-visible timeout and retains the accepted
+            # Job checkpoint privately. Do not keep polling in this call.
+            break
     return subprocess.CompletedProcess(
         args=resumed.args,
         returncode=resumed.returncode,
@@ -3785,16 +3783,13 @@ def _with_workspace_performance_score(
     workspace: Path, result: dict[str, Any]
 ) -> dict[str, Any]:
     """Normalize legacy per-shape results to the shared arithmetic-mean score."""
-    from aka.light.workspace.versions import version_record_path
+    from aka.light.workspace.baseline import read_baseline_record
     if result.get("performance_objective") == PERFORMANCE_OBJECTIVE:
         return result
     candidate_by_shape = result.get("latency_us_by_shape")
     if not isinstance(candidate_by_shape, dict) or not candidate_by_shape:
         return result
-    try:
-        baseline = read_json_object(version_record_path(workspace, 0)) or {}
-    except ValueError:
-        return result
+    baseline = read_baseline_record(workspace) or {}
     performance = baseline.get("performance")
     performance = performance if isinstance(performance, dict) else {}
     baseline_by_shape = performance.get("latency_us_by_shape")

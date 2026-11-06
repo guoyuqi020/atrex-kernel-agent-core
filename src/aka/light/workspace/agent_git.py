@@ -17,13 +17,55 @@ from typing import Any
 
 IGNORED = (
     "scratch/", "tools/", "skills/", "memory/", "input/", "eval/", "profiles/",
-    "plans/", "directions/", "experiments/", "records/", "reference/", "input/evidence/",
-    ".atrex_*/", ".claude/", ".agents/",
+    "plans/", "directions/", "experiments/", "records/", "reference/",
+    "reference-projects/", "references/", "gpu-wiki/", "atrex-bench/", "input/evidence/",
+    ".atrex_*/", ".orchestrator_mode.json", ".orchestrator_state.json",
+    ".claude/", ".qoder/", ".agents/",
     "README.md", "CLAUDE.md", "WORKSPACE.md", "PROGRESS.md", "frontier.json", "agent_problem.json",
     "reference.py", "input.py", "shapes.json", "metadata.json", "roofline.json", "valid.py",
     "definition.json", "workload.jsonl", "solution.json", "config.json", "test_kernel.py",
     "profile_driver.py", "*.jsonl",
 )
+
+TRACKED_IGNORED = (
+    "__pycache__/",
+    "*.pyc",
+    "*.ncu-rep",
+    "profiles/*/att/*.att",
+    "profiles/*/att/*.out",
+    "profiles/*/att/*.pftrace",
+    "profiles/*/att/*.otf2",
+    "/scratch",
+    "/tools",
+    "/skills",
+    "/reference",
+    "/reference-projects",
+    "/references",
+    "/gpu-wiki",
+    "/.claude",
+    "/.qoder",
+    "/.agents",
+    "/.orchestrator_mode.json",
+    "/.orchestrator_state.json",
+    "/.atrex_long_horizon/",
+    "/verification_artifacts/.atrex_long_horizon_verify/",
+    "/memory/live.json",
+    "/atrex-bench",
+)
+
+
+def gitignore_contents() -> str:
+    """Return the stable tracked ignore policy installed at workspace creation."""
+    return (
+        "# Runtime-managed Agent repository exclusions\n"
+        + "\n".join(TRACKED_IGNORED)
+        + "\n"
+    )
+
+
+def initialize_gitignore(workspace: Path) -> None:
+    """Install the tracked ignore policy before the initial Kernel commit."""
+    (workspace / ".gitignore").write_text(gitignore_contents(), encoding="utf-8")
 
 _RESUME_REMOTE_PREFIX = "refs/remotes/atrex-resume/heads/"
 _RESUME_BRANCH_PREFIX = "refs/atrex/resume-branch/"
@@ -76,6 +118,29 @@ class AgentGit:
             _run(self.workspace, "config", "--local", key, value)
         hooks = self.workspace / ".git" / "disabled-hooks"
         hooks.mkdir(parents=True, exist_ok=True)
+
+    def _ensure_private_excludes(self) -> None:
+        """Upgrade Runtime exclusions without dirtying the tracked repository."""
+        result = _run(
+            self.workspace,
+            "rev-parse",
+            "--git-path",
+            "info/exclude",
+        )
+        path = Path(result.stdout.strip())
+        if not path.is_absolute():
+            path = self.workspace / path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        present = set(existing.splitlines())
+        missing = [entry for entry in IGNORED if entry not in present]
+        if not missing:
+            return
+        suffix = "" if not existing or existing.endswith("\n") else "\n"
+        suffix += "\n# Atrex Runtime private workspace exclusions\n"
+        suffix += "\n".join(missing) + "\n"
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(suffix)
 
     def _restore_branches(self) -> None:
         """Restore every Agent branch and the previously checked-out branch."""
@@ -150,6 +215,7 @@ class AgentGit:
         if not initialized:
             _run(self.workspace, "init", "-b", "work")
             self._configure()
+            initialize_gitignore(self.workspace)
             self._fetch_bundle()
             if self.bundle.is_file():
                 self._restore_branches()
@@ -159,13 +225,10 @@ class AgentGit:
             # stable repository must import those refs in place instead of
             # waiting for a future workspace reconstruction.
             self._fetch_bundle()
-        # The Runtime owns this file. Refresh it for stable repositories too so
-        # newly introduced public projections never make a resumed Kernel
-        # worktree dirty or become part of a Kernel commit.
-        (self.workspace / ".gitignore").write_text(
-            "# Runtime-managed Agent repository exclusions\n" + "\n".join(IGNORED) + "\n",
-            encoding="utf-8",
-        )
+        # The tracked .gitignore is created before the initial Kernel commit.
+        # Runtime upgrades belong in Git's private exclude file so resuming an
+        # older trajectory never mutates Agent-visible source history.
+        self._ensure_private_excludes()
         self.checkpoint("Runtime: materialize trusted trajectory source")
         head = self.head()
         if head:
@@ -200,6 +263,19 @@ class AgentGit:
                 raise ValueError("Runtime Kernel commit does not match its saved source")
             _run(self.workspace, "update-ref", ref, commit_id)
             return commit_id
+        existing = _run(
+            self.workspace,
+            "rev-parse",
+            "--verify",
+            f"{ref}^{{commit}}",
+            check=False,
+        )
+        if existing.returncode == 0:
+            existing_commit = existing.stdout.strip()
+            from aka.light.workspace.sources import from_git
+
+            if from_git(self.workspace, existing_commit) == source:
+                return existing_commit
         files = Artifact(source).materialized_files
         with tempfile.TemporaryDirectory(prefix="aka-agent-index-") as directory:
             index = str(Path(directory) / "index")

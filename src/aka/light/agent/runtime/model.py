@@ -31,7 +31,7 @@ def merge_token_usage_evidence(left: TokenUsage, right: TokenUsage) -> TokenUsag
 class AgentRunRequest:
     workspace: Path
     prompt: str
-    timeout_s: int
+    timeout_s: int | None
     reasoning_effort: str = "max"
     sandbox_hardware: str = ""
     sandbox_profile: str = ""

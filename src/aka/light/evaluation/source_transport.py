@@ -188,17 +188,36 @@ def _load_sdk_client(
     authority_profile=None,
 ):
     """Construct the public Agate SDK client without exposing credentials."""
+    minimum_agate_version = "0.14.30"
     try:
+        from aka.light.agent.preflight import (
+            MINIMUM_AGATE_VERSION,
+            check_minimum_agate_version,
+        )
+
+        minimum_agate_version = MINIMUM_AGATE_VERSION
+        check_minimum_agate_version()
         from atrex_gateway_client import AkSkAuth, Client, NoAuth, TokenAuth
         from atrex_gateway_client.errors import GatewayError, TransportError
     except ModuleNotFoundError as error:
         from aka.light.runtime.request_errors import GatewayConfigurationError
 
         raise GatewayConfigurationError(
-            "atrex-gateway-client>=0.14.22 is required for Gateway operations.",
+            "atrex-gateway-client"
+            f">={minimum_agate_version} is required for Gateway operations.",
             next_action=(
                 "Ask the operator to install the declared Atrex AKA Light dependencies "
                 "and restart the Supervisor; do not change Agent arguments or fall back to Dev."
+            ),
+        ) from error
+    except RuntimeError as error:
+        from aka.light.runtime.request_errors import GatewayConfigurationError
+
+        raise GatewayConfigurationError(
+            str(error),
+            next_action=(
+                f"Ask the operator to install atrex-gateway-client>={minimum_agate_version} "
+                "and restart the Supervisor; do not retry or change Agent arguments."
             ),
         ) from error
 
@@ -367,7 +386,6 @@ def run_sdk_job(
         payload_identity,
         private_value_fingerprint,
         retry_kind,
-        retry_delay,
     )
     from aka.light.experiment.store import EvidenceUnavailable
 
@@ -434,7 +452,6 @@ def run_sdk_job(
         accepted = json.loads(initial.stdout)
         job_id = accepted["job_id"]
         deadline = time.monotonic() + remaining
-        failures = 0
         job = accepted
         try:
             while True:
@@ -460,18 +477,12 @@ def run_sdk_job(
                             else min(300, max(1, available))
                         ),
                     )
-                    failures = 0
                 except GatewayError as error:
                     if getattr(error, "status", None) == 404:
                         raise AcceptedJobMissing(job_id) from None
-                    failures += 1
-                    delay = retry_delay(failures)
-                    if deadline - time.monotonic() <= delay:
-                        raise EvidenceUnavailable(
-                            "Saved Gateway Job could not be read before the collection deadline"
-                        ) from None
-                    time.sleep(delay)
-                    continue
+                    raise EvidenceUnavailable(
+                        "Gateway collection transport unavailable"
+                    ) from None
                 if recovery_probe:
                     return subprocess.CompletedProcess(
                         ["agate-sdk", "get", job_id],

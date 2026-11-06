@@ -101,6 +101,36 @@ def _conversion_parity_passes(verification: VerificationResult) -> bool:
     )
 
 
+def _persisted_candidate_acceptance_status(journal: dict[str, Any]) -> str:
+    """Classify the immutable acceptance receipt sealed with a Runtime report.
+
+    Candidate acceptance owns correctness, production review and supplemental
+    numerical validation. Episode settlement verifies that receipt; it must
+    not invoke those non-deterministic gates a second time.
+    """
+    acceptance = journal.get("acceptance_checks")
+    if not isinstance(acceptance, dict):
+        return "missing"
+    candidate = acceptance.get("five_case_correctness")
+    if not isinstance(candidate, dict):
+        return "incomplete"
+    checks = candidate.get("checks")
+    if not isinstance(checks, dict):
+        return "incomplete"
+    required = ("correctness", "production_review", "numerical")
+    statuses = {
+        name: checks.get(name, {}).get("status")
+        if isinstance(checks.get(name), dict)
+        else None
+        for name in required
+    }
+    if all(status == "passed" for status in statuses.values()):
+        return "passed"
+    if any(status == "failed" for status in statuses.values()):
+        return "failed"
+    return "incomplete"
+
+
 def _representative_candidate_result(
     verification: VerificationResult | None,
 ) -> dict[str, Any]:
@@ -542,9 +572,11 @@ class LongHorizonCampaign:
         acceptance_request = ""
         selected_verifier = verifier or self.verifier
         if isinstance(selected_verifier, RecordedABBAValidator):
+            if agent_workspace is None:
+                raise RuntimeError("ABBA prompt requires a registered Agent workspace")
             context = self.base_campaign.acceptance_measurement_context(
+                agent_workspace,
                 source_from_git(worktree.path, worktree.base_commit),
-                worktree.base_commit,
             )
             acceptance_request = selected_verifier.agent_instructions(**context)
         research_records = self.base_campaign.research_records
@@ -630,6 +662,9 @@ class LongHorizonCampaign:
                 "DSL_CONTEXT": self.base_campaign.dsl_context,
                 "NOTES": self.base_campaign.notes,
                 "PLUGINS": directives["plugins"],
+                "REFERENCE_KNOWLEDGE": getattr(
+                    self.base_campaign, "reference_knowledge_prompt", lambda: ""
+                )(),
                 "RUNTIME_WAIT_POLICY": (
                     "- Runtime requests: Agent and subagent execution is suspended while an "
                     "authenticated request is pending; this wait is excluded from the configured "
@@ -756,9 +791,20 @@ class LongHorizonCampaign:
             try:
                 from aka.light.workspace.sources import from_git
                 sealed = from_git(worktree.path, candidate)
-                # Recovered reports must not bypass the newly installed gate.
+                # Revalidate the immutable full-Evaluate receipt against the
+                # sealed source, but do not execute acceptance gates twice.
                 self.base_campaign.selected_episode_evaluation(worktree.episode, sealed)
-                return self.base_campaign.supplemental_numerical_feedback(worktree.path, sealed)
+                acceptance_status = _persisted_candidate_acceptance_status(
+                    private_journal or {}
+                )
+                if acceptance_status == "passed":
+                    return ""
+                return (
+                    "The finalized Runtime report contains "
+                    f"{acceptance_status} candidate acceptance checks. "
+                    "Episode settlement never reruns candidate gates; migrate or "
+                    "revalidate this legacy receipt before settlement."
+                )
             except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
                 return (
                     "Supervisor could not verify the accepted candidate's production evidence: "
@@ -1166,16 +1212,11 @@ class LongHorizonCampaign:
                 worktree.episode
             )
             candidate_kernel_id = private_journal.get("candidate_kernel_id")
-            baseline_source = source_from_git(worktree.path, worktree.base_commit)
-            from aka.light.experiment.store import RecordNotFound
-            try:
-                baseline_kernel_id = (
-                    self.base_campaign._supervisor_runtime.measurements.find_kernel_id(
-                        baseline_source
-                    )
+            baseline_kernel_id = (
+                self.base_campaign._supervisor_runtime.baseline_kernel_commit(
+                    worktree.path
                 )
-            except RecordNotFound:
-                baseline_kernel_id = worktree.base_commit
+            )
             from aka.light.execution.retry import retry_infrastructure
             verification = retry_infrastructure(
                 self.workspace,

@@ -14,7 +14,7 @@ MAX_TOTAL_BYTES = 64 * 1024 * 1024
 SKIP = {".git", ".claude", ".codex", ".qoder", ".qodersec", ".pi", ".agents",
         ".aka-agent-observations",
         ".atrex_long_horizon", ".atrex_versions", ".atrex_plugins", ".gpu_wiki_profile", ".atrex_environment",
-        "atrex-bench", "tools", "skills", "reference", "reference-projects",
+        "atrex-bench", "tools", "skills", "reference", "reference-projects", "references",
         "gpu-wiki", "records", "__pycache__", ".venv", "node_modules", "plans"}
 
 
@@ -28,6 +28,8 @@ def relative_path(value: str) -> Path:
         raise ValueError("Private/control paths cannot be used as request files")
     if path.parts[:2] == ("input", "evidence"):
         raise ValueError("Historical evidence is read-only and cannot be used as a GPU request file")
+    if path.parts[0] == "references":
+        raise ValueError("Reference knowledge cannot be used as a GPU request file")
     return path
 
 

@@ -176,6 +176,7 @@ def _run_bounded(
         ActiveCommunication, DEFAULT_TIMEOUT_SECONDS, SessionControl, current_budget, validate_timeout,
     )
     from aka.light.agent.home import prepare_agent_environment
+    from aka.light.agent.home import open_private_directory
     from aka.light.agent.sandbox import wrap_agent_command
     from aka.light.agent.session_capture import clear_capture, finish_session_capture, start_session_capture
     from aka.light.workspace.auxiliary import ensure_workspace_scratch
@@ -187,14 +188,25 @@ def _run_bounded(
     ensure_workspace_scratch(cwd)
     control = session_control or SessionControl()
     budget = current_budget()
-    default_timeout = float((env or {}).get("ATREX_AGENT_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
-    limit = validate_timeout(timeout if timeout is not None else default_timeout, "Agent timeout_seconds")
-    if budget is not None and budget.limited:
+    # ``None`` is an explicit unbounded request.  Callers that want the Agent
+    # profile's default deadline pass that finite value in AgentRunRequest;
+    # silently replacing None with the profile default would make an allegedly
+    # unbounded auxiliary review stop after eight hours.
+    limit = (
+        None
+        if timeout is None
+        else validate_timeout(timeout, "Agent timeout_seconds")
+    )
+    if limit is not None and budget is not None and budget.limited:
         limit = min(limit, budget.remaining)
-    if limit <= 0:
+    if limit is not None and limit <= 0:
         control.close()
         return "", "Agent active-time budget exhausted", -signal.SIGKILL, True
-    budget_state_path = cwd / ".atrex_long_horizon" / "agent-active-budget.json"
+    from aka.light.runtime.paths import supervisor_agent_control_root
+    control_root = supervisor_agent_control_root(cwd)
+    with open_private_directory(control_root):
+        pass
+    budget_state_path = control_root / "agent-active-budget.json"
     if budget is not None and budget.limited:
         control.configure_budget(
             budget_state_path,
@@ -207,6 +219,8 @@ def _run_bounded(
         cwd, dict(os.environ if env is None else env),
         (env or {}).get("ATREX_TELEMETRY_ATTEMPT_ID") or "\0".join(command),
     )
+    from aka.light.agent.claude_tools import CONTROL_ROOT_ENV
+    environment_values[CONTROL_ROOT_ENV] = str(control_root)
     output_limit_signal = None
     if Path(command[0]).name == "claude":
         from aka.light.agent.claude_tools import (
@@ -222,8 +236,7 @@ def _run_bounded(
             recovery_enabled = False
         if recovery_enabled:
             output_limit_signal = (
-                cwd
-                / ".atrex_long_horizon"
+                control_root
                 / "output-limit-signals"
                 / f"{uuid.uuid4().hex}.json"
             )
@@ -239,12 +252,22 @@ def _run_bounded(
         environment_values[FOREGROUND_HOOKS_ENV] = "1"
         # Runtime calls remain foreground, and the same invocation-local hook
         # carries active-time reminders even in stages without Runtime tools.
+        hook_timeout = limit
+        if hook_timeout is None:
+            hook_timeout = validate_timeout(
+                float(
+                    (env or {}).get(
+                        "ATREX_AGENT_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS
+                    )
+                ),
+                "Agent timeout_seconds",
+            )
         command = foreground_command(
             command,
             cwd,
-            limit,
+            hook_timeout,
             budget_state_path=(
-                Path(".atrex_long_horizon/agent-active-budget.json")
+                budget_state_path
                 if budget is not None and budget.limited else None
             ),
         )
@@ -397,7 +420,7 @@ def _run_bounded(
             OUTPUT_LIMIT_INTERRUPT_MARKER + "\n"
         )
         returncode = OUTPUT_LIMIT_EXIT_STATUS
-    if timed_out:
+    if timed_out and limit is not None:
         stderr = (stderr or "") + (
             f"\n[orchestrator] Agent active-time limit exceeded ({limit:g}s); "
             f"{control.wait_seconds:.3f}s of suspended Runtime waiting excluded.\n"

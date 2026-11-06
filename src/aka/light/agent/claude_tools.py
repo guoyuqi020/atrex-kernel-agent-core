@@ -28,6 +28,7 @@ OUTPUT_LIMIT_SCOPE_ENV = "ATREX_OUTPUT_LIMIT_RECOVERY_SCOPE"
 OUTPUT_LIMIT_SIGNAL_ENV = "ATREX_OUTPUT_LIMIT_SIGNAL"
 OUTPUT_LIMIT_WORKSPACE_ENV = "ATREX_OUTPUT_LIMIT_WORKSPACE"
 FOREGROUND_HOOKS_ENV = "ATREX_CLAUDE_FOREGROUND_HOOKS"
+CONTROL_ROOT_ENV = "ATREX_AGENT_CONTROL_ROOT"
 _STOP_HOOK_STATE = "output-limit-stop-hook.json"
 
 
@@ -47,8 +48,22 @@ a time. Keep each response concise and save progress to files before moving to t
 This is output-limit continuation {retry}/{maximum}."""
 
 
+def _control_root(workspace):
+    configured = os.environ.get(CONTROL_ROOT_ENV, "")
+    if configured:
+        return Path(configured).expanduser()
+    # Normal Supervisor code imports this module as part of the package.  The
+    # direct stdlib-only Claude hook receives CONTROL_ROOT_ENV and never needs
+    # to import the package from inside the sandbox.
+    try:
+        from aka.light.runtime.paths import supervisor_agent_control_root
+    except ImportError:
+        return Path(workspace).expanduser().parent / ".atrex-agent-control"
+    return supervisor_agent_control_root(Path(workspace))
+
+
 def _output_limit_state_path(workspace):
-    return Path(workspace).expanduser() / ".atrex_long_horizon" / _STOP_HOOK_STATE
+    return _control_root(workspace) / _STOP_HOOK_STATE
 
 
 def _claim_output_limit_event(path, scope, event_key, maximum):
@@ -123,11 +138,12 @@ def _signal_output_limit_failure(payload):
         return
     try:
         workspace = Path(workspace_root).resolve(strict=True)
+        control_root = _control_root(workspace).resolve(strict=True)
         path = Path(raw_path)
         if not path.is_absolute():
-            path = workspace / path
+            path = control_root / path
         path = path.resolve(strict=False)
-        if not path.is_relative_to(workspace):
+        if not path.is_relative_to(control_root):
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")

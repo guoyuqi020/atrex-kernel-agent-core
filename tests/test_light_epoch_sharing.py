@@ -14,6 +14,7 @@ from aka.contracts.workspace import CandidateHandle
 from aka.light.agent.home import SESSION_HOME_ROOT_ENV, prepare_agent_environment
 from aka.light.agent.runtime.model import AgentRunRequest as RuntimeAgentRunRequest
 from aka.light.agent.runtime.runtime import build_agent_runtime
+from aka.light.agent.sandbox import sandbox_executable
 from aka.light.experiment.store import MeasurementStore
 from aka.light.research import ResearchStore
 from aka.light.runtime.server import _journal_evidence_hint
@@ -46,12 +47,13 @@ from aka.light.workflow.search_driver import (
 )
 from aka.light.workflow.session import LongSessionRunner
 from aka.light.workspace.agent_git import AgentGit, DirtyKernelWorktree
+from aka.light.workspace.auxiliary import AuxiliaryWorkspace
 from aka.light.workspace.episode import EpisodeWorkspace
 from aka.light.workspace.files import publish_if_changed
 from aka.light.workspace.git import EpisodeWorktree, promote_candidate
 from aka.light.workspace.provider import ManagedCandidateWorkspace
 from aka.light.workspace.shared_history import export_epoch, import_exports
-from aka.light.workspace.sources import default_tree, install, pack, snapshot
+from aka.light.workspace.sources import default_tree, from_git, install, pack, snapshot
 
 
 def _measurement(
@@ -935,7 +937,8 @@ def test_research_claim_reviewer_returns_durable_conversation_links(tmp_path):
     }
 
     def run_session(workspace, _prompt, timeout=None, **kwargs):
-        assert timeout == 300
+        assert timeout is None
+        assert kwargs["extra_environment"]["ATREX_AGENT_SANDBOX"] == "bwrap"
         attempt = len(attempts) + 1
         attempts.append(attempt)
         resume_requests.append(
@@ -952,6 +955,13 @@ def test_research_claim_reviewer_returns_durable_conversation_links(tmp_path):
             json.dumps({} if attempt == 1 else valid_review),
             encoding="utf-8",
         )
+        # Runtime-private/transient files are not reviewer evidence.  Input
+        # integrity is enforced by the auxiliary bwrap view's read-only input
+        # mounts, so unrelated files must not invalidate a valid review.
+        (workspace / "scratch").mkdir(exist_ok=True)
+        (workspace / "scratch" / "runtime-state.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
         return SimpleNamespace(
             exit_status=0,
             timed_out=False,
@@ -962,10 +972,11 @@ def test_research_claim_reviewer_returns_durable_conversation_links(tmp_path):
 
     campaign = SimpleNamespace(
         production_review_timeout=300,
-        agent_boundary_environment=lambda _role: {},
+        agent_boundary_environment=lambda _role: {
+            "ATREX_AGENT_SANDBOX": "none"
+        },
         _run_session=run_session,
         _account=lambda _result, _label: None,
-        _claim_review_evidence_digest=Campaign._claim_review_evidence_digest,
     )
     review = Campaign.review_research_claim(campaign, bundle)
 
@@ -988,6 +999,108 @@ def test_research_claim_reviewer_returns_durable_conversation_links(tmp_path):
     assert resume_requests[-1] == ("provider-session-2", True)
     assert resumed_audit["attempts"][0]["resumed"] is True
     assert resumed_audit["attempts"][0]["session_id"] == "provider-session-2"
+
+
+def test_research_claim_reviewer_launch_failures_are_privately_auditable(tmp_path):
+    evidence = tmp_path / "episode"
+    bundle = evidence / "claim-review-test"
+    bundle.mkdir(parents=True)
+
+    def run_session(*_args, **_kwargs):
+        raise ValueError("Unknown Agent workspace role: research-claim-review")
+
+    campaign = SimpleNamespace(
+        production_review_timeout=300,
+        agent_boundary_environment=lambda _role: {
+            "ATREX_AGENT_SANDBOX": "none"
+        },
+        _run_session=run_session,
+        _account=lambda _result, _label: None,
+    )
+    with pytest.raises(RuntimeError) as failure:
+        Campaign.review_research_claim(campaign, bundle)
+
+    audit = failure.value.review_session_audit
+    assert [row["status"] for row in audit["attempts"]] == [
+        "capture_missing",
+        "capture_missing",
+    ]
+    assert all(row["session_id"] == "" for row in audit["attempts"])
+    assert all(
+        row["error"]
+        == {
+            "type": "ValueError",
+            "message": "Unknown Agent workspace role: research-claim-review",
+        }
+        for row in audit["attempts"]
+    )
+
+
+def test_research_claim_review_bwrap_unavailable_fails_closed(monkeypatch):
+    with pytest.raises(
+        RuntimeError,
+        match="Research claim review requires Bubblewrap.*native execution is not permitted",
+    ):
+        sandbox_executable({
+            "ATREX_AGENT_SANDBOX": "none",
+            "ATREX_AGENT_WORKSPACE_ROLE": "research-claim-review",
+        })
+
+    environment = {
+        "ATREX_AGENT_SANDBOX": "bwrap",
+        "ATREX_AGENT_WORKSPACE_ROLE": "research-claim-review",
+        "ATREX_BWRAP_EXECUTABLE": "missing-bwrap",
+        "PATH": "",
+    }
+    monkeypatch.setattr("aka.light.agent.sandbox.platform.system", lambda: "Linux")
+    monkeypatch.setattr(
+        "aka.light.agent.sandbox.shutil.which",
+        lambda *_args, **_kwargs: None,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "Research claim review requires Bubblewrap.*"
+            "native execution is not permitted"
+        ),
+    ):
+        sandbox_executable(environment)
+
+
+def test_research_claim_review_auxiliary_workspace_publishes_only_review(tmp_path):
+    workspace = tmp_path / "claim-review"
+    home = tmp_path / "home"
+    workspace.mkdir()
+    home.mkdir()
+    (workspace / "submissions").mkdir()
+    (workspace / "submissions" / "target.json").write_text(
+        '{"action":"propose"}\n', encoding="utf-8"
+    )
+    (workspace / "evidence-manifest.json").write_text(
+        '{"claim_type":"direction"}\n', encoding="utf-8"
+    )
+    (workspace / "private-supervisor-note.json").write_text(
+        "must stay private\n", encoding="utf-8"
+    )
+
+    view = AuxiliaryWorkspace(workspace, home, "research-claim-review")
+    try:
+        assert (view.root / "submissions" / "target.json").is_file()
+        assert (view.root / "evidence-manifest.json").is_file()
+        assert not (view.root / "private-supervisor-note.json").exists()
+        (view.root / "review.json").write_text(
+            '{"verdict":"supported"}\n', encoding="utf-8"
+        )
+        view.publish()
+    finally:
+        view.close()
+
+    assert json.loads((workspace / "review.json").read_text()) == {
+        "verdict": "supported"
+    }
+    assert (workspace / "private-supervisor-note.json").read_text() == (
+        "must stay private\n"
+    )
 
 
 def test_light_agent_runtime_uses_native_resume_command(tmp_path):
@@ -1889,6 +2002,122 @@ def test_completion_diagnosis_uses_public_terms_and_actionable_repair(tmp_path, 
     assert "private runtime journal" not in diagnosis.lower()
 
 
+def test_completion_reuses_persisted_candidate_acceptance_without_numerical_rerun(
+    tmp_path, monkeypatch
+):
+    import aka.light.workflow.episode as episode_module
+    import aka.light.workspace.sources as workspace_sources
+    from aka.light.workflow import journal_service
+
+    candidate = "b" * 40
+    private = {
+        "candidate_commit": candidate,
+        "acceptance_checks": {
+            "five_case_correctness": {
+                "checks": {
+                    "correctness": {"status": "passed"},
+                    "production_review": {"status": "passed"},
+                    "numerical": {"status": "passed"},
+                }
+            }
+        },
+    }
+    selected = []
+    numerical = []
+
+    def validate_projection(*_args, **kwargs):
+        kwargs["runtime_journal_loader"]()
+        return ""
+
+    monkeypatch.setattr(episode_module, "validate_terminal", validate_projection)
+    monkeypatch.setattr(
+        journal_service, "sealed_candidate_source", lambda _journal, _workspace: b"sealed"
+    )
+    monkeypatch.setattr(workspace_sources, "from_git", lambda _workspace, _commit: b"sealed")
+    monkeypatch.setattr(
+        episode_module,
+        "load_journal",
+        lambda _path: {"finalized_at": "2026-11-06T00:00:01+00:00"},
+    )
+    monkeypatch.setattr(episode_module, "git_text", lambda *_args: "0")
+
+    campaign = LongHorizonCampaign.__new__(LongHorizonCampaign)
+    campaign.base_campaign = SimpleNamespace(
+        read_runtime_episode_journal=lambda _episode: private,
+        candidate_workspace=SimpleNamespace(
+            restore_sealed_candidate=lambda *_args: ("", [])
+        ),
+        optimization_mode="production",
+        selected_episode_evaluation=lambda episode, source: (
+            selected.append((episode, source)) or {"all_pass": True}
+        ),
+        supplemental_numerical_feedback=lambda *_args, **kwargs: (
+            numerical.append(kwargs) or ""
+        ),
+    )
+
+    diagnosis = campaign._completion_check(
+        CandidateHandle(1, "a" * 40, "work", tmp_path),
+        tmp_path / "journal.json",
+        EpisodeHandoff("candidate_ready", candidate),
+    )
+
+    assert diagnosis == ""
+    assert selected == [(1, b"sealed")]
+    assert numerical == []
+
+
+def test_completion_rejects_missing_legacy_receipt_without_numerical_rerun(
+    tmp_path, monkeypatch
+):
+    import aka.light.workflow.episode as episode_module
+    import aka.light.workspace.sources as workspace_sources
+    from aka.light.workflow import journal_service
+
+    candidate = "b" * 40
+    private = {"candidate_commit": candidate}
+    numerical = []
+
+    def validate_projection(*_args, **kwargs):
+        kwargs["runtime_journal_loader"]()
+        return ""
+
+    monkeypatch.setattr(episode_module, "validate_terminal", validate_projection)
+    monkeypatch.setattr(
+        journal_service, "sealed_candidate_source", lambda _journal, _workspace: b"sealed"
+    )
+    monkeypatch.setattr(workspace_sources, "from_git", lambda _workspace, _commit: b"sealed")
+    monkeypatch.setattr(
+        episode_module,
+        "load_journal",
+        lambda _path: {"finalized_at": "2026-11-06T00:00:01+00:00"},
+    )
+    monkeypatch.setattr(episode_module, "git_text", lambda *_args: "0")
+
+    campaign = LongHorizonCampaign.__new__(LongHorizonCampaign)
+    campaign.base_campaign = SimpleNamespace(
+        read_runtime_episode_journal=lambda _episode: private,
+        candidate_workspace=SimpleNamespace(
+            restore_sealed_candidate=lambda *_args: ("", [])
+        ),
+        optimization_mode="production",
+        selected_episode_evaluation=lambda _episode, _source: {"all_pass": True},
+        supplemental_numerical_feedback=lambda *_args, **kwargs: (
+            numerical.append(kwargs) or ""
+        ),
+    )
+
+    diagnosis = campaign._completion_check(
+        CandidateHandle(1, "a" * 40, "work", tmp_path),
+        tmp_path / "journal.json",
+        EpisodeHandoff("candidate_ready", candidate),
+    )
+
+    assert "missing candidate acceptance checks" in diagnosis
+    assert "never reruns candidate gates" in diagnosis
+    assert numerical == []
+
+
 def test_accepted_legacy_report_remains_exactly_replayable_after_schema_upgrade(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -2188,6 +2417,33 @@ def test_partial_research_modes_install_complete_module_specific_reference(
     for marker in required:
         assert marker in journal
     assert unavailable not in journal
+
+
+def test_runtime_install_does_not_mutate_tracked_gitignore(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "kernel.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    from aka.light.workspace.agent_git import AgentGit, initialize_gitignore
+    from aka.light.workspace.assets import link_runtime
+
+    initialize_gitignore(workspace)
+    ignores = (workspace / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "/.atrex_long_horizon/" in ignores
+    assert "/verification_artifacts/.atrex_long_horizon_verify/" in ignores
+    assert "/memory/live.json" in ignores
+    repository = AgentGit(workspace, tmp_path / "agent.bundle")
+    repository.prepare()
+    before = (workspace / ".gitignore").read_bytes()
+    before_head = repository.head()
+
+    link_runtime(workspace, research_records=False, research_modules=())
+
+    assert (workspace / ".gitignore").read_bytes() == before
+    assert repository.head() == before_head
+    assert subprocess.run(
+        ["git", "diff", "--quiet", "--", ".gitignore"],
+        cwd=workspace,
+    ).returncode == 0
 
 
 @pytest.mark.parametrize("direction_id", [None, "direction_" + "2" * 32])
@@ -3644,6 +3900,7 @@ def test_agent_git_persists_work_and_installs_runtime_source_refs(tmp_path):
     repo.prepare()
     first = repo.head()
     assert first
+    (workspace / "impl").mkdir()
     (workspace / "impl" / "helper.py").write_text("VALUE = 2\n", encoding="utf-8")
     persisted = repo.persist()
     assert persisted != first
@@ -3896,6 +4153,34 @@ def test_runtime_rebinds_stable_agent_workspace_to_next_episode_journal(tmp_path
             memory_version=1,
             supervisor_git=True,
         )
+        first_baseline = runtime.baseline_kernel_commit(first_controller)
+        assert runtime.baseline_kernel_commit(first) == first_baseline
+        assert subprocess.run(
+            ["git", "rev-parse", "refs/atrex/baselines/e00000001"],
+            cwd=first,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip() == first_baseline
+        assert runtime.measurements.read_kernel(first_baseline) == (
+            from_git(first_controller, subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=first_controller,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip())
+        )
+        campaign = SimpleNamespace(
+            start_runtime=lambda: None,
+            _supervisor_runtime=runtime,
+        )
+        acceptance = Campaign.acceptance_measurement_context(
+            campaign,
+            first,
+            runtime.measurements.read_kernel(first_baseline),
+        )
+        assert acceptance["baseline_kernel_id"] == first_baseline
         second = runtime.register_episode(
             second_controller,
             episode=2,
@@ -3926,6 +4211,7 @@ def test_agent_git_restores_unmerged_branches_and_active_checkout(tmp_path):
         ["git", "switch", "-c", "experiment/ksplit4"], cwd=workspace, check=True,
         text=True, capture_output=True,
     )
+    (workspace / "impl").mkdir()
     (workspace / "impl" / "ksplit.py").write_text(
         "KSPLIT = 4\n", encoding="utf-8"
     )
@@ -3957,6 +4243,7 @@ def test_epoch_git_exchange_filters_paths_and_preserves_peer_ref(tmp_path):
     _install(source_workspace, "def run():\n    return 1\n")
     source = AgentGit(source_workspace, tmp_path / "source.bundle")
     source.prepare()
+    (source_workspace / "impl").mkdir()
     (source_workspace / "impl" / "peer.py").write_text("KSPLIT = 2\n", encoding="utf-8")
     (source_workspace / "scratch").mkdir()
     (source_workspace / "scratch" / "secret.txt").write_text("private\n", encoding="utf-8")
@@ -4022,7 +4309,6 @@ def test_epoch_git_exchange_filters_paths_and_preserves_peer_ref(tmp_path):
     assert tree == [
         ".atrex_source.json",
         ".gitignore",
-        "impl/__init__.py",
         "impl/peer.py",
         "kernel.py",
     ]

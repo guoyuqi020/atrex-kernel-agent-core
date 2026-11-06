@@ -94,9 +94,9 @@ Version and token budgets apply per dispatched campaign.
 
 1. Resolve the selected providers, freeze the problem/runtime inputs, and create or resume
    a campaign below `--workspace`.
-2. Evaluate V0 from the selected initial source. By default, optimization Episodes start
-   directly from that measured V0. Use `--framework-baseline auto` or `always` only when
-   a separate framework bring-up Session and pinned V1 are required.
+2. Evaluate V0 from the selected initial source. By default, `--framework-baseline auto`
+   creates a pinned framework V1 when V0 is still a reference wrapper; `never` explicitly
+   starts optimization directly from the measured V0.
 3. Start an Episode in the trajectory's stable Agent Git repository. The agent researches,
    edits, profiles, evaluates, and submits an `episode-report` citing measurement record
    IDs. Local Git history, uncommitted work, `scratch/`, tools, and Skills continue across

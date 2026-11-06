@@ -25,6 +25,7 @@ from aka.light.experiment.store import (
     JOB_ROOT_ENV,
     EvidenceUnavailable,
 )
+from aka.light.agent.runtime.process import ENVIRONMENT_TEMPFAIL
 
 
 ABBA_WALL_CLOCK_TIMEOUT_REASON = "abba_run_wall_clock_timeout"
@@ -32,6 +33,7 @@ _ABBA_WALL_CLOCK_TIMEOUT = re.compile(
     r"^candidate exceeded [0-9]+(?:\.[0-9]+)?s wall-clock timeout$",
     re.IGNORECASE,
 )
+_INVALID_MANAGED_CLOCK = "manage mode requires a positive integer graphics_mhz value"
 
 
 def _abba_wall_clock_timeout_failures(job: object) -> list[dict]:
@@ -191,6 +193,58 @@ def _job_deadline_process(
         process.args,
         process.returncode or 1,
         json.dumps(failed),
+        process.stderr,
+    )
+
+
+def _clock_configuration_error(value: object) -> dict | None:
+    """Return the deterministic Agate worker clock-configuration failure.
+
+    This is an operator-side Atrex-Bench configuration error, not missing ABBA
+    evidence and not a Candidate verdict.  Search only structured evaluator
+    result/error containers so Candidate source or captured output cannot forge
+    the classification.
+    """
+    if isinstance(value, str):
+        if _INVALID_MANAGED_CLOCK in value.casefold():
+            return {
+                "error_class": "infra",
+                "reason": "agate_clock_configuration_invalid",
+                "message": _INVALID_MANAGED_CLOCK,
+            }
+        return None
+    if isinstance(value, list):
+        for item in value:
+            if error := _clock_configuration_error(item):
+                return error
+        return None
+    if not isinstance(value, dict):
+        return None
+    for key in (
+        "error", "message", "details", "cause", "result", "abba",
+        "sdk_results", "runs", "baseline", "candidate", "passed",
+        "compile", "correctness", "performance", "shapes", "cases",
+    ):
+        if error := _clock_configuration_error(value.get(key)):
+            return error
+    return None
+
+
+def _clock_configuration_process(
+    job: dict, process: subprocess.CompletedProcess[str]
+) -> subprocess.CompletedProcess[str] | None:
+    """Project the safe configuration diagnostic without a physical Job ID."""
+    error = _clock_configuration_error(job)
+    if error is None:
+        return None
+    return subprocess.CompletedProcess(
+        process.args,
+        ENVIRONMENT_TEMPFAIL,
+        json.dumps({
+            "status": "failed",
+            "outcome": "unavailable",
+            "error": error,
+        }),
         process.stderr,
     )
 
@@ -479,6 +533,10 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
             process = dispatch(attempt)
             job = gateway.parse_job_response(process.stdout or "")
             if not job or job.get("status") != "succeeded":
+                if isinstance(job, dict) and (
+                    configuration := _clock_configuration_process(job, process)
+                ):
+                    return None, configuration
                 return None, process
             timeout_failures = _abba_wall_clock_timeout_failures(job)
             if timeout_failures:
@@ -527,10 +585,21 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
     failures = [process for _, process in results if process is not None]
     if failures:
         infrastructure = False
+        configuration_failure = False
         for process in failures:
             emit_gateway_error(process, "same_allocation_abba")
             job = gateway.parse_job_response(process.stdout or "")
+            configuration_failure |= bool(
+                isinstance(job, dict)
+                and isinstance(job.get("error"), dict)
+                and job["error"].get("reason") == "agate_clock_configuration_invalid"
+            )
             infrastructure |= job is None or eval_retry_kind(job) is not None or job.get("status") in {"cancelled", "canceled"}
+        if configuration_failure:
+            # The exact Agent-safe error was emitted above and the unredacted
+            # Agate terminal Job remains in the private checkpoint.  Do not add
+            # a later generic evidence_unavailable marker that hides the cause.
+            return ENVIRONMENT_TEMPFAIL
         if infrastructure:
             raise EvidenceUnavailable(
                 "Native ABBA did not produce a measurement; completed Shape batches "

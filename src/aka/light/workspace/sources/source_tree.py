@@ -1,4 +1,4 @@
-"""Editable ``kernel.py`` plus ``impl/``; independent file-system implementation."""
+"""Editable ``kernel.py`` plus an optional ``impl/`` source directory."""
 from __future__ import annotations
 import hashlib,json,os,stat,subprocess,tarfile,time
 from pathlib import Path
@@ -15,7 +15,7 @@ def default_tree(files):
     """Normalize one editable ``kernel.py`` into the default source-tree layout."""
     if not isinstance(files, dict) or set(files) != {"kernel.py"}:
         raise ValueError("Default source-tree initialization requires exactly kernel.py")
-    normalized = {"kernel.py": files["kernel.py"], "impl/__init__.py": b""}
+    normalized = {"kernel.py": files["kernel.py"]}
     policy = {
         "schema_version": 1,
         "source_revision": None,
@@ -81,9 +81,8 @@ def validate_policy(policy):
 
 def validate_files(files, policy):
     validate_policy(policy)
-    for required in ("kernel.py", "impl/__init__.py"):
-        if required not in files:
-            raise ValueError(f"Source tree requires {required}")
+    if "kernel.py" not in files:
+        raise ValueError("Source tree requires kernel.py")
     if len(files) > 4096 or sum(len(data) for data in files.values()) > MAX_TOTAL:
         raise ValueError("Source tree exceeds 4096 files / 64 MiB")
     for name, data in files.items():
@@ -134,9 +133,9 @@ def collect(workspace, policy, *, validate=True):
     return validate_files(files, policy) if validate else files
 
 def instructions(policy):
-    return ("\n## Kernel source tree\nEditable kernel.py and impl/ form one Kernel. "
-            "You may keep the implementation in kernel.py or add, edit and delete helper, host, "
-            "CUDA and header sources below impl/. Keep impl/__init__.py present. "
+    return ("\n## Kernel source tree\nEditable kernel.py and optional impl/ form one Kernel. "
+            "You may keep the complete implementation in kernel.py or create, edit and delete "
+            "helper, host, CUDA and header sources below impl/. "
             "Keep probes and temporary build outputs in scratch/; use custom tools/ or skills/ "
             "only for genuinely reusable Agent helpers. "
             "Evaluate, Profile, Check, Disassemble, sealed reports and broadcasts bind the entire tree. "
@@ -268,7 +267,7 @@ def import_tree(manifest_path, repository=None, *, directory=None):
         if not any(name.startswith(root + "/") for name in files):
             raise ValueError("editable_roots must name imported source directories")
     # Normalize imported packages into the one Agent-visible source boundary.
-    normalized = {"kernel.py": files.pop("kernel.py"), "impl/__init__.py": b""}
+    normalized = {"kernel.py": files.pop("kernel.py")}
     for name, data in files.items():
         normalized[f"impl/{name}"] = data
     files = normalized

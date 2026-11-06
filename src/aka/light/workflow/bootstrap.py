@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -63,10 +64,16 @@ from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES, SHAPE_BA
 from aka.light.agent.dependency_policy import DEPENDENCY_GUARD_ENV
 from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT
 from aka.light.workspace.versions import (
-    STATE_DIRECTORY,
+    objective_score_report,
     save_version_record,
     version_commit_paths,
     version_record_path,
+)
+from aka.light.workspace.baseline import (
+    baseline_failure_path,
+    read_baseline_record,
+    write_baseline_failure,
+    write_baseline_record,
 )
 from aka.legacy.task.problem.layout import (
     AGENT_PROBLEM_FILENAME,
@@ -88,6 +95,7 @@ from aka.light.workflow.session_io import (
     SessionResult,
     _production_review_candidate_paths,
     _production_review_digest,
+    _local_test_record,
     _record_local_test_result,
     _render,
     _sandbox_command,
@@ -294,12 +302,13 @@ class Campaign:
     agent_sandbox: str = "none"  # opt-in coordinator isolation, independent of GPU transport
     bwrap_executable: str = "bwrap"
     agent_read_only_paths: tuple[str, ...] = ()
+    agent_reference_paths: tuple[tuple[str, str], ...] = ()
     optimization_mode: str = (
         "leaderboard"  # permissive contest flow or strict production gate
     )
     expose_evaluator_shapes: bool = True
     framework_baseline: str = (
-        "never"  # direct V0 -> Episode by default; auto | always opt into V1 bring-up
+        "auto"  # bring up a target-framework V1 when the measured V0 is a wrapper
     )
     framework_baseline_timeout: int = FRAMEWORK_BASELINE_TIMEOUT_S
     handoff_resumes: int = DEFAULT_HANDOFF_RESUMES
@@ -355,6 +364,10 @@ class Campaign:
             raise ValueError("production_review_timeout must be positive")
         if type(self.shape_batch_size) is not int or self.shape_batch_size <= 0:
             raise ValueError("shape_batch_size must be a positive integer")
+        if self.agent_reference_paths and self.agent_sandbox != "bwrap":
+            raise ValueError(
+                "--agent-reference-dir requires an Agent profile with sandbox=bwrap"
+            )
 
     @property
     def campaign_name(self) -> str:
@@ -533,6 +546,7 @@ class Campaign:
             "ATREX_AGENT_SANDBOX": self.agent_sandbox,
             "ATREX_BWRAP_EXECUTABLE": self.bwrap_executable,
             "ATREX_AGENT_READ_ONLY_PATHS": json.dumps(self.agent_read_only_paths),
+            "ATREX_AGENT_REFERENCE_PATHS": json.dumps(dict(self.agent_reference_paths)),
             "ATREX_AGENT_WORKSPACE_ROLE": role,
         }
 
@@ -571,19 +585,6 @@ class Campaign:
         self._supervisor_runtime.numerical_validator = self.supplemental_numerical_feedback
         self._supervisor_runtime.research_claim_reviewer = self.review_research_claim
 
-    @staticmethod
-    def _claim_review_evidence_digest(root: Path) -> str:
-        digest = hashlib.sha256()
-        for path in sorted(
-            item for item in root.rglob("*")
-            if item.is_file() and item.name != "review.json"
-        ):
-            relative = path.relative_to(root).as_posix()
-            digest.update(relative.encode() + b"\0")
-            digest.update(path.read_bytes())
-            digest.update(b"\0")
-        return digest.hexdigest()
-
     def review_research_claim(
         self,
         evidence_root: Path,
@@ -596,10 +597,18 @@ class Campaign:
         from aka.light.workflow.claim_review import validate_review
 
         evidence_root = Path(evidence_root).resolve(strict=True)
-        before = self._claim_review_evidence_digest(evidence_root)
         model = "qwen3.8-max"
+        boundary_environment = self.agent_boundary_environment(
+            "research-claim-review"
+        )
+        # Independent claim review is a security boundary, not an optimizer
+        # convenience setting.  Always use Bubblewrap even when the selected
+        # optimizer profile deliberately runs without a sandbox.  If bwrap is
+        # unavailable, launch fails closed and the caller archives an
+        # unreviewed receipt instead of executing the reviewer natively.
+        boundary_environment["ATREX_AGENT_SANDBOX"] = "bwrap"
         base_environment = {
-            **self.agent_boundary_environment("research-claim-review"),
+            **boundary_environment,
             "ANTHROPIC_MODEL": model,
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
             "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
@@ -634,17 +643,42 @@ class Campaign:
                 "ATREX_SESSION_CAPTURE_DIR": str(attempt_capture),
             }
             resumed = attempt == 1 and bool(resume_session_id)
-            result = self._run_session(
-                evidence_root,
-                RESEARCH_CLAIM_REVIEW_PROMPT.read_text(encoding="utf-8"),
-                timeout=self.production_review_timeout,
-                agent_cli="claude",
-                reasoning_effort="high",
-                agent_plugins=False,
-                extra_environment=environment,
-                session_id=resume_session_id if resumed else None,
-                resume_session=resumed,
-            )
+            try:
+                result = self._run_session(
+                    evidence_root,
+                    RESEARCH_CLAIM_REVIEW_PROMPT.read_text(encoding="utf-8"),
+                    # Claim review is part of the durable research record, not
+                    # an optimization Episode or an acceptance-side advisory.
+                    # Let it finish without an active-time deadline.  The
+                    # Provider/session may still fail explicitly, which is
+                    # captured below for audit and retry.
+                    timeout=None,
+                    agent_cli="claude",
+                    reasoning_effort="high",
+                    agent_plugins=False,
+                    extra_environment=environment,
+                    session_id=resume_session_id if resumed else None,
+                    resume_session=resumed,
+                )
+            except Exception as error:  # noqa: BLE001 - audit every launch-boundary failure
+                # A launch-boundary failure has no Provider result or capture to
+                # inspect. Preserve it as a Supervisor-private attempt so the
+                # public receipt can stay bounded without erasing the cause.
+                last_error = error
+                session_attempts.append({
+                    "attempt": attempt,
+                    "session_id": resume_session_id if resumed else "",
+                    "status": "capture_missing",
+                    "exit_status": None,
+                    "timed_out": False,
+                    "conversation_path": None,
+                    "resumed": resumed,
+                    "error": {
+                        "type": type(error).__name__,
+                        "message": str(error)[:2000],
+                    },
+                })
+                continue
             self._account(result, f"Qwen research-claim review attempt {attempt}")
             conversations = sorted(
                 (
@@ -673,8 +707,6 @@ class Campaign:
                 if response.stat().st_size > 128 * 1024:
                     raise ValueError("research claim review exceeds 128 KiB")
                 review = validate_review(value)
-                if self._claim_review_evidence_digest(evidence_root) != before:
-                    raise ValueError("research claim reviewer modified supplied evidence")
                 if result.timed_out:
                     print(
                         "[research-review] recovered a valid review from a timed-out reviewer",
@@ -810,18 +842,16 @@ class Campaign:
         return True
 
     def acceptance_measurement_context(
-        self, incumbent_source: bytes, incumbent_commit: str
+        self, agent_workspace: Path, incumbent_source: bytes
     ) -> dict:
-        """Public Kernel identity and frozen Runtime policy, without private inputs."""
+        """Return the exact Agent-visible incumbent identity and frozen policy."""
         self.start_runtime()
         runtime = self._supervisor_runtime
-        from aka.light.experiment.store import RecordNotFound
-        try:
-            baseline_kernel_id = runtime.measurements.find_kernel_id(incumbent_source)
-        except RecordNotFound:
-            baseline_kernel_id = runtime.measurements.kernel(
-                incumbent_source, incumbent_commit
-            )["kernel_id"]
+        baseline_kernel_id = runtime.baseline_kernel_commit(agent_workspace)
+        # Bind the source under the Agent-visible commit. The controller commit
+        # may identify identical bytes in a different, private Git history and
+        # must never leak into an Agent ABBA request.
+        runtime.measurements.kernel(incumbent_source, baseline_kernel_id)
         return {
             "baseline_kernel_id": baseline_kernel_id,
             "measurement_repetitions": runtime.measurement_repetitions,
@@ -1486,9 +1516,8 @@ class Campaign:
         return bool(getattr(getattr(self, "module_options", None), "generate_memory", False))
 
     def _run_v0_evaluator(self) -> dict:
-        """Run the sole V0 evaluator and persist its local transport record."""
-        failed_memory_path = self.workspace / STATE_DIRECTORY / "v0.failed.json"
-        failed_memory_path.unlink(missing_ok=True)
+        """Run the sole V0 evaluator and persist Supervisor-private facts."""
+        baseline_failure_path(self.workspace).unlink(missing_ok=True)
         test = _sandbox_command(
             self.workspace,
             self.sandbox_hardware,
@@ -1516,26 +1545,37 @@ class Campaign:
             raise RuntimeError(
                 f"sandbox V0 baseline produced no usable result: {exc}"
             ) from exc
-        memory_path = _record_local_test_result(
-            self.workspace, "v0", result, generate_memory=self.generate_memory
+        record = _local_test_record(
+            self.workspace,
+            "v0",
+            result,
+            existing=read_baseline_record(self.workspace) or {},
         )
+        # A sharded Evaluate can submit several backend ev_* jobs.  They are
+        # implementation details of one logical Gateway Record: retain them for
+        # Supervisor audit/recovery, but never project them into PROGRESS.md.
+        backend_job_ids = list(
+            dict.fromkeys(
+                re.findall(r"\bev_[A-Za-z0-9_.-]+\b", test.stdout + "\n" + test.stderr)
+            )
+        )
+        if backend_job_ids:
+            record["backend_job_ids"] = backend_job_ids
         if test.returncode != 0 or not result.get("all_pass"):
             # Keep diagnostics without making latest_version() treat a failed or
             # interrupted baseline as canonical. A rerun will retry V0 directly.
-            memory_path.replace(failed_memory_path)
-            if self.generate_memory:
-                summary = self.workspace / "memory/v0.json"
-                summary.replace(summary.with_name("v0.failed.json"))
+            write_baseline_failure(self.workspace, record)
             raise RuntimeError(
                 "sandbox V0 baseline failed correctness/performance validation"
             )
+        write_baseline_record(self.workspace, record)
         return result
 
     def _run_v0_evaluator_with_correctness_prefetch(self) -> dict:
         """Measure V0 while prefetching the source-only V1 correctness review.
 
         The review packet deliberately excludes V0 measurement artifacts, so its
-        digest is stable before and after the evaluator writes canonical memory/v0.json. Review failure remains non-fatal here: the ordinary V1
+        digest is stable before and after the evaluator writes private V0 facts. Review failure remains non-fatal here: the ordinary V1
         entry point validates the cache and retries synchronously when necessary.
         """
         if not self._framework_baseline_correctness_reviewers():
@@ -1568,12 +1608,12 @@ class Campaign:
         self,
         result: dict,
         source_commit: str,
-        *,
-        extra_paths: tuple[str, ...] = (),
     ) -> None:
-        """Commit V0 measurement metadata without rewriting its source commit SHA."""
-        memory_path = version_record_path(self.workspace, 0, prefer_summary=self.generate_memory)
-        memory = json.loads(memory_path.read_text(encoding="utf-8"))
+        """Seal V0 facts privately while keeping HEAD at the real source commit."""
+        memory = read_baseline_record(self.workspace)
+        if not isinstance(memory, dict):
+            raise RuntimeError("V0 evaluator produced no private measurement record")
+        memory = dict(memory)
         memory["git_commit_hash"] = source_commit
         optimization = memory.setdefault("optimization", {})
         optimization["action_category"] = "baseline"
@@ -1582,39 +1622,19 @@ class Campaign:
         )
         optimization["expected_impact"] = "correctness and latency reference for later versions"
         optimization["risks_and_rollback"] = "none; immutable V0 reference baseline"
-        memory_path = save_version_record(self.workspace, 0, memory, generate_memory=self.generate_memory)
+        memory = objective_score_report(self.workspace, 0, memory)
+        write_baseline_record(self.workspace, memory)
         coverage_problem = self._generalized_memory_coverage_problem(memory)
         if coverage_problem:
             raise RuntimeError(f"invalid native V0 measurement: {coverage_problem}")
-
-        staged = version_commit_paths(self.workspace, 0, generate_memory=self.generate_memory)
-        staged.extend(
-            path for path in extra_paths if (self.workspace / path).is_file()
-        )
-        subprocess.run(
-            ["git", "add", *staged], cwd=str(self.workspace), check=True
-        )
-        if (
-            subprocess.run(
-                ["git", "diff", "--cached", "--quiet"],
-                cwd=str(self.workspace),
-                check=False,
-            ).returncode
-            == 0
-        ):
-            raise RuntimeError("V0 evaluator produced no measurement metadata to commit")
-        subprocess.run(
-            ["git", "commit", "-m", "V0: record baseline measurement"],
-            cwd=str(self.workspace),
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
         recorded = read_memory(self.workspace, 0) or {}
         if recorded.get("git_commit_hash") != source_commit:
             raise RuntimeError("V0 measurement record does not point to the V0 source commit")
         from aka.light.workspace.sources import from_git, snapshot as source_snapshot
         if from_git(self.workspace, source_commit) != source_snapshot(self.workspace):
             raise RuntimeError("V0 candidate source differs from its recorded source commit")
+        if git_head(self.workspace) != source_commit:
+            raise RuntimeError("V0 measurement must not advance Git beyond its source commit")
 
     def _setup_baseline_native(self, op_dir: Path, *, generalized: bool) -> None:
         """Seed native Atrex-Bench V0 without launching a coding Agent."""
@@ -1724,7 +1744,6 @@ class Campaign:
         self._finalize_v0_measurement(
             result,
             source_commit,
-            extra_paths=("CLAUDE.md", "WORKSPACE.md", ".gitignore"),
         )
 
     def ensure_framework_baseline(self) -> None:
@@ -2605,12 +2624,29 @@ class Campaign:
             NOTES=self.notes,
             CORRECTNESS_GUIDANCE=self._framework_baseline_correctness_guidance_text(),
             SHAPE_DISCLOSURE=self._shape_disclosure_prompt(),
+            REFERENCE_KNOWLEDGE=self.reference_knowledge_prompt(),
+        )
+
+    def reference_knowledge_prompt(self) -> str:
+        if not self.agent_reference_paths:
+            return ""
+        entries = "\n".join(
+            f"- `references/{name}/`" for name, _ in self.agent_reference_paths
+        )
+        return (
+            "## Reference knowledge\n\n"
+            f"{entries}\n\n"
+            "These Supervisor-mounted directories are read-only engineering references. "
+            "Use them selectively for architecture facts, implementation patterns, and probe design. "
+            "They are not the task contract, measurement evidence, or candidate source. Verify "
+            "applicability on the target hardware through Runtime. Do not execute or import them, "
+            "make the final Kernel depend on them, or copy them blindly."
         )
 
     def _restore_immutable_baseline_paths(self, baseline_commit: str) -> list[str]:
         """Put back any ground-truth file the session edited, and report what was restored.
 
-        A session that "fixes" the harness or memory/v0.json is a compliance problem, but a
+        A session that "fixes" the harness or evaluator-owned baseline is a compliance problem, but a
         mechanically repairable one — discarding its kernel over it would throw away hours of
         work for nothing. Acceptance is decided by the kernel itself.
         """

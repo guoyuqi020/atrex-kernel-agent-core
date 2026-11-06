@@ -24,6 +24,7 @@ from aka.legacy.task.candidate_workspace.state import (
 from aka.legacy.task.git import git_path_blob, git_worktree_blob
 
 from aka.light.workflow.constants import FRAMEWORK_BASELINE_FILE, STALL_STATE_FILE
+from aka.light.workspace.baseline import read_baseline_record
 from aka.light.workspace.versions import STATE_DIRECTORY, version_record_path
 
 
@@ -42,11 +43,15 @@ def latest_version(workspace: Path) -> int:
             m = _STRICT.match(p.name)
             if m is not None:
                 vs.append(int(m.group(1)))
+    if read_baseline_record(workspace) is not None:
+        vs.append(0)
     return max(vs) if vs else -1
 
 
 def read_memory(workspace: Path, n: int) -> Optional[dict]:
     """Read controller facts, falling back to pre-switch memory-only histories."""
+    if n == 0:
+        return read_baseline_record(workspace)
     path = version_record_path(workspace, n)
     if not path.exists():
         return None

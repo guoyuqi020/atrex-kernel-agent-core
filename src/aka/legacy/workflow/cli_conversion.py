@@ -184,6 +184,18 @@ def parse_arguments(argv):
         ),
     )
     ap.add_argument(
+        "--agent-reference-dir",
+        action="append",
+        nargs="+",
+        default=[],
+        metavar="DIR",
+        help=(
+            "Mount one or more existing directories read-only at references/<basename>/ "
+            "inside the optimization Agent workspace. Repeat the option or list several "
+            "directories after one option. Requires a bwrap Agent profile."
+        ),
+    )
+    ap.add_argument(
         "--notes", default="none", help="Extra constraints / known bottlenecks."
     )
     ap.add_argument(
@@ -270,12 +282,12 @@ def parse_arguments(argv):
     ap.add_argument(
         "--framework-baseline",
         choices=FRAMEWORK_BASELINE_MODES,
-        default="never",
+        default="auto",
         help="Run one dedicated session after V0 setup that "
         "replaces the V0 PyTorch wrapper with the first self-contained framework "
         "kernel, recorded as v1 (so optimization episodes start at v2). "
-        "The default, never, optimizes directly from the measured V0 kernel; "
-        "auto applies the compatibility policy and always forces the separate V1 stage.",
+        "The default, auto, runs this stage when V0 still needs framework bring-up; "
+        "always forces it and never explicitly opts out.",
     )
     ap.add_argument(
         "--framework-baseline-timeout",
@@ -332,6 +344,31 @@ def parse_arguments(argv):
         ap.error(
             "--workspace-suffix must be a normalized lowercase alphanumeric/underscore suffix"
         )
+    reference_paths = []
+    reference_names = set()
+    for raw_path in (item for group in args.agent_reference_dir for item in group):
+        path = Path(raw_path).expanduser()
+        try:
+            path = path.resolve(strict=True)
+        except OSError as exc:
+            ap.error(f"--agent-reference-dir cannot resolve {raw_path!r}: {exc}")
+        if not path.is_dir():
+            ap.error(f"--agent-reference-dir must name a directory: {raw_path}")
+        name = path.name
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            ap.error(
+                "--agent-reference-dir basenames must be safe path components: "
+                f"{name!r}"
+            )
+        if name in reference_names:
+            ap.error(
+                "--agent-reference-dir directories must have unique basenames: "
+                f"{name!r}"
+            )
+        reference_names.add(name)
+        reference_paths.append((name, str(path)))
+    args.agent_reference_paths = tuple(reference_paths)
+    del args.agent_reference_dir
     if args.sandbox_timeout is not None and args.sandbox_timeout < 1:
         ap.error("--sandbox-timeout must be positive")
     if args.setup_timeout <= 0:
@@ -487,6 +524,8 @@ def adapt_argv(argv):
         workflow_options.add("specify_dsl")
     if "--no-expose-evaluator-shapes" in explicit:
         workflow_options.add("expose_evaluator_shapes")
+    if "--agent-reference-dir" in explicit:
+        workflow_options.add("agent_reference_paths")
     runtime_options = {field.name for field in __import__("dataclasses").fields(request.runtime)
                        if "--" + field.name.replace("_", "-") in explicit}
     if "--verify-shape-batch-size" in explicit:
