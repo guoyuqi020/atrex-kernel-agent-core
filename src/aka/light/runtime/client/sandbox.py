@@ -37,7 +37,6 @@ RUNTIME_TOKEN_ENV = "ATREX_AKA_RUNTIME_TOKEN"
 # Wire contract with the Supervisor; keep this client independent of its modules.
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_REQUEST_FILE_BYTES = MAX_REQUEST_BYTES - 4 * 1024
-MAX_RESPONSE_BYTES = 1024 * 1024
 WIKI_KINDS = {"wiki-query": "query_nl", "wiki-search": "query_wiki", "wiki-hardware": "query_hardware"}
 REQUEST_KINDS = {
     "update-direction": "direction_update",
@@ -137,13 +136,13 @@ def proxy_command(path: str, payload: dict) -> int:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     try:
         with opener.open(request, timeout=None) as response:
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            raw = response.read()
             execution_exit_code = response.headers.get("X-Atrex-Execution-Exit-Code")
     except urllib.error.HTTPError as error:
         with error:
-            raw = error.read(MAX_RESPONSE_BYTES + 1)
+            raw = error.read()
         try:
-            value = json.loads(raw) if len(raw) <= MAX_RESPONSE_BYTES else None
+            value = json.loads(raw)
         except (ValueError, UnicodeError):
             value = None
         if isinstance(value, dict):
@@ -160,8 +159,6 @@ def proxy_command(path: str, payload: dict) -> int:
                      "Inspect saved records and ask the operator to reconcile the request. Do not resubmit blindly.")
         return 75
     try:
-        if len(raw) > MAX_RESPONSE_BYTES:
-            raise ValueError("response exceeds limit")
         result = json.loads(raw)
         if (isinstance(result, dict) and isinstance(result.get("operation"), str)
                 and result.get("status") in {"completed", "failed", "cancelled"}

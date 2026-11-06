@@ -51,6 +51,10 @@ from aka.light.evaluation.hardware import hardware_directive
 from aka.light.evaluation.evaluation_failures import (
     embedded_candidate_wall_clock_timeouts,
 )
+from aka.light.evaluation.evaluation_feedback import (
+    evaluation_feedback,
+    project_feedback,
+)
 from aka.light.evaluation.policy import (
     BENCH_ITERS,
     CORRECTNESS_CASES,
@@ -60,12 +64,17 @@ from aka.light.evaluation.native_abba import (
     _clock_configuration_error,
     _clock_configuration_process,
 )
-from aka.light.evaluation.public_result import canonical_result
+from aka.light.evaluation.public_result import (
+    bound_diagnostic_response,
+    canonical_result,
+)
 from aka.light.evaluation.projection import (
+    evaluation as project_evaluation,
     gateway_error_from_process,
     gateway_error_result,
     project_response,
 )
+from aka.light.evaluation.result_conversion import optimizer_result_from_eval
 from aka.light.evaluation.shapes import (
     batch_shape_ids,
     effective_shape_batch_size,
@@ -477,13 +486,13 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("Reference version:", baseline)
         self.assertIn("Hardware: `{{ARCH}}`", baseline)
         self.assertIn("Wiki query is a knowledge request, not a Kernel measurement", baseline)
-        self.assertIn("Do not invoke GPU measurement, diagnostic, or custom-execution", baseline)
-        self.assertIn("Do not create a Git commit", baseline)
-        self.assertIn("Supervisor validates the worktree", baseline)
-        self.assertIn("returns gate diagnostics to a recovery Session", baseline)
-        self.assertIn("commits an accepted V1", baseline)
+        self.assertIn("Work like a normal Episode", baseline)
+        self.assertIn("Use Runtime Evaluate to establish correctness", baseline)
+        self.assertIn("commit the complete candidate and leave the worktree clean", baseline)
+        self.assertIn("does not require a speedup over V0", baseline)
+        self.assertIn("passes the standard full Evaluate", baseline)
+        self.assertNotIn("Do not invoke GPU measurement", baseline)
         self.assertNotIn("recovery header", baseline)
-        self.assertNotIn("leave `git status` clean", baseline)
         self.assertNotIn("rerun the bounded V1 smoke", baseline)
 
         wiki_plugin = Path(__file__).resolve().parents[1] / "plugins/gpu-wiki"
@@ -609,8 +618,8 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         report_skill = (resource_dir / "runtime-report" / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("source-and-exit procedure", report_skill)
-        self.assertIn("Supervisor, not the Agent, commits an accepted V1", report_skill)
+        self.assertIn("same Git and Runtime measurement loop", report_skill)
+        self.assertIn("correctness-passing candidate at clean HEAD", report_skill)
         self.assertIn("`pivot` and `blocked` reports omit them", report_skill)
         self.assertNotIn("smoke-and-exit procedure", report_skill)
         wiki_plugin = Path(__file__).resolve().parents[1] / "plugins/gpu-wiki"
@@ -2187,8 +2196,9 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
 
         self.assertIn("# Framework Baseline workspace contract", contract)
         self.assertIn("Editable kernel.py and optional impl/ form one Kernel", contract)
-        self.assertIn("References there to Runtime measurement or reporting", contract)
-        self.assertIn("Do not create Git commits, submit episode-report", contract)
+        self.assertIn("same Runtime measurement operations", contract)
+        self.assertIn("Use local Git for candidate checkpoints", contract)
+        self.assertIn("Do not submit episode-report", contract)
         self.assertNotIn("trajectory-private local Git repository", contract)
 
     def test_dependency_recovery_preserves_sourceprovider_and_mode_contracts(self):
@@ -2742,6 +2752,85 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("elementwise tolerance failed", problem)
         self.assertIn('\"max_elementwise_rel_diff\": 0.125', problem)
         self.assertNotEqual(problem, "combined validation command failed (exit=1)")
+
+    def test_agent_visible_compiler_diagnostic_preserves_complete_tail(self):
+        repeated = "template instantiation note from torch headers\n" * 40_000
+        root_cause = (
+            "ATen/core/List_inl.h:201: error: dependent name is not a type; "
+            "prefix it with 'typename'"
+        )
+        compiler_error = repeated + root_cause
+        raw = {
+            "passed": {
+                "compile": {
+                    "0": {"status": "failed", "reason": compiler_error},
+                },
+                "correctness": {},
+            },
+            "correctness": {"shapes": {}},
+        }
+        result = optimizer_result_from_eval(
+            raw, ["0"], {}, require_performance=False
+        )
+        self.assertEqual(
+            result["actionable_diagnostics"][0]["message"], compiler_error
+        )
+        projected = project_evaluation(result)
+        self.assertEqual(
+            projected["actionable_diagnostics"][0]["message"], compiler_error
+        )
+
+        response = {
+            "exit_code": 1,
+            "stdout": "[test_kernel] RESULT_JSON=" + json.dumps(result) + "\n",
+            "stderr": "",
+        }
+        self.assertEqual(bound_diagnostic_response(response), response)
+
+        completed = subprocess.CompletedProcess(
+            ["python", "test_kernel.py"], 1, response["stdout"], ""
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = Campaign(
+                name="operator",
+                kernel_demo="reference.py",
+                platform="cuda",
+                framework="cuda",
+                work_dir=directory,
+            )
+            with (
+                patch(
+                    "aka.light.workflow.bootstrap._sandbox_command",
+                    return_value=completed,
+                ),
+                patch.object(Campaign, "_print_v0_evaluator_output"),
+            ):
+                parsed, problem = campaign._validate_framework_baseline(1)
+        self.assertEqual(parsed, result)
+        self.assertIn(root_cause, problem)
+        self.assertNotIn("diagnostic truncated", problem)
+
+    def test_repeated_long_diagnostics_are_deduplicated_not_truncated(self):
+        root_cause = "nvcc: fatal error: unsupported gpu architecture 'compute_103'"
+        compiler_error = ("repeated include trace\n" * 20_000) + root_cause
+        feedback = evaluation_feedback(
+            {
+                "compile": {
+                    "shapes": {
+                        "0": {"error": compiler_error},
+                        "1": {"error": compiler_error},
+                    }
+                }
+            },
+            ["0", "1"],
+        )
+        self.assertEqual(len(feedback["diagnostics"]), 1)
+        self.assertEqual(feedback["diagnostics"][0]["error"], compiler_error)
+        self.assertEqual(feedback["diagnostics"][0]["shape_ids"], ["0", "1"])
+        projected = project_feedback(feedback)
+        self.assertEqual(projected["diagnostics"][0]["error"], compiler_error)
+        self.assertEqual(projected["diagnostics"][0]["shape_ids"], ["0", "1"])
+        self.assertNotIn("feedback_truncation", projected)
 
     def test_framework_baseline_gates_run_concurrently_and_return_together(self):
         barrier = threading.Barrier(3)

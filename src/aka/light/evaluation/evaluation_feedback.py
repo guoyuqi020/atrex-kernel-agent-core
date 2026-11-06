@@ -1,4 +1,4 @@
-"""Bounded Agate diagnostics and timing evidence, without evaluator input material.
+"""Agate diagnostics and timing evidence, without evaluator input material.
 
 Error text is upstream text, not a Runtime paraphrase. The surrounding fields only
 identify which stage/opaque shape/output failed. Never include input generators,
@@ -7,7 +7,6 @@ sample seeds, input values or whole job/request documents in the Agent response.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 from collections.abc import Iterable
@@ -16,8 +15,6 @@ from typing import Any, cast
 JsonValue = Any
 
 FEEDBACK_KEYS = ("diagnostics", "performance_by_shape", "feedback_truncation")
-_MAX_DIAGNOSTICS = 128
-_MAX_FEEDBACK_BYTES = 256 * 1024
 _MAX_KERNELS = 64
 
 
@@ -26,10 +23,11 @@ def _count(value: JsonValue) -> int:
 
 
 def _text(value: object) -> str:
-    # Import lazily: projection also consumes this module's bounded feedback.
+    # Import lazily: projection also consumes this module's feedback.
     from aka.light.evaluation.projection import credential_values, redact_diagnostics
-    text = redact_diagnostics(str(value), private_values=credential_values(dict(os.environ)))
-    return text.encode("utf-8")[:8192].decode("utf-8", errors="ignore")
+    return redact_diagnostics(
+        str(value), private_values=credential_values(dict(os.environ))
+    )
 
 
 def _number(value: object) -> bool:
@@ -45,27 +43,36 @@ def evaluation_feedback(raw: object, shape_ids: Iterable[str]) -> dict[str, Json
         return {}
     allowed = set(shape_ids)
     diagnostics: list[JsonValue] = []
+    seen_diagnostics: set[tuple[object, ...]] = set()
+    diagnostic_items: dict[tuple[object, ...], dict[str, JsonValue]] = {}
     performance: dict[str, JsonValue] = {}
-    omitted = 0
 
     def add(stage: str, shape_id: str, error: object, **context: JsonValue) -> None:
-        nonlocal omitted
         if not error:
             return
-        if len(diagnostics) >= _MAX_DIAGNOSTICS:
-            omitted += 1
-            return
-        original = str(error)
-        message = _text(original)
-        diagnostics.append(
-            {
-                "stage": stage,
-                "shape_id": shape_id,
-                **context,
-                "error": message,
-                **({"text_truncated": True} if len(original.encode()) > 8192 else {}),
-            }
+        message = _text(error)
+        # Repeated compiler text from multiple cases/shapes is byte-for-byte
+        # redundant.  Deduplicate it structurally instead of truncating it.
+        key = (
+            stage,
+            message,
+            tuple(sorted((name, repr(value)) for name, value in context.items())),
         )
+        if key in seen_diagnostics:
+            item = diagnostic_items[key]
+            known_shapes = item.setdefault("shape_ids", [item["shape_id"]])
+            if shape_id and shape_id not in known_shapes:
+                known_shapes.append(shape_id)
+            return
+        seen_diagnostics.add(key)
+        item = {
+            "stage": stage,
+            "shape_id": shape_id,
+            **context,
+            "error": message,
+        }
+        diagnostic_items[key] = item
+        diagnostics.append(item)
 
     # Top-level error text is evidence too; never copy whole job/request objects.
     records = (
@@ -173,41 +180,28 @@ def evaluation_feedback(raw: object, shape_ids: Iterable[str]) -> dict[str, Json
                     ):
                         add(stage, sid, verdict.get("reason") or "Agate reported stage failure")
     return bound_feedback(
-        {
-            "diagnostics": diagnostics,
-            "performance_by_shape": performance,
-            **({"feedback_truncation": {"omitted_diagnostics": omitted}} if omitted else {}),
-        }
+        {"diagnostics": diagnostics, "performance_by_shape": performance}
     )
 
 
-def bound_feedback(value: dict[str, JsonValue], *, max_bytes: int = _MAX_FEEDBACK_BYTES) -> dict[str, JsonValue]:
-    """Bound the whole feedback, keeping errors before optional timing detail."""
+def bound_feedback(value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Normalize feedback without applying a text or response-size limit.
+
+    The historical name remains internal API compatibility.  Diagnostic text
+    is measurement evidence; omitting it because it is long can remove the
+    compiler's actual root cause.
+    """
     raw_diagnostics = value.get("diagnostics")
     raw_performance = value.get("performance_by_shape")
     raw_truncation = value.get("feedback_truncation")
-    diagnostics = list(raw_diagnostics[:_MAX_DIAGNOSTICS]) if isinstance(raw_diagnostics, list) else []
+    diagnostics = list(raw_diagnostics) if isinstance(raw_diagnostics, list) else []
     performance = dict(raw_performance) if isinstance(raw_performance, dict) else {}
     truncation = dict(raw_truncation) if isinstance(raw_truncation, dict) else {}
-    if isinstance(raw_diagnostics, list) and len(raw_diagnostics) > _MAX_DIAGNOSTICS:
-        truncation["omitted_diagnostics"] = _count(truncation.get("omitted_diagnostics")) + len(raw_diagnostics) - _MAX_DIAGNOSTICS
     result: dict[str, JsonValue] = {"diagnostics": diagnostics, "performance_by_shape": performance}
-    # Reserve room for the truncation annotation itself, including after merging.
-    while len(json.dumps(result, ensure_ascii=False).encode()) > max_bytes - 1024:
-        if performance:
-            performance.pop(next(reversed(performance)))
-            key = "omitted_performance_shapes"
-        elif diagnostics:
-            diagnostics.pop()
-            key = "omitted_diagnostics"
-        else:
-            break
-        truncation[key] = _count(truncation.get(key)) + 1
+    # Preserve omission metadata from historical records, but do not create
+    # new omissions based on serialized length.
     if truncation:
-        result["feedback_truncation"] = {
-            **truncation,
-            "reason": "Runtime response size limit; original errors retained first",
-        }
+        result["feedback_truncation"] = truncation
     return result
 
 
@@ -247,10 +241,13 @@ def project_feedback(value: dict) -> dict:
             continue
         item = {key: _text(row[key]) for key in ("stage", "shape_id", "check", "name", "error")
                 if isinstance(row.get(key), str)}
+        shape_ids = row.get("shape_ids")
+        if isinstance(shape_ids, list):
+            item["shape_ids"] = [
+                _text(shape_id) for shape_id in shape_ids if isinstance(shape_id, str)
+            ]
         item.update({key: row[key] for key in ("case_index", "max_elementwise_abs_diff",
                     "max_elementwise_rel_diff", "relative_l2") if _number(row.get(key))})
-        if row.get("text_truncated") is True:
-            item["text_truncated"] = True
         diagnostics.append(item)
     # Reuse the same timing allowlist used for native payloads.
     performance = value.get("performance_by_shape", {})

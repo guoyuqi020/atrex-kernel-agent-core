@@ -169,7 +169,7 @@ from aka.light.evaluation.shapes import (
 from aka.light.evaluation.result_conversion import (
     finite_number as _finite_number,
     compile_failures as _compile_failures,
-    bounded_actionable_diagnostic as bounded_actionable_diagnostic,
+    actionable_diagnostic as actionable_diagnostic,
     looks_like_candidate_exception as _looks_like_candidate_exception,
     compile_diagnostics as _compile_diagnostics,
     candidate_exception_diagnostics as _candidate_exception_diagnostics,
@@ -4443,7 +4443,7 @@ def _main(argv: list[str] | None = None) -> int:
             raise
         except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
             raise SystemExit(
-                f"sandbox: {label} failed: {bounded_actionable_diagnostic(exc)}"
+                f"sandbox: {label} failed: {actionable_diagnostic(exc)}"
             ) from exc
     if args.command in ([], ["--"]) and args.kind == "run":
         args.command = ["python3", "test_kernel.py", "--no-memory"]

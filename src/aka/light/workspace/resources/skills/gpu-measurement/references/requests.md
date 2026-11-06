@@ -231,8 +231,9 @@ Do not infer unavailable counters or missing measurements as zero.
 
 An error may appear on stderr as a request/transport error, or inside a persisted measurement's
 `result.error`. Preserve the saved ID and separate the observed failure from your explanation.
-`feedback_truncation` means details were omitted; rereading the Record is not a promise of
-unbounded/raw logs. Narrow subsequent diagnostics or ask the operator for unavailable details.
+Historical Records can contain `feedback_truncation`, which means an older Runtime omitted
+details. New Runtime responses preserve complete redacted diagnostic text; they still do not
+expose evaluator inputs, credentials or other private controller material.
 
 ## Probe files and returned artifacts
 

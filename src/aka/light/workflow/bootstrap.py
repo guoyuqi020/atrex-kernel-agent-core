@@ -126,6 +126,9 @@ _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_SCHEMA_VERSION = 5
 _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_PATH = Path(
     ".atrex_long_horizon/framework_baseline/correctness_guidance.json"
 )
+_FRAMEWORK_BASELINE_SESSION_PATH = Path(
+    ".atrex_long_horizon/framework_baseline/session.json"
+)
 _FRAMEWORK_BASELINE_CORRECTNESS_CONTEXT_PATHS = (
     "README.md",
     "reference.py",
@@ -153,24 +156,24 @@ def framework_baseline_workspace_contract(workspace: Path) -> bytes:
     return (
         "# Framework Baseline workspace contract\n\n"
         "This file is Supervisor-owned; do not edit it. The SourceProvider section below "
-        "defines the complete candidate and its editable paths. References there to Runtime "
-        "measurement or reporting describe later optimization Episodes; they do not authorize "
-        "Runtime measurement calls during Framework Baseline.\n"
+        "defines the complete candidate and its editable paths. Framework Baseline uses the same "
+        "Runtime measurement operations and clean-Git candidate identity as an optimization "
+        "Episode; its goal is correctness and compliance rather than speedup.\n"
         + source_contract
         + "\nOnly the SourceProvider-declared candidate paths are editable in this stage. "
         "README.md, CLAUDE.md, this file, evaluator/public-contract inputs, profile_driver.py "
         "and memory/ are Supervisor-owned. Put temporary implementation probes under scratch/. "
-        "Do not create Git commits, submit episode-report, or write canonical memory; leave the "
-        "complete candidate in place for the Supervisor gates.\n"
+        "Use local Git for candidate checkpoints and leave it clean before Kernel-bound Runtime "
+        "requests. Do not submit episode-report or write canonical memory; leave the complete "
+        "candidate at a clean HEAD for the Supervisor gates.\n"
     ).encode("utf-8")
 
 
 def _framework_baseline_validation_failure(
     result: dict, *, returncode: int
 ) -> str:
-    """Render bounded evaluator evidence instead of hiding the failed checks."""
+    """Render complete redacted evaluator evidence for candidate repair."""
     from aka.light.evaluation.projection import (
-        bounded_text,
         evaluation as project_evaluation,
         redact_diagnostics,
     )
@@ -187,9 +190,8 @@ def _framework_baseline_validation_failure(
         )
         if projected.get(key)
     }
-    detail = bounded_text(
-        json.dumps(redact_diagnostics(evidence), ensure_ascii=False, sort_keys=True),
-        16_384,
+    detail = json.dumps(
+        redact_diagnostics(evidence), ensure_ascii=False, sort_keys=True
     )
     exit_note = f"; evaluator command exit={returncode}" if returncode else ""
     message = f"combined five-case correctness validation failed{exit_note}"
@@ -1757,6 +1759,7 @@ class Campaign:
         """
         action, reason = self._framework_baseline_decision()
         if action == "skip":
+            self._seed_episode_session_from_framework_baseline()
             if reason:
                 print(
                     f"[orchestrator] framework baseline skipped: {reason}", flush=True
@@ -1859,6 +1862,7 @@ class Campaign:
             raise RuntimeError(f"framework baseline v{n} {outcome}: {problem}")
 
         commit = self._commit_framework_baseline(n, result or {})
+        self._seed_episode_session_from_framework_baseline()
         try:
             mark_framework_baseline_accepted(
                 self.workspace,
@@ -2465,9 +2469,9 @@ class Campaign:
                 f"The supervisor rejected the current candidate:\n\n{rejection}\n\n"
                 "Keep sound work, fix this exact rejection, and finish V1. The Supervisor will "
                 "run or repeat the configured authoritative gates after this repair; the rejection "
-                "text states which checks have already completed. Do not invoke Runtime measurement "
-                "tools, create a separate benchmark, "
-                "or override Runtime-owned correctness cases in this stage.\n\n"
+                "text states which checks have already completed. Use Runtime measurement or "
+                "diagnostic tools when they help reproduce and repair the failure, but do not "
+                "override Runtime-owned correctness cases or create a separate evaluator.\n\n"
                 + prompt
             )
         if framework_baseline_progress_path(self.workspace).is_file():
@@ -2491,6 +2495,15 @@ class Campaign:
                 "ATREX_TELEMETRY_ATTEMPT_ID": "invocation",
             }
             telemetry_environment.update(self.agent_environment())
+            # Framework Baseline and optimization Episodes are one trajectory.
+            # Keep their Provider state under the same trajectory-stable Home
+            # root so Episode 1 can resume the accepted Baseline Session even
+            # though it executes in a different Git worktree.
+            from aka.light.agent.home import SESSION_HOME_ROOT_ENV
+
+            telemetry_environment[SESSION_HOME_ROOT_ENV] = str(
+                self.workspace / ".atrex_long_horizon" / "agent-session-homes"
+            )
             runner = LongSessionRunner(
                 agent=self.agent,
                 agent_cli=self.agent_cli,
@@ -2505,10 +2518,11 @@ class Campaign:
                 initial_purpose="framework_baseline",
                 completion_instruction=(
                     "Finish the preserved V1 implementation in the candidate paths declared "
-                    "by WORKSPACE.md and the active SourceProvider. Leave the complete "
-                    "candidate ready for the Supervisor's "
-                    "framework-baseline gates; do not create Git commits or submit an "
-                    "episode-report."
+                    "by WORKSPACE.md and the active SourceProvider. Use the normal Runtime "
+                    "measurement loop until the candidate passes standard full Evaluate, then "
+                    "leave the complete candidate at a clean Git HEAD for the Supervisor's "
+                    "framework-baseline gates. Correctness is required; speedup is not. Do not "
+                    "submit an episode-report."
                 ),
                 **session_execution_policy(self),
             )
@@ -2555,6 +2569,7 @@ class Campaign:
             raise
         self._assert_generalized_inputs_are_private()
         self._account(result, f"{label} v{n} ({self.agent_cli})")
+        self._remember_framework_baseline_session(result)
         if result.exit_status != 0 or result.timed_out:
             self._capture_framework_baseline_exit(
                 exit_status=result.exit_status,
@@ -2565,6 +2580,56 @@ class Campaign:
                 stderr_tail=result.stderr_tail,
             )
         return result
+
+    def _remember_framework_baseline_session(self, result: SessionResult) -> None:
+        """Persist the latest resumable Baseline Session outside candidate Git."""
+        if self.agent_cli != "claude" or not result.session_id:
+            return
+        from aka.light.workflow.protocol import atomic_write_json
+
+        path = self.workspace / _FRAMEWORK_BASELINE_SESSION_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(
+            path,
+            {
+                "session_id": result.session_id,
+                "session_backend": self.agent_cli,
+            },
+        )
+
+    def _seed_episode_session_from_framework_baseline(self) -> None:
+        """Make Episode 1 resume the latest accepted Framework Baseline Session."""
+        if self.agent_cli != "claude":
+            return
+        marker_path = self.workspace / FRAMEWORK_BASELINE_FILE
+        session_path = self.workspace / _FRAMEWORK_BASELINE_SESSION_PATH
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return
+        if marker.get("version") != f"v{FRAMEWORK_BASELINE_VERSION}":
+            return
+        session_id = session.get("session_id")
+        session_backend = session.get("session_backend")
+        if (
+            not isinstance(session_id, str)
+            or not session_id
+            or session_backend != self.agent_cli
+        ):
+            return
+
+        from aka.light.workflow.store import CampaignStore
+
+        store = CampaignStore(self.workspace)
+        state = store.load_state()
+        # Never replace an Episode Session. This path only seeds a trajectory
+        # before Episode 1; later resumes keep the latest Episode-owned ID.
+        if state.episodes or state.session_id:
+            return
+        state.session_id = session_id
+        state.session_backend = session_backend
+        store.save_state(state)
 
     def _restore_framework_baseline_candidate(self, v0_identity: str) -> None:
         """Restore an ignored snapshot only when the worktree fell back to the V0 wrapper."""
@@ -2837,7 +2902,6 @@ class Campaign:
             return None, f"combined validation failed to run: {exc}"
         self._print_v0_evaluator_output(test)
         from aka.light.evaluation.projection import (
-            bounded_text,
             redact_diagnostics,
             source_error_from_stdout,
         )
@@ -2851,7 +2915,7 @@ class Campaign:
             result = _test_result_from_stdout(test.stdout)
         except (RuntimeError, json.JSONDecodeError) as exc:
             if test.returncode != 0:
-                detail = bounded_text(redact_diagnostics(test.stderr or test.stdout), 4096)
+                detail = redact_diagnostics(test.stderr or test.stdout)
                 suffix = f": {detail}" if detail else ""
                 return None, f"combined validation command failed (exit={test.returncode}){suffix}"
             return None, f"combined validation produced no usable result: {exc}"

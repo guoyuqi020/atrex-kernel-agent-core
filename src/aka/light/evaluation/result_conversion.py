@@ -26,29 +26,26 @@ def compile_failures(compile_result: object, shape_ids: list[str]) -> list[str]:
     if "status" in compile_result:
         if compile_result.get("status") == "passed":
             return []
-        return ["compile: " + str(
-            compile_result.get("reason") or compile_result.get("status") or "did not pass"
-        )]
+        return ["compile did not pass; see actionable_diagnostics"]
     failures = []
     for shape_id in shape_ids:
         status = compile_result.get(shape_id)
         status = status if isinstance(status, dict) else {}
         if status.get("status") != "passed":
-            failures.append(
-                f"sid={shape_id}: compile "
-                + str(status.get("reason") or status.get("status") or "missing")
-            )
+            failures.append(f"sid={shape_id}: compile did not pass; see actionable_diagnostics")
     return failures
 
 
-def bounded_actionable_diagnostic(value: object, *, limit: int = 6000) -> str:
-    text = str(value or "").replace("\x00", "").strip()
-    if len(text) <= limit:
-        return text
-    marker = "\n... diagnostic truncated ...\n"
-    head = min(1000, limit // 3)
-    tail = max(0, limit - head - len(marker))
-    return text[:head] + marker + (text[-tail:] if tail else "")
+def actionable_diagnostic(value: object) -> str:
+    """Return the complete diagnostic produced by Agate or the compiler.
+
+    Compiler output is commonly repetitive near the front while the decisive
+    error is at the end.  Length-based head/tail projection therefore changes
+    the meaning of the evidence and is not safe at the Agent boundary.  NULs
+    are removed because they cannot be represented by every downstream text
+    transport; redaction is applied later by the public projection.
+    """
+    return str(value or "").replace("\x00", "").strip()
 
 
 def looks_like_candidate_exception(value: object) -> bool:
@@ -62,39 +59,48 @@ def looks_like_candidate_exception(value: object) -> bool:
 
 
 def compile_diagnostics(compile_result: object,
-                        shape_ids: list[str]) -> list[dict[str, str]]:
+                        shape_ids: list[str]) -> list[dict[str, Any]]:
     if not isinstance(compile_result, dict):
         return []
     if "status" in compile_result:
         if compile_result.get("status") == "passed":
             return []
-        message = bounded_actionable_diagnostic(
+        message = actionable_diagnostic(
             compile_result.get("reason") or compile_result.get("status")
         )
         return ([{"stage": "compile_import", "shape_id": "", "message": message}]
                 if message else [])
     diagnostics = []
-    seen = set()
+    seen: dict[str, dict[str, Any]] = {}
     for shape_id in shape_ids:
         status = compile_result.get(shape_id)
         status = status if isinstance(status, dict) else {}
         if status.get("status") == "passed":
             continue
-        message = bounded_actionable_diagnostic(
+        message = actionable_diagnostic(
             status.get("reason") or status.get("status") or "missing"
         )
-        if message and message not in seen:
-            seen.add(message)
-            diagnostics.append({"stage": "compile_import", "shape_id": shape_id,
-                                "message": message})
+        if not message:
+            continue
+        if message in seen:
+            item = seen[message]
+            item.setdefault("shape_ids", [item["shape_id"]]).append(shape_id)
+            continue
+        item = {
+            "stage": "compile_import",
+            "shape_id": shape_id,
+            "message": message,
+        }
+        seen[message] = item
+        diagnostics.append(item)
     return diagnostics
 
 
 def candidate_exception_diagnostics(correctness_status: dict[str, Any],
                                     correctness_shapes: dict[str, Any],
-                                    shape_ids: list[str]) -> list[dict[str, str]]:
+                                    shape_ids: list[str]) -> list[dict[str, Any]]:
     diagnostics = []
-    seen = set()
+    seen: dict[str, dict[str, Any]] = {}
     for shape_id in shape_ids:
         status = correctness_status.get(shape_id)
         status = status if isinstance(status, dict) else {}
@@ -108,12 +114,22 @@ def candidate_exception_diagnostics(correctness_status: dict[str, Any],
         for reason in reasons:
             if not looks_like_candidate_exception(reason):
                 continue
-            message = bounded_actionable_diagnostic(reason)
-            if not message or message in seen:
+            message = actionable_diagnostic(reason)
+            if not message:
                 continue
-            seen.add(message)
-            diagnostics.append({"stage": "candidate_runtime", "shape_id": shape_id,
-                                "message": message})
+            if message in seen:
+                item = seen[message]
+                known_shapes = item.setdefault("shape_ids", [item["shape_id"]])
+                if shape_id not in known_shapes:
+                    known_shapes.append(shape_id)
+                continue
+            item = {
+                "stage": "candidate_runtime",
+                "shape_id": shape_id,
+                "message": message,
+            }
+            seen[message] = item
+            diagnostics.append(item)
     return diagnostics
 
 
@@ -248,7 +264,7 @@ def optimizer_result_from_eval(payload: dict[str, Any], shape_ids: list[str],
         "max_rel_err": max_rel,
         "evaluator": "atrex-gpu-gateway/run",
         "eval_id": payload.get("eval_id"),
-        "actionable_diagnostics": diagnostics[:8],
+        "actionable_diagnostics": diagnostics,
     }
 
 
@@ -262,7 +278,7 @@ def merge_optimizer_results(results: list[dict[str, Any]], shape_ids: list[str],
     latencies = [latency_by_shape[sid] for sid in shape_ids if sid in latency_by_shape]
     complete = not require_performance or len(latencies) == len(shape_ids)
     diagnostics = []
-    seen = set()
+    seen: dict[tuple[str, str], dict[str, Any]] = {}
     for result in results:
         for diagnostic in result.get("actionable_diagnostics") or []:
             if not isinstance(diagnostic, dict):
@@ -273,13 +289,27 @@ def merge_optimizer_results(results: list[dict[str, Any]], shape_ids: list[str],
                 "message": str(diagnostic.get("message") or ""),
             }
             key = (item["stage"], item["message"])
-            if item["message"] and key not in seen:
-                seen.add(key)
-                diagnostics.append(item)
-            if len(diagnostics) >= 8:
-                break
-        if len(diagnostics) >= 8:
-            break
+            raw_shape_ids = diagnostic.get("shape_ids")
+            shape_ids_for_item = (
+                [str(value) for value in raw_shape_ids]
+                if isinstance(raw_shape_ids, list)
+                else [item["shape_id"]]
+            )
+            if not item["message"]:
+                continue
+            if key in seen:
+                existing = seen[key]
+                existing_shapes = existing.setdefault(
+                    "shape_ids", [existing["shape_id"]]
+                )
+                for shape_id in shape_ids_for_item:
+                    if shape_id not in existing_shapes:
+                        existing_shapes.append(shape_id)
+                continue
+            if len(shape_ids_for_item) > 1:
+                item["shape_ids"] = shape_ids_for_item
+            seen[key] = item
+            diagnostics.append(item)
     speedup_mean, _ = (metadata_speedup_mean(metadata, shape_ids, latency_by_shape)
                        if require_performance else (None, []))
     failures = [str(failure) for result in results

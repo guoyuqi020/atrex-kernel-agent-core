@@ -58,9 +58,10 @@ operations and request schemas. Do not infer a different workflow from unrelated
 
 - Read `skills/runtime-records/SKILL.md` for the research modules and report schema enabled in this
   Episode. Do not call disabled Direction or Experiment operations or edit their projected files.
-- A Framework Baseline Session leaves its candidate for Supervisor validation and does not run GPU
-  measurements or submit `episode-report`, except that an explicitly enabled Wiki knowledge query
-  remains allowed.
+- A Framework Baseline Session uses the normal Git and Runtime measurement loop. It should stop
+  once a compliant candidate passes standard full Evaluate: correctness is required, but a speedup
+  over V0 is not. Leave the candidate at a clean Git HEAD for independent Supervisor validation;
+  do not submit `episode-report`.
 - For optimization Episodes, follow the Session Prompt's continuation and handoff conditions. A
   report accepted by Runtime is a handoff, not promotion; independent acceptance and promotion
   checks still apply.

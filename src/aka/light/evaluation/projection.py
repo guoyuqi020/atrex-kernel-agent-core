@@ -22,7 +22,6 @@ MAX_AGENT_PROFILE_METRICS = 64
 MAX_AGENT_DIAGNOSTICS = 16
 SOURCE_ERROR_PREFIX = "[sandbox] SOURCE_ERROR_JSON="
 GATEWAY_ERROR_PREFIX = "[sandbox] GATEWAY_ERROR_JSON="
-MAX_GATEWAY_ERROR_BYTES = 64 * 1024
 _SECRET_KEY = re.compile(
     r"(?:authorization|password|ak|sk|atrex_aka_identity_key|agate[_-]?(?:ak|sk|token)|"
     r"(?:.*[_-])?(?:api|access|secret)[_-]?key(?:[_-]?id)?|"
@@ -111,15 +110,8 @@ def source_error_from_stdout(stdout: str) -> dict[str, Any] | None:
 
 
 def bounded_error(value: Any) -> Any:
-    """Retain the original JSON error, with an explicit bound for oversized errors."""
-    # Redact credential fields before truncation can turn a JSON tree into a
-    # text fragment and lose the field names needed for credential redaction.
-    value = redact_diagnostics(value)
-    rendered = json.dumps(value, ensure_ascii=False, allow_nan=False)
-    if len(rendered.encode("utf-8")) <= MAX_GATEWAY_ERROR_BYTES:
-        return value
-    text, omitted = _bounded_utf8_text(rendered, MAX_GATEWAY_ERROR_BYTES, marker="error")
-    return {"truncated": True, "bytes_omitted": omitted, "raw_error": text}
+    """Retain the complete original JSON error after credential redaction."""
+    return redact_diagnostics(value)
 
 
 def gateway_error_result(value: dict[str, Any]) -> dict[str, Any]:
@@ -627,7 +619,7 @@ def profile_result(result: dict[str, Any], *, generalized: bool = False) -> dict
 def _agent_diagnostic_item(value: object) -> object | None:
     """Project one compiler diagnostic without exposing request or worker state."""
     if isinstance(value, str):
-        return bounded_text(value, 2000)
+        return value
     if not isinstance(value, dict):
         return None
     projected: dict[str, object] = {}
@@ -655,7 +647,7 @@ def _agent_diagnostic_item(value: object) -> object | None:
     for key in text_fields:
         item = value.get(key)
         if isinstance(item, str) and item:
-            projected[key] = bounded_text(item, 2000 if key == "message" else 512)
+            projected[key] = item if key == "message" else bounded_text(item, 512)
     for key in numeric_fields:
         item = value.get(key)
         if (
@@ -883,15 +875,59 @@ def evaluation(result: dict) -> dict:
             str(key)[:128]: item for key, item in list(shapes.items())[:MAX_AGENT_EVALUATION_SHAPES]
             if _finite_number(item) is not None
         }
-    value["failures"] = [bounded_text(item) for item in (result.get("failures") or [])[:8]]
-    value["actionable_diagnostics"] = [
-        {key: bounded_text(item) for key, item in row.items() if key in {"stage", "shape_id", "message"}}
-        for row in (result.get("actionable_diagnostics") or [])[:8] if isinstance(row, dict)
-    ]
+    value["failures"] = [str(item or "") for item in (result.get("failures") or [])]
+    actionable_diagnostics = []
+    for row in result.get("actionable_diagnostics") or []:
+        if not isinstance(row, dict):
+            continue
+        item = {
+            key: (
+                str(raw or "")
+                if key == "message"
+                else bounded_text(raw)
+            )
+            for key, raw in row.items()
+            if key in {"stage", "shape_id", "message"}
+        }
+        if isinstance(row.get("shape_ids"), list):
+            item["shape_ids"] = [
+                bounded_text(shape_id) for shape_id in row["shape_ids"]
+            ]
+        actionable_diagnostics.append(item)
+    value["actionable_diagnostics"] = actionable_diagnostics
     if result.get("error") is not None:
         value["error"] = bounded_error(result["error"])
     if any(key in result for key in ("diagnostics", "performance_by_shape")):
-        value.update(project_feedback(result))
+        feedback = project_feedback(result)
+        # The conversion and native Eval feedback can expose the same compiler
+        # text under two schemas.  Keep one complete copy rather than shortening
+        # both copies to fit a response budget.
+        actionable_messages = {
+            row.get("message")
+            for row in value["actionable_diagnostics"]
+            if isinstance(row, dict) and isinstance(row.get("message"), str)
+        }
+        diagnostics = feedback.get("diagnostics")
+        if isinstance(diagnostics, list):
+            feedback["diagnostics"] = [
+                row
+                for row in diagnostics
+                if not (
+                    isinstance(row, dict)
+                    and row.get("error") in actionable_messages
+                    and not any(
+                        key in row
+                        for key in (
+                            "case_index",
+                            "check",
+                            "max_elementwise_abs_diff",
+                            "max_elementwise_rel_diff",
+                            "relative_l2",
+                        )
+                    )
+                )
+            ]
+        value.update(feedback)
     return value
 
 
@@ -899,7 +935,7 @@ NUMERICAL_RESULT_PREFIX = "__ATREX_NUMERICAL_RESULT__="
 
 
 def numerical_result(payload: dict) -> dict:
-    """Probe receipts plus original failure diagnostics, bounded for Agent feedback.
+    """Probe receipts plus complete redacted failure diagnostics for Agent feedback.
 
     Keep evaluator errors intact so the planner can repair the actual failure,
     rather than guessing from a missing-receipt summary. Request inputs and the
@@ -911,7 +947,7 @@ def numerical_result(payload: dict) -> dict:
         item = {key: row.get(key) for key in (
             "case_id", "passed", "exit_code", "expected_probes", "observed_probes",
             "failed_probes", "shape_count", "seeds", "world_size", "selection_digest")}
-        item["input_error"] = bounded_text(row.get("input_error") or "", limit=8192)
+        item["input_error"] = str(row.get("input_error") or "")
         result = row.get("result")
         item["result"] = None
         if isinstance(result, dict):
@@ -926,7 +962,7 @@ def numerical_result(payload: dict) -> dict:
             }
         public["runs"].append(item)
     if payload.get("error"):
-        public["error"] = bounded_text(payload["error"], limit=8192)
+        public["error"] = str(payload["error"])
     diagnostics = payload.get("private_diagnostics", payload.get("diagnostics", []))
     public["diagnostics"] = []
     if isinstance(diagnostics, list):
@@ -941,10 +977,10 @@ def numerical_result(payload: dict) -> dict:
                 if key in row:
                     value = row[key]
                     if isinstance(value, dict):
-                        item[key] = {"text": bounded_text(value.get("text", ""), limit=8192),
+                        item[key] = {"text": str(value.get("text", "")),
                                      "bytes": value.get("bytes"), "truncated": bool(value.get("truncated"))}
                     else:
-                        item[key] = bounded_text(value, limit=8192)
+                        item[key] = str(value)
             nested = row.get("evaluator")
             if isinstance(nested, dict):
                 item["evaluator"] = {key: nested[key] for key in ("exit_code", "result_file_present") if key in nested}
@@ -952,7 +988,7 @@ def numerical_result(payload: dict) -> dict:
                     if isinstance(nested.get(key), dict):
                         value = nested[key]
                         item["evaluator"][key] = {
-                            "text": bounded_text(value.get("text", ""), limit=8192),
+                            "text": str(value.get("text", "")),
                             "truncated": bool(value.get("truncated")),
                         }
             public["diagnostics"].append(item)
@@ -964,7 +1000,6 @@ def project_response(process: subprocess.CompletedProcess, *, generalized=False,
     """Project known results and preserve unfamiliar Agate output after redaction."""
     stdout, stderr = process.stdout or "", process.stderr or ""
     hide_shapes = generalized and not wiki and not public_dev
-    numerical = any(line.startswith(NUMERICAL_RESULT_PREFIX) for line in stdout.splitlines())
     projected = []
     formatters = {
         "[test_kernel] RESULT_JSON=": evaluation,
@@ -1022,27 +1057,12 @@ def project_response(process: subprocess.CompletedProcess, *, generalized=False,
             )
             projected.append(redact_hidden_shapes(line) if hide_shapes else line)
     stdout = "\n".join(projected) + ("\n" if projected else "")
-    structured_marker_present = any(line.startswith("[") for line in projected)
     # Structured lines were redacted before JSON encoding. Re-running free-form
     # regexes over encoded JSON can eat delimiters and corrupt result markers.
     if hide_shapes:
         stderr = redact_hidden_shapes(stderr)
     stderr = redact_diagnostics(stderr, private_paths=private_paths, private_values=private_values)
     result = {"exit_code": process.returncode, "stdout": stdout, "stderr": stderr}
-    for key, limit in (("stdout", 256 * 1024 if wiki else 384 * 1024), ("stderr", 16 * 1024)):
-        encoded = result[key].encode()
-        if len(encoded) > limit and not (
-            operation in {"evaluate", "same_allocation_abba"}
-            or numerical
-            or "[test_kernel] RESULT_JSON=" in stdout
-            or "[sandbox] ABBA_JSON=" in stdout
-        ):
-            if key == "stdout" and structured_marker_present:
-                result[key] = json.dumps({"error": "Projected result exceeds context limit; narrow the request."}) + "\n"
-                result["exit_code"] = process.returncode or 2
-            else:
-                result[key] = encoded[:limit].decode("utf-8", "ignore") + "\n<output truncated>\n"
-            result["truncated"] = True
     from aka.light.evaluation.public_result import bound_diagnostic_response
     return bound_diagnostic_response(result)
 
@@ -1133,7 +1153,7 @@ def _agent_abba_public_result(
     # Both sides share one public response. Preserve errors instead of letting
     # two individually-valid feedback budgets overflow the transport projection.
     for side in (baseline, candidate):
-        side.update(bound_feedback(side, max_bytes=128 * 1024))
+        side.update(bound_feedback(side))
     baseline_us = _positive_number(baseline.get("latency_us_geomean"))
     candidate_us = _positive_number(candidate.get("latency_us_geomean"))
     terminal_failure = payload.get("terminal_failure")

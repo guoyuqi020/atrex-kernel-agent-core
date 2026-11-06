@@ -38,6 +38,7 @@ from aka.light.workflow.journal_service import (
 )
 from aka.light.workflow.models import EpisodeHandoff, SupervisorState
 from aka.light.workflow.bootstrap import Campaign
+from aka.light.workflow.constants import FRAMEWORK_BASELINE_FILE
 from aka.light.workflow.episode import LongHorizonCampaign
 from aka.light.workflow.search import PooledSearch, SearchOptions, read_state
 from aka.light.workflow.search_driver import (
@@ -46,6 +47,7 @@ from aka.light.workflow.search_driver import (
     _shareable_claim,
 )
 from aka.light.workflow.session import LongSessionRunner
+from aka.light.workflow.store import CampaignStore
 from aka.light.workspace.agent_git import AgentGit, DirtyKernelWorktree
 from aka.light.workspace.auxiliary import AuxiliaryWorkspace
 from aka.light.workspace.episode import EpisodeWorkspace
@@ -2796,6 +2798,43 @@ def test_supervisor_state_persists_trajectory_session():
     restored = SupervisorState.from_dict(state.as_dict())
     assert restored.session_id == "trajectory-session"
     assert restored.session_backend == "claude"
+
+
+def test_framework_baseline_session_seeds_first_episode_resume(tmp_path):
+    campaign = Campaign(
+        name="operator",
+        kernel_demo="unused.py",
+        platform="cuda",
+        framework="cuda",
+        work_dir=str(tmp_path),
+    )
+    campaign.workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=campaign.workspace, check=True)
+
+    result = SimpleNamespace(session_id="framework-session")
+    campaign._remember_framework_baseline_session(result)
+    (campaign.workspace / FRAMEWORK_BASELINE_FILE).write_text(
+        json.dumps({"version": "v1"}), encoding="utf-8"
+    )
+
+    campaign._seed_episode_session_from_framework_baseline()
+
+    state = CampaignStore(campaign.workspace).load_state()
+    assert state.session_id == "framework-session"
+    assert state.session_backend == "claude"
+    assert (
+        campaign.workspace
+        / ".atrex_long_horizon"
+        / "framework_baseline"
+        / "session.json"
+    ).is_file()
+
+    # A later prepare/resume must not replace an Episode-owned Session.
+    state.session_id = "episode-session"
+    CampaignStore(campaign.workspace).save_state(state)
+    campaign._seed_episode_session_from_framework_baseline()
+    restored = CampaignStore(campaign.workspace).load_state()
+    assert restored.session_id == "episode-session"
 
 
 def _finalized_journal(path: Path, *, episode: int, suffix: str, record_id: str) -> tuple[str, str]:
