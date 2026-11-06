@@ -110,7 +110,7 @@ class CampaignRuntimeSettings:
     verify_repeats: int = DEFAULT_ABBA_REPEATS
     evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT
     min_improvement_pct: float = 0.0
-    shape_batch_size: int = 4
+    shape_batch_size: int = 10
 
     def __post_init__(self):
         if self.timeout is None:

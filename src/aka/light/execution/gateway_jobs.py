@@ -182,10 +182,10 @@ def cacheable_job(job: object, identity: dict | None = None) -> bool:
 
 def complete_evaluation(result: dict, request: dict) -> bool:
     """Missing stage/Shape data is not a completed Candidate rejection."""
-    # Native Eval shards retain the complete immutable reference bundle and
-    # select their effective Shapes through runner_overrides.shape_ids.  This
-    # applies to both ordinary Eval and native ABBA; requiring every reference
-    # Shape in each ABBA shard makes every legitimate shard look incomplete.
+    # Native Eval shards project a reference view in which the shard Shapes are
+    # the complete workload.  This applies to both ordinary Eval and native
+    # ABBA; requiring Shapes from the parent workload in each shard would make
+    # every legitimate shard look incomplete.
     from aka.light.evaluation.shapes import request_shape_ids
 
     try:

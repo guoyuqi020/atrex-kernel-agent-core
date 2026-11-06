@@ -20,7 +20,13 @@ WARMUP_ITERS = 5
 # performance budget for each extra Shape.
 CANDIDATE_TIMEOUT = DEFAULT_CANDIDATE_TIMEOUT
 PERFORMANCE_TIMEOUT = DEFAULT_PERFORMANCE_TIMEOUT
-SHAPE_BATCH_SIZE = 4
+# Light creates one independent Eval job for each outer batch.  The job's
+# projected reference treats those IDs as its complete Shape set instead of a
+# Shape selector.  Do not set Agate's ``shape_shards`` option: omitting it
+# enables automatic Ray Data execution with the admitted worker budget, while
+# an explicit value is a hard maximum that can be rejected when it exceeds
+# current capacity.
+SHAPE_BATCH_SIZE = 10
 BATCH_WORKERS = 16
 MEASUREMENT_CONTRACT = "runtime-native-eval-v1"
 ACCEPTANCE_METRIC = "geomean-latency-reduction-v1"

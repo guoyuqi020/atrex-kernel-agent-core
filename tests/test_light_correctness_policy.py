@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
 
 from aka.contracts.evaluation import derived_evaluation_timeout
-from aka.contracts.workflow import WorkflowSettings
+from aka.contracts.workflow import CampaignRuntimeSettings, WorkflowSettings
 from aka.contracts.workspace import CandidateHandle
 from aka.contracts.workflow_launch import decode_launch
 from aka.legacy.task.problem.layout import agent_visible_operator_files
@@ -51,7 +51,11 @@ from aka.light.evaluation.hardware import hardware_directive
 from aka.light.evaluation.evaluation_failures import (
     embedded_candidate_wall_clock_timeouts,
 )
-from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES
+from aka.light.evaluation.policy import (
+    BENCH_ITERS,
+    CORRECTNESS_CASES,
+    SHAPE_BATCH_SIZE,
+)
 from aka.light.evaluation.native_abba import (
     _clock_configuration_error,
     _clock_configuration_process,
@@ -63,7 +67,10 @@ from aka.light.evaluation.projection import (
     project_response,
 )
 from aka.light.evaluation.shapes import (
+    batch_shape_ids,
     effective_shape_batch_size,
+    request_shape_ids,
+    shape_batch_request,
     shape_request_timeout,
 )
 from aka.light.execution.gateway_jobs import (
@@ -1247,6 +1254,53 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             ),
             3,
         )
+
+    def test_eval_outer_batches_select_ten_shapes_and_leave_ray_data_automatic(self):
+        self.assertEqual(SHAPE_BATCH_SIZE, 10)
+        self.assertEqual(CampaignRuntimeSettings().shape_batch_size, 10)
+        request = {
+            "reference": {
+                "shapes": {str(index): {"x": index} for index in range(21)},
+                "metadata": {
+                    "num_shapes": 21,
+                    "shapes": {str(index): {"weight": index} for index in range(21)},
+                    "cases": {str(index): {"label": index} for index in range(21)},
+                },
+                "roofline": {
+                    "shapes": {str(index): {"flops": index} for index in range(21)},
+                },
+            },
+            "options": {"timeout_s": 600},
+            "runner_overrides": {"shape_ids": [str(index) for index in range(21)]},
+            "lock_clocks": True,
+        }
+
+        batches = batch_shape_ids(request_shape_ids(request), SHAPE_BATCH_SIZE)
+        requests = [shape_batch_request(request, ids) for ids in batches]
+
+        self.assertEqual([len(ids) for ids in batches], [10, 10, 1])
+        self.assertEqual(
+            [list(item["reference"]["shapes"]) for item in requests],
+            batches,
+        )
+        self.assertEqual(
+            [list(item["reference"]["metadata"]["cases"]) for item in requests],
+            batches,
+        )
+        self.assertEqual(
+            [list(item["reference"]["roofline"]["shapes"]) for item in requests],
+            batches,
+        )
+        self.assertEqual(
+            [item["reference"]["metadata"]["num_shapes"] for item in requests],
+            [10, 10, 1],
+        )
+        self.assertTrue(all("shape_ids" not in item["runner_overrides"]
+                            for item in requests))
+        self.assertTrue(all("shape_shards" not in item["options"] for item in requests))
+        self.assertTrue(all(item["lock_clocks"] is False for item in requests))
+        self.assertEqual(len(request["reference"]["shapes"]), 21)
+        self.assertEqual(len(request["runner_overrides"]["shape_ids"]), 21)
 
     def test_eval_timeout_rejects_one_shape_above_gateway_limit(self):
         with self.assertRaisesRegex(ValueError, "One Shape exceeds"):

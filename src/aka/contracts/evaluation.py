@@ -171,7 +171,7 @@ class EvaluationConfiguration:
     timeout: int = derived_evaluation_timeout()
     repeats: int = DEFAULT_ABBA_REPEATS
     per_run_timeout: int = DEFAULT_ABBA_RUN_TIMEOUT
-    shape_batch_size: int = 4
+    shape_batch_size: int = 10
     max_parallelism: int = 4
     private_reference_dir: Path | None = None
     native: bool = False

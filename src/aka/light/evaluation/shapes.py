@@ -1,8 +1,10 @@
 """Shape selection for Light's native Eval requests.
 
-Atrex-Bench owns the immutable reference bundle.  Light shards only the list of
-opaque Shape IDs carried in ``runner_overrides.shape_ids``; it never rewrites
-``reference.shapes``, metadata, or roofline data for an individual shard.
+Light's outer shards are independent Agate Eval jobs.  Each job receives a
+reference view containing only that shard's Shapes, so those Shapes are the
+job's complete workload rather than a ``runner_overrides.shape_ids`` subset.
+That boundary keeps the request eligible for Agate's automatic Ray Data
+execution while preserving the original opaque Shape IDs for result merging.
 """
 
 from __future__ import annotations
@@ -112,7 +114,14 @@ def shape_batch_request(
     *,
     timeout_s: int | None = None,
 ) -> dict[str, Any]:
-    """Select one shard without copying or mutating the reference bundle."""
+    """Build one independent Ray-eligible Eval job for a Shape shard.
+
+    The caller's request remains immutable.  The returned request owns a
+    reference view in which ``shape_ids`` are the complete Shape set, removes
+    any Shape selector, and disables single-device clock locking.  Omitting
+    ``options.shape_shards`` deliberately selects Agate's automatic Ray Data
+    worker budget unless the caller explicitly supplied a hard worker cap.
+    """
     available = set(request_shape_ids(request))
     if not shape_ids:
         raise ValueError("Shape batch must not be empty")
@@ -124,10 +133,37 @@ def shape_batch_request(
             "Shape batch contains IDs outside the request selection: "
             + ", ".join(sorted(unknown, key=_sort_key))
         )
+    selected = set(shape_ids)
+    reference = dict(request["reference"])
+    reference["shapes"] = {
+        str(shape_id): value
+        for shape_id, value in request["reference"]["shapes"].items()
+        if str(shape_id) in selected
+    }
+    for field, indexes in (("metadata", ("shapes", "cases")),
+                           ("roofline", ("shapes",))):
+        source = request["reference"].get(field)
+        if not isinstance(source, dict):
+            continue
+        projected = dict(source)
+        for index in indexes:
+            values = source.get(index)
+            if isinstance(values, dict):
+                projected[index] = {
+                    str(shape_id): value
+                    for shape_id, value in values.items()
+                    if str(shape_id) in selected
+                }
+        if field == "metadata" and "num_shapes" in projected:
+            projected["num_shapes"] = len(shape_ids)
+        reference[field] = projected
+
     batched = dict(request)
+    batched["reference"] = reference
     overrides = dict(request.get("runner_overrides") or {})
-    overrides["shape_ids"] = list(shape_ids)
+    overrides.pop("shape_ids", None)
     batched["runner_overrides"] = overrides
+    batched["lock_clocks"] = False
     if timeout_s is not None:
         if type(timeout_s) is not int or timeout_s <= 0:
             raise ValueError("Shape batch timeout must be a positive integer")
