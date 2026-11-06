@@ -164,7 +164,9 @@ def read_manifest(path: Path) -> dict:
 
 class AdaptiveState:
     def __init__(self, root: Path, episode: int, reserved: tuple[str, ...]):
-        if type(episode) is not int or episode < 1:
+        # Episode zero is the Framework Baseline and seeds the same reusable
+        # trajectory state consumed by later optimization Episodes.
+        if type(episode) is not int or episode < 0:
             raise ValueError("Reusable state needs a controller Episode number")
         self.root, self.episode, self.reserved = root, episode, reserved
 

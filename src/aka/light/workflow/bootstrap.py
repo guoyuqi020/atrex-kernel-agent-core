@@ -129,6 +129,8 @@ _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_PATH = Path(
 _FRAMEWORK_BASELINE_SESSION_PATH = Path(
     ".atrex_long_horizon/framework_baseline/session.json"
 )
+_FRAMEWORK_BASELINE_EPISODE = 0
+_FRAMEWORK_BASELINE_BRANCH = "framework-baseline"
 _FRAMEWORK_BASELINE_CORRECTNESS_CONTEXT_PATHS = (
     "README.md",
     "reference.py",
@@ -881,6 +883,7 @@ class Campaign:
         memory_version: int,
         supervisor_git: bool = True,
         require_gluon: bool = False,
+        origin: dict[str, int] | None = None,
     ) -> Path:
         """Start Runtime if needed and bind an Episode from trusted controller state."""
         self.start_runtime()
@@ -892,7 +895,7 @@ class Campaign:
             memory_version=memory_version,
             supervisor_git=supervisor_git,
             require_gluon=require_gluon,
-            origin=(getattr(self, "search_coordinate", None) or {
+            origin=(origin or getattr(self, "search_coordinate", None) or {
                 "epoch": episode,
                 "trajectory": 1,
                 "episode": episode,
@@ -1781,6 +1784,7 @@ class Campaign:
         if action == "run":
             self._link_runtime()
             self._restore_framework_baseline_candidate(v0_identity)
+            self._prepare_framework_baseline_episode(baseline_commit)
             self._sync_framework_baseline_live(
                 phase="framework_baseline_correctness_review"
             )
@@ -1812,6 +1816,7 @@ class Campaign:
                     v0_identity, baseline_commit, include_policy_review=False
                 )
         else:  # adopt: our own interrupted run already committed the kernel
+            self._prepare_framework_baseline_episode(baseline_commit)
             recovery_used = False
             self._sync_framework_baseline_live(phase="framework_baseline")
             self._warn_restored_baseline_paths(baseline_commit)
@@ -2509,13 +2514,19 @@ class Campaign:
                 agent_cli=self.agent_cli,
                 usage_policy=lambda turn: turn.terminal_usage.total_tokens or 0,
             )
+            agent_workspace = getattr(
+                self, "_framework_baseline_agent_workspace", self.workspace
+            )
+            continuing_session_id = self._framework_baseline_session_id()
             result = runner.run(
-                self.workspace,
+                agent_workspace,
                 prompt,
                 output_directory=observation_root,
                 telemetry_environment=telemetry_environment,
                 stage_name="Framework baseline",
                 initial_purpose="framework_baseline",
+                session_id=continuing_session_id,
+                resume_session=bool(continuing_session_id),
                 completion_instruction=(
                     "Finish the preserved V1 implementation in the candidate paths declared "
                     "by WORKSPACE.md and the active SourceProvider. Use the normal Runtime "
@@ -2580,6 +2591,51 @@ class Campaign:
                 stderr_tail=result.stderr_tail,
             )
         return result
+
+    def _prepare_framework_baseline_episode(self, baseline_commit: str) -> Path:
+        """Bind Framework Baseline as Episode 0 in the normal Agent workspace.
+
+        Episode 0 deliberately does not increment ``SupervisorState.episodes``:
+        it is the framework bring-up stage rather than an optimization-budget
+        iteration.  Its Agent Git repository, branches, scratch state, Runtime
+        records and provider Session are nevertheless the same trajectory state
+        that Episode 1 reuses.
+        """
+        coordinate = getattr(self, "search_coordinate", None)
+        trajectory = (
+            coordinate.get("trajectory", 1)
+            if isinstance(coordinate, dict)
+            else 1
+        )
+        workspace = self.register_runtime_episode(
+            self.workspace,
+            episode=_FRAMEWORK_BASELINE_EPISODE,
+            base_commit=baseline_commit,
+            branch=_FRAMEWORK_BASELINE_BRANCH,
+            memory_version=FRAMEWORK_BASELINE_VERSION,
+            supervisor_git=True,
+            origin={
+                "epoch": _FRAMEWORK_BASELINE_EPISODE,
+                "trajectory": trajectory,
+                "episode": _FRAMEWORK_BASELINE_EPISODE,
+            },
+        )
+        self._framework_baseline_agent_workspace = workspace
+        return workspace
+
+    def _framework_baseline_session_id(self) -> str:
+        """Return the resumable native Baseline Session, when available."""
+        if self.agent_cli != "claude":
+            return ""
+        path = self.workspace / _FRAMEWORK_BASELINE_SESSION_PATH
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return ""
+        if not isinstance(value, dict) or value.get("session_backend") != self.agent_cli:
+            return ""
+        session_id = value.get("session_id")
+        return session_id if isinstance(session_id, str) and session_id else ""
 
     def _remember_framework_baseline_session(self, result: SessionResult) -> None:
         """Persist the latest resumable Baseline Session outside candidate Git."""
@@ -2668,6 +2724,9 @@ class Campaign:
         )
 
     def _framework_baseline_prompt(self, n: int) -> str:
+        agent_workspace = getattr(
+            self, "_framework_baseline_agent_workspace", self.workspace
+        )
         baseline_objective = (
             f"Create the first correct, compliant `{self.framework}` Kernel from the V0 "
             "PyTorch reference."
@@ -2679,7 +2738,7 @@ class Campaign:
             PROMPTS_DIR / "framework_baseline.md",
             BASELINE_OBJECTIVE=baseline_objective,
             PLUGINS=self.plugin_directive("framework_baseline"),
-            WORKSPACE=str(self.workspace),
+            WORKSPACE=str(agent_workspace),
             N=n,
             PREV=n - 1,
             PLATFORM=self.platform,

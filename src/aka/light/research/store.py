@@ -45,7 +45,11 @@ def _origin(value: Mapping[str, object] | None) -> dict[str, int]:
     result: dict[str, int] = {}
     for name in ("epoch", "trajectory", "episode"):
         item = value.get(name)
-        if type(item) is int and item > 0:
+        # Framework Baseline is Episode/Epoch zero; trajectory numbering still
+        # starts at one.  Preserve its origin so later Episodes can distinguish
+        # Baseline research from unscoped legacy events.
+        minimum = 1 if name == "trajectory" else 0
+        if type(item) is int and item >= minimum:
             result[name] = item
     result.setdefault("trajectory", 1)
     return result

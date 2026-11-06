@@ -2820,6 +2820,9 @@ def test_framework_baseline_session_seeds_first_episode_resume(tmp_path):
     campaign._seed_episode_session_from_framework_baseline()
 
     state = CampaignStore(campaign.workspace).load_state()
+    # Framework Baseline is Episode 0: it seeds trajectory state without
+    # consuming an optimization Episode from the configured budget.
+    assert state.episodes == 0
     assert state.session_id == "framework-session"
     assert state.session_backend == "claude"
     assert (
@@ -2835,6 +2838,42 @@ def test_framework_baseline_session_seeds_first_episode_resume(tmp_path):
     campaign._seed_episode_session_from_framework_baseline()
     restored = CampaignStore(campaign.workspace).load_state()
     assert restored.session_id == "episode-session"
+
+
+def test_framework_baseline_registers_as_episode_zero(tmp_path):
+    campaign = Campaign(
+        name="operator",
+        kernel_demo="unused.py",
+        platform="cuda",
+        framework="cuda",
+        work_dir=str(tmp_path),
+    )
+    campaign.workspace.mkdir(parents=True)
+    agent_workspace = tmp_path / "agent-workspace"
+    calls = []
+
+    def register(workspace, **kwargs):
+        calls.append((workspace, kwargs))
+        return agent_workspace
+
+    campaign.register_runtime_episode = register
+    campaign.search_coordinate = {"epoch": 3, "trajectory": 2, "episode": 3}
+
+    assert campaign._prepare_framework_baseline_episode("a" * 40) == agent_workspace
+    assert campaign._framework_baseline_agent_workspace == agent_workspace
+    assert calls == [
+        (
+            campaign.workspace,
+            {
+                "episode": 0,
+                "base_commit": "a" * 40,
+                "branch": "framework-baseline",
+                "memory_version": 1,
+                "supervisor_git": True,
+                "origin": {"epoch": 0, "trajectory": 2, "episode": 0},
+            },
+        )
+    ]
 
 
 def _finalized_journal(path: Path, *, episode: int, suffix: str, record_id: str) -> tuple[str, str]:
@@ -4235,6 +4274,92 @@ def test_runtime_rebinds_stable_agent_workspace_to_next_episode_journal(tmp_path
         assert runtime.journals[second].service.path == runtime.episode_journal_path(2)
         assert runtime.journals[first_controller.resolve()].service.path == (
             runtime.episode_journal_path(1)
+        )
+    finally:
+        runtime.close()
+
+
+def test_framework_baseline_episode_zero_seeds_episode_one_agent_git(tmp_path):
+    campaign = _controller_repository(
+        tmp_path / "campaign", "def run():\n    return 1\n"
+    )
+    baseline_controller = _controller_repository(
+        tmp_path / "framework-controller", "def run():\n    return 1\n"
+    )
+    runtime = SupervisorRuntime(
+        RuntimeConfig(hardware="L20D", workspace=campaign, wiki_enabled=False),
+        workspace_provider=ManagedCandidateWorkspace(),
+    )
+    try:
+        v0_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=baseline_controller,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        agent_workspace = runtime.register_episode(
+            baseline_controller,
+            episode=0,
+            base_commit=v0_commit,
+            branch="framework-baseline",
+            memory_version=1,
+            supervisor_git=True,
+        )
+        (agent_workspace / "kernel.py").write_text(
+            "def run():\n    return 7\n", encoding="utf-8"
+        )
+        subprocess.run(["git", "add", "kernel.py"], cwd=agent_workspace, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "framework baseline candidate"],
+            cwd=agent_workspace,
+            check=True,
+        )
+        baseline_agent_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=agent_workspace,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        baseline_view = runtime.journals[agent_workspace.resolve()].view
+        assert baseline_view.agent_git.kernel_commit(snapshot(agent_workspace)) == (
+            baseline_agent_commit
+        )
+        baseline_view.publish()
+        subprocess.run(["git", "add", "kernel.py"], cwd=baseline_controller, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "accept framework baseline"],
+            cwd=baseline_controller,
+            check=True,
+        )
+
+        episode_controller = tmp_path / "episode-controller"
+        subprocess.run(
+            ["git", "clone", "-q", str(baseline_controller), str(episode_controller)],
+            check=True,
+        )
+        v1_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=episode_controller,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        episode_workspace = runtime.register_episode(
+            episode_controller,
+            episode=1,
+            base_commit=v1_commit,
+            branch="episode-1",
+            memory_version=2,
+            supervisor_git=True,
+        )
+
+        assert episode_workspace == agent_workspace
+        assert subprocess.run(
+            ["git", "cat-file", "-e", f"{baseline_agent_commit}^{{commit}}"],
+            cwd=episode_workspace,
+            capture_output=True,
+        ).returncode == 0
+        assert (episode_workspace / "kernel.py").read_text(encoding="utf-8") == (
+            "def run():\n    return 7\n"
+        )
+        assert runtime.journals[episode_workspace.resolve()].service.path == (
+            runtime.episode_journal_path(1)
+        )
+        assert runtime.journals[baseline_controller.resolve()].service.path == (
+            runtime.episode_journal_path(0)
         )
     finally:
         runtime.close()

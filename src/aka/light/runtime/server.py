@@ -785,7 +785,10 @@ class SupervisorRuntime:
 
     def episode_journal_path(self, episode: int) -> Path:
         """Controller-only location, shared by registration and read-only recovery."""
-        if type(episode) is not int or episode < 1:
+        # Episode zero is reserved for Framework Baseline.  It uses the same
+        # Runtime Journal and persistent Agent repository as optimization
+        # Episodes, while remaining outside the optimization-episode budget.
+        if type(episode) is not int or episode < 0:
             raise ValueError("Invalid controller Episode number")
         return self.journals_root / "episodes" / f"e{episode:08d}" / "journal.json"
 
@@ -822,7 +825,7 @@ class SupervisorRuntime:
                          origin: Mapping[str, object] | None = None):
         """Trusted controller binding, never populated from an Agent request or file."""
         workspace = workspace.resolve(strict=True)
-        if (type(episode) is not int or episode < 1 or type(memory_version) is not int
+        if (type(episode) is not int or episode < 0 or type(memory_version) is not int
                 or memory_version < 1 or not isinstance(branch, str) or not branch
                 or type(require_gluon) is not bool
                 or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", base_commit) is None):

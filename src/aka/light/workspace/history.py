@@ -52,7 +52,9 @@ def _directories(root: Path, pattern: str) -> list[Path]:
 
 class EpisodeHistory:
     def __init__(self, *, episode: int, episodes_root: Path):
-        if type(episode) is not int or episode < 1:
+        # Episode zero is the Framework Baseline.  Its initial history view is
+        # empty; its finalized Session becomes prior evidence for Episode 1.
+        if type(episode) is not int or episode < 0:
             raise ValueError("History requires a controller Episode number")
         self.episode = episode
         self.episodes_root = episodes_root
