@@ -2044,7 +2044,7 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
         default=os.environ.get("ATREX_EVAL_GPU_CLOCK_MHZ") or None,
         help=(
             "Locked Eval graphics clock in MHz. L20N defaults to the verified "
-            "2377 MHz application-clock bin. This is Runtime-owned in managed Sessions."
+            "2370 MHz realizable application-clock bin. This is Runtime-owned in managed Sessions."
         ),
     )
     parser.add_argument(

@@ -34,12 +34,13 @@ ACCEPTANCE_METRIC = "geomean-latency-reduction-v1"
 
 # Product defaults must be real supported clock bins, not marketing boost
 # frequencies.  L20N was probed through the production Agate environment on
-# 2026-11-07: its application graphics clock is 2377 MHz and the device reports
-# that exact value in the supported-clock table.  Operators may override this
-# per Campaign when another sustainable bin is desired.
+# 2026-11-07: requesting 2377 MHz is realized as 2370 MHz by the production
+# worker, and the evaluator verifies the realized clock exactly.  Use that
+# realizable bin by default. Operators may override this per Campaign when
+# another sustainable bin is desired.
 DEFAULT_GPU_CLOCK_MHZ_BY_HARDWARE = {
-    "L20N": 2377,
-    "RTXPRO5000": 2377,
+    "L20N": 2370,
+    "RTXPRO5000": 2370,
 }
 
 

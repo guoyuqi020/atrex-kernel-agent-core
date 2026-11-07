@@ -107,7 +107,7 @@ class CampaignRuntimeSettings:
     evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT
     min_improvement_pct: float = 0.0
     shape_batch_size: int = DEFAULT_SHAPE_BATCH_SIZE
-    # None selects a verified product default when one is known (L20N: 2377).
+    # None selects a verified product default when one is known (L20N: 2370).
     # Eval always requests clock locking; this field selects the graphics bin.
     gpu_clock_mhz: int | None = None
 

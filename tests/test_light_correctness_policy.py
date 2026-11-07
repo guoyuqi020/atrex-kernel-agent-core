@@ -1461,10 +1461,10 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         defaults = measurement_defaults("L20N")
 
         self.assertIs(defaults["lock_clocks"], True)
-        self.assertEqual(defaults["runner_overrides"]["gpu_clock_mhz"], 2377)
-        self.assertEqual(resolved_gpu_clock_mhz("NVIDIA L20N"), 2377)
+        self.assertEqual(defaults["runner_overrides"]["gpu_clock_mhz"], 2370)
+        self.assertEqual(resolved_gpu_clock_mhz("NVIDIA L20N"), 2370)
         self.assertEqual(
-            resolved_gpu_clock_mhz("NVIDIA RTX PRO 5000 Blackwell"), 2377
+            resolved_gpu_clock_mhz("NVIDIA RTX PRO 5000 Blackwell"), 2370
         )
         self.assertEqual(resolved_gpu_clock_mhz("l20n", 2400), 2400)
         with self.assertRaisesRegex(ValueError, "positive integer"):
@@ -2749,7 +2749,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertNotIn("rtol", request["options"])
         self.assertNotIn("correctness_max_rel_l2", request["options"])
         self.assertIs(request["lock_clocks"], True)
-        self.assertEqual(request["runner_overrides"]["gpu_clock_mhz"], 2377)
+        self.assertEqual(request["runner_overrides"]["gpu_clock_mhz"], 2370)
 
     def test_v0_and_candidates_share_60_second_performance_timeout(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

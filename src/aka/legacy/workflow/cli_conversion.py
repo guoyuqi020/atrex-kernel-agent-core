@@ -32,7 +32,7 @@ def parse_arguments(argv):
         default=None,
         help=(
             "Locked Eval graphics clock in MHz. L20N defaults to its verified "
-            "2377 MHz application-clock bin; an explicit value overrides the product default."
+            "2370 MHz realizable application-clock bin; an explicit value overrides the product default."
         ),
     )
     ap.add_argument(
