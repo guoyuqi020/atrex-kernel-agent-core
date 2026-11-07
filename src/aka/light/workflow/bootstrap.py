@@ -2745,17 +2745,33 @@ class Campaign:
         self, n: int
     ) -> tuple[Optional[dict], str]:
         """Run every independent Framework Baseline gate concurrently."""
-        message = (
-            "running policy review, combined correctness/performance validation and "
-            "supplemental numerical validation in parallel"
-            if self.source_checks_enabled
-            else
-            "source review skipped; running correctness/performance and supplemental "
-            "numerical validation in parallel"
+        run_policy_review = (
+            self.source_checks_enabled and self.optimization_mode == "production"
         )
+        if run_policy_review:
+            message = (
+                "running policy review, combined correctness/performance validation and "
+                "supplemental numerical validation in parallel"
+            )
+        elif self.optimization_mode != "production":
+            message = (
+                "production policy review skipped in leaderboard mode; running "
+                "correctness/performance and supplemental numerical validation in parallel"
+            )
+        else:
+            message = (
+                "source review disabled; running correctness/performance and supplemental "
+                "numerical validation in parallel"
+            )
         print(f"[orchestrator] framework baseline: {message}", flush=True)
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            policy_future = executor.submit(copy_context().run, self._production_kernel_violations)
+        with ThreadPoolExecutor(max_workers=3 if run_policy_review else 2) as executor:
+            policy_future = (
+                executor.submit(
+                    copy_context().run, self._production_kernel_violations
+                )
+                if run_policy_review
+                else None
+            )
             validation_future = executor.submit(copy_context().run, self._validate_framework_baseline, n)
 
             def standard_correctness_passed() -> bool:
@@ -2772,13 +2788,15 @@ class Campaign:
                 flow="framework_baseline",
                 standard_correctness_passed=standard_correctness_passed,
             )
-            try:
-                violations = policy_future.result()
-            except Exception as exc:
-                violations = [
-                    "independent production policy review failed: "
-                    f"{type(exc).__name__}: {exc}"
-                ]
+            violations: list[str] = []
+            if policy_future is not None:
+                try:
+                    violations = policy_future.result()
+                except Exception as exc:
+                    violations = [
+                        "independent production policy review failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ]
             try:
                 result, validation_problem = validation_future.result()
             except Exception as exc:
@@ -2812,7 +2830,9 @@ class Campaign:
             return result, ""
         primary_problem = failures[0][1]
         statuses = {
-            "production_review": "failed" if policy_problem else "passed",
+            "production_review": (
+                "failed" if policy_problem else "passed"
+            ) if run_policy_review else "skipped",
             "correctness_performance": "failed" if validation_problem else "passed",
             "numerical": "failed" if numerical_problem else "passed",
         }

@@ -3338,6 +3338,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 platform="cuda",
                 framework="cuda",
                 work_dir=directory,
+                optimization_mode="production",
             )
             with (
                 patch.object(
@@ -3359,6 +3360,44 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("- production_review: failed", problem)
         self.assertIn("- correctness_performance: failed", problem)
         self.assertIn("- numerical: failed", problem)
+
+    def test_framework_baseline_leaderboard_skips_production_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = Campaign(
+                name="operator",
+                kernel_demo="reference.py",
+                platform="cuda",
+                framework="cuda",
+                work_dir=directory,
+                optimization_mode="leaderboard",
+            )
+            with (
+                patch.object(
+                    Campaign,
+                    "source_checks_enabled",
+                    new_callable=PropertyMock,
+                    return_value=True,
+                ),
+                patch.object(
+                    campaign,
+                    "_production_kernel_violations",
+                ) as policy_gate,
+                patch.object(
+                    campaign,
+                    "_validate_framework_baseline",
+                    return_value=({"all_pass": True}, ""),
+                ),
+                patch.object(
+                    campaign,
+                    "supplemental_numerical_feedback",
+                    return_value="",
+                ),
+            ):
+                result, problem = campaign._framework_baseline_external_gates(1)
+
+        self.assertEqual(result, {"all_pass": True})
+        self.assertEqual(problem, "")
+        policy_gate.assert_not_called()
 
     def test_framework_baseline_keeps_bounded_transport_error_without_result(self):
         completed = subprocess.CompletedProcess(
