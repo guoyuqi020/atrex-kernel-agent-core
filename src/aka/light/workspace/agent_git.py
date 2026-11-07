@@ -335,7 +335,11 @@ class AgentGit:
 
         Episode boundaries must not manufacture a second commit for an already
         promoted Kernel. Prefer the current HEAD, then search Agent-visible
-        history and imported shared refs.
+        history and imported shared refs. Agent Git is an unrestricted engineering
+        history: intermediate commits may intentionally omit or break the Kernel
+        source tree. Such revisions are not discovery failures; they simply cannot
+        identify the requested incumbent and must be skipped. Explicit Runtime
+        requests and terminal acceptance retain their stricter source validation.
         """
         from aka.light.workspace.sources import from_git
 
@@ -358,7 +362,13 @@ class AgentGit:
             try:
                 if from_git(self.workspace, commit_id) == source:
                     return commit_id
-            except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
+            except (
+                OSError,
+                UnicodeError,
+                ValueError,
+                RuntimeError,
+                subprocess.SubprocessError,
+            ):
                 continue
         return None
 

@@ -4392,6 +4392,54 @@ def test_agent_git_persists_work_and_installs_runtime_source_refs(tmp_path):
     assert (restored / "impl" / "helper.py").read_text() == "VALUE = 2\n"
 
 
+def test_agent_git_kernel_discovery_skips_arbitrary_non_kernel_commits(tmp_path):
+    workspace = tmp_path / "workspace"
+    source = _install(workspace, "def run():\n    return 1\n")
+    repository = AgentGit(workspace, tmp_path / "agent.bundle")
+    repository.prepare()
+    kernel_commit = repository.head()
+
+    subprocess.run(["git", "rm", "-q", "kernel.py"], cwd=workspace, check=True)
+    (workspace / "design-notes.txt").write_text(
+        "This engineering checkpoint is intentionally not a Kernel snapshot.\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "add", "design-notes.txt"], cwd=workspace, check=True
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "checkpoint incomplete redesign"],
+        cwd=workspace,
+        check=True,
+    )
+
+    assert repository.find_kernel_commit(source) == kernel_commit
+
+
+def test_agent_git_kernel_discovery_returns_none_for_non_kernel_history(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "work"], cwd=workspace, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Atrex Agent"], cwd=workspace, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "agent@localhost"],
+        cwd=workspace,
+        check=True,
+    )
+    (workspace / "design-notes.txt").write_text(
+        "No Kernel has been created yet.\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "design-notes.txt"], cwd=workspace, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "record design"], cwd=workspace, check=True
+    )
+
+    repository = AgentGit(workspace, tmp_path / "agent.bundle")
+    assert repository.find_kernel_commit(b"def run():\n    return 1\n") is None
+
+
 def test_agent_git_head_is_kernel_id_only_for_clean_exact_source(tmp_path):
     workspace = tmp_path / "workspace"
     source = _install(workspace, "def run():\n    return 1\n")
