@@ -1462,6 +1462,10 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
 
         self.assertIs(defaults["lock_clocks"], True)
         self.assertEqual(defaults["runner_overrides"]["gpu_clock_mhz"], 2370)
+        self.assertIs(
+            defaults["runner_overrides"]["clock_lock_fail_on_deviation"],
+            False,
+        )
         self.assertEqual(resolved_gpu_clock_mhz("NVIDIA L20N"), 2370)
         self.assertEqual(
             resolved_gpu_clock_mhz("NVIDIA RTX PRO 5000 Blackwell"), 2370
