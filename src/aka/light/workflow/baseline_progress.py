@@ -1,8 +1,8 @@
-"""One-shot crash capture for the framework-native V1 stage.
+"""Mechanical crash capture for the framework-native V1 stage.
 
-V1 does not continuously journal normal work. When a coding-agent process exits
-unexpectedly, the supervisor snapshots its current candidate and records enough terminal/Git
-context for a fresh agent to resume from the worktree instead of starting over.
+When a coding-agent process exits unexpectedly, the Supervisor snapshots its current
+candidate and terminal/Git context. The next invocation resumes the original Provider
+Session when possible; the snapshot is only a fallback for restoring the preserved worktree.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from typing import Any, Iterable
 
 
 SCHEMA_VERSION = "atrex_framework_baseline_crash_v1"
-RECOVERY_SCHEMA_VERSION = "atrex_framework_baseline_recovery_v1"
 RUNTIME_RELATIVE_DIR = Path(".atrex_long_horizon/framework_baseline")
 PROGRESS_RELATIVE_PATH = RUNTIME_RELATIVE_DIR / "progress.json"
 _MAX_CAPTURE_BYTES = 16 * 1024 * 1024
@@ -144,7 +143,6 @@ def capture_unexpected_exit(
     stdout_tail: str,
     stderr_tail: str,
     error: str = "",
-    supervisor_order: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Persist one terminal failure and candidate snapshot after an unexpected exit."""
     workspace = workspace.resolve()
@@ -189,7 +187,6 @@ def capture_unexpected_exit(
             "workspace": str(workspace),
             "status": "interrupted",
             "last_agent_cli": agent_cli,
-            "progress_supervisor_order": list(supervisor_order),
             "latest_snapshot": snapshot,
             "updated_at": _utc_now(),
         }
@@ -216,51 +213,6 @@ def mark_accepted(workspace: Path, *, commit: str, latency_us: object) -> None:
         }
     )
     _atomic_write_json(progress_path(workspace), value)
-
-
-def save_supervisor_recovery(
-    workspace: Path, payload: object, *, agent_cli: str
-) -> Path:
-    """Validate and persist the exit-supervisor's concise V1 handoff."""
-    if not isinstance(payload, dict):
-        raise ValueError("V1 recovery handoff must be a JSON object")
-    required_strings = ("summary", "current_state", "known_failure", "next_step")
-    for key in required_strings:
-        if not isinstance(payload.get(key), str) or not payload[key].strip():
-            raise ValueError(f"V1 recovery handoff requires non-empty {key!r}")
-    for key in ("completed_work", "files_to_resume"):
-        value = payload.get(key)
-        if not isinstance(value, list) or not all(
-            isinstance(item, str) and item.strip() for item in value
-        ):
-            raise ValueError(f"V1 recovery handoff {key!r} must be a string list")
-    experiments = payload.get("experiments")
-    if not isinstance(experiments, list) or not all(
-        isinstance(item, dict) for item in experiments
-    ):
-        raise ValueError("V1 recovery handoff 'experiments' must be an object list")
-
-    recovery = dict(payload)
-    recovery.update(
-        {
-            "schema_version": RECOVERY_SCHEMA_VERSION,
-            "supervisor_agent_cli": agent_cli,
-            "recorded_at": _utc_now(),
-        }
-    )
-    destination = workspace.resolve() / RUNTIME_RELATIVE_DIR / "resume.json"
-    _atomic_write_json(destination, recovery)
-    progress = load_progress(workspace)
-    progress.update(
-        {
-            "recovery_status": "ready",
-            "recovery_agent_cli": agent_cli,
-            "recovery_record": str(destination.relative_to(workspace.resolve())),
-            "updated_at": _utc_now(),
-        }
-    )
-    _atomic_write_json(progress_path(workspace), progress)
-    return destination
 
 
 def restore_latest_candidate(workspace: Path) -> list[str]:

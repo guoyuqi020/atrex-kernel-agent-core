@@ -32,7 +32,7 @@ class ReviewerRetryableFailure(RuntimeError):
 
 
 class ReviewerExecutionTimeout(ReviewerRetryableFailure):
-    """A completed review session explicitly exceeded its execution deadline."""
+    """A completed review session reported an external execution timeout."""
 
 
 class ReviewerOutputUnavailable(ReviewerRetryableFailure):
@@ -86,7 +86,7 @@ def _load_retry_state(path: Path, stage: str, category: str) -> dict:
 def check_review_service(result) -> None:
     """Classify execution timeouts separately from explicit service outages."""
     if result.timed_out:
-        raise ReviewerExecutionTimeout("reviewer exceeded its configured execution timeout")
+        raise ReviewerExecutionTimeout("reviewer reported an external execution timeout")
     if result.exit_status == 0:
         return
     for line in getattr(result, "stdout_tail", "").splitlines():

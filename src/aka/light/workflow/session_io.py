@@ -156,7 +156,7 @@ def ensure_submodules(platform: str = "", arch: str = "") -> None:
 def run_session(
     workspace: Path,
     prompt: str,
-    timeout: int,
+    timeout: int | None,
     agent_cli: str = "claude",
     sandbox_hardware: str = "",
     sandbox_profile: str = "",

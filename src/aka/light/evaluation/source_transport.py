@@ -28,6 +28,8 @@ PROFILES = {
     "prod": "https://atrex-gateway.alibaba-inc.com",
 }
 TERMINAL_JOB_STATES = {"succeeded", "failed", "cancelled", "canceled"}
+SHORT_GET_TIMEOUT_SECONDS = 30
+SHORT_POLL_INTERVAL_SECONDS = 2.0
 
 
 class SourceUploadError(RuntimeError):
@@ -375,7 +377,6 @@ def run_sdk_job(
 ):
     """Submit and collect one public Gateway job through the Agate SDK."""
     from aka.light.execution.gateway_jobs import (
-        AcceptedJobMissing,
         SubmissionRejected,
         SubmissionUncertain,
         annotate_deadline_timeout,
@@ -449,6 +450,7 @@ def run_sdk_job(
         )
 
     def poll(initial, remaining, *, recovery_probe=False):
+        _ = recovery_probe
         accepted = json.loads(initial.stdout)
         job_id = accepted["job_id"]
         deadline = time.monotonic() + remaining
@@ -468,28 +470,35 @@ def run_sdk_job(
                         "Gateway collection deadline reached; the accepted Job is saved for reconciliation"
                     )
                 try:
-                    job = client.get_job(
+                    observed = client.get_job(
                         job_id,
-                        wait=not recovery_probe,
-                        timeout=(
-                            min(30, max(1, available))
-                            if recovery_probe
-                            else min(300, max(1, available))
-                        ),
+                        wait=False,
+                        timeout=min(SHORT_GET_TIMEOUT_SECONDS, max(1, available)),
                     )
+                    if isinstance(observed, dict):
+                        job = observed
                 except GatewayError as error:
-                    if getattr(error, "status", None) == 404:
-                        raise AcceptedJobMissing(job_id) from None
-                    raise EvidenceUnavailable(
-                        "Gateway collection transport unavailable"
-                    ) from None
-                if recovery_probe:
-                    return subprocess.CompletedProcess(
-                        ["agate-sdk", "get", job_id],
-                        0 if job.get("status") == "succeeded" else 1,
-                        json.dumps(job),
-                        "",
-                    )
+                    status = getattr(error, "status", None)
+                    if (
+                        isinstance(status, int)
+                        and status < 500
+                        and status not in {404, 408, 429}
+                    ):
+                        return _sdk_error_process(error, stage="get")
+                    # The accepted Job continues independently of this GET.
+                    # Preserve the same Job ID and spend the remaining
+                    # collection budget on short snapshot polls instead of
+                    # converting one transient transport/visibility failure
+                    # into an Agent-visible timeout.
+                    _ = error
+                if job.get("status") in TERMINAL_JOB_STATES:
+                    continue
+                delay = min(
+                    SHORT_POLL_INTERVAL_SECONDS,
+                    max(0.0, deadline - time.monotonic()),
+                )
+                if delay > 0:
+                    time.sleep(delay)
         except (KeyboardInterrupt, SystemExit):
             try:
                 client.cancel_job(job_id)

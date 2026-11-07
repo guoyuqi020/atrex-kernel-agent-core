@@ -18,7 +18,6 @@ SHARED = {
     "prompts/dependency_review.md": "workflow/prompts/dependency_review.md",
     "reference/test_kernel.py": "task/problem/sol_harness.py",
     "reference/v_iteration.schema.json": "workflow/resources/v_iteration.schema.json",
-    "prompts/framework_baseline_exit_supervisor.md": "workflow/prompts/framework_baseline_exit_supervisor.md",
     "prompts/generalize_agent_problem.md": "task/problem/prompts/generalize_agent_problem.md",
     "tools/extract_ttgir.py": "execution/profiling/common/extract_ttgir.py",
     "tools/iteration_trace.py": "workflow/iteration_trace.py",

@@ -24,7 +24,6 @@ from aka.light.workspace.resource_catalog import resource
 
 from aka.light.workflow.constants import (
     SUPPLEMENTAL_PENDING_PREFIX,
-    SUPPLEMENTAL_REPAIR_PREFIX,
     AGENT_PROBLEM_GENERATION_PROMPT,
     ATREX_BENCH_HARNESS,
     ATREX_PRIVATE_REFERENCE_ENV,
@@ -35,7 +34,6 @@ from aka.light.workflow.constants import (
     DEPENDENCY_REVIEW_PROMPT,
     RESEARCH_CLAIM_REVIEW_PROMPT,
     DEPENDENCY_REVIEW_SCHEMA_VERSION,
-    DEPENDENCY_REVIEW_TIMEOUT_S,
     FRAMEWORK_BASELINE_CATEGORY,
     FRAMEWORK_BASELINE_FILE,
     FRAMEWORK_BASELINE_TIMEOUT_S,
@@ -58,7 +56,6 @@ from aka.light.workflow.baseline_progress import (load_progress as load_framewor
 from aka.light.workflow.baseline_progress import (mark_accepted as mark_framework_baseline_accepted)
 from aka.light.workflow.baseline_progress import (progress_path as framework_baseline_progress_path)
 from aka.light.workflow.baseline_progress import (restore_latest_candidate as restore_latest_framework_baseline_candidate)
-from aka.light.workflow.baseline_progress import (save_supervisor_recovery as save_framework_baseline_recovery)
 from aka.light.evaluation.hardware import hardware_directive, hardware_vendor, kernel_is_gluon
 from aka.light.evaluation.policy import BENCH_ITERS, CORRECTNESS_CASES, SHAPE_BATCH_SIZE
 from aka.light.agent.dependency_policy import DEPENDENCY_GUARD_ENV
@@ -121,7 +118,6 @@ from aka.light.workspace.state import (
 _WIKI_PROFILE_ROOT_ENV = "ATREX_WIKI_PROFILE_ROOT"
 _WIKI_TASK_ID_ENV = "ATREX_WIKI_TASK_ID"
 
-_FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_TIMEOUT_S = 600
 _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_SCHEMA_VERSION = 5
 _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_PATH = Path(
     ".atrex_long_horizon/framework_baseline/correctness_guidance.json"
@@ -316,7 +312,6 @@ class Campaign:
     )
     framework_baseline_timeout: int = FRAMEWORK_BASELINE_TIMEOUT_S
     handoff_resumes: int = DEFAULT_HANDOFF_RESUMES
-    production_review_timeout: int = DEPENDENCY_REVIEW_TIMEOUT_S
     verify_repeats: int = DEFAULT_VERIFY_REPEATS
     # One Runtime-owned per-Shape budget shared by Eval and ABBA. The legacy
     # ``verify_run_timeout`` accessor below remains a structural compatibility
@@ -365,8 +360,6 @@ class Campaign:
             )
         if self.problem_generation_timeout <= 0:
             raise ValueError("problem_generation_timeout must be positive")
-        if self.production_review_timeout <= 0:
-            raise ValueError("production_review_timeout must be positive")
         if type(self.shape_batch_size) is not int or self.shape_batch_size <= 0:
             raise ValueError("shape_batch_size must be a positive integer")
         if self.gpu_clock_mhz is not None and (
@@ -1155,7 +1148,7 @@ class Campaign:
                 result = self._run_session(
                     review_workspace,
                     DEPENDENCY_REVIEW_PROMPT.read_text(encoding="utf-8"),
-                    timeout=self.production_review_timeout,
+                    timeout=None,
                     agent_cli=self.agent_cli,
                     reasoning_effort="high",
                     agent_plugins=False,
@@ -1260,7 +1253,7 @@ class Campaign:
         digest = _production_review_digest(
             workspace, framework, require_gluon, self.specify_dsl
         )
-        stage = f"dependency-review:{digest}:{self.agent_cli}:{self.production_review_timeout}"
+        stage = f"dependency-review:{digest}:{self.agent_cli}:unbounded"
         try:
             return retry_review(
                 self.workspace, stage,
@@ -1811,48 +1804,22 @@ class Campaign:
                     "the framework baseline Agent exited without usable output; "
                     f"inspect {framework_baseline_progress_path(self.workspace)}"
                 )
-            recovery_used = False
             problem = self._framework_baseline_problem(
                 v0_identity, baseline_commit, include_policy_review=False
             )
-            if problem:
-                self._recover_framework_baseline(
-                    problem, v0_identity, baseline_commit, pre_head
-                )
-                recovery_used = True
-                self._warn_restored_baseline_paths(baseline_commit)
-                problem = self._framework_baseline_problem(
-                    v0_identity, baseline_commit, include_policy_review=False
-                )
         else:  # adopt: our own interrupted run already committed the kernel
             self._prepare_framework_baseline_episode(baseline_commit)
-            recovery_used = False
             self._sync_framework_baseline_live(phase="framework_baseline")
             self._warn_restored_baseline_paths(baseline_commit)
             problem = self._framework_baseline_problem(
                 v0_identity, baseline_commit, include_policy_review=False
             )
-        result: Optional[dict] = None
-        if not problem:
-            result, problem = self._framework_baseline_external_gates(n)
-        numerical_repairs = 0
-        while problem and not problem.startswith(SUPPLEMENTAL_PENDING_PREFIX) and (
-            not recovery_used or (problem.startswith(SUPPLEMENTAL_REPAIR_PREFIX) and numerical_repairs < 2)
-        ):
-            # Give one focused repair turn when the authoritative combined gate finds a
-            # full-domain or policy problem, then rerun the independent gates once.
-            if problem.startswith(SUPPLEMENTAL_REPAIR_PREFIX):
-                numerical_repairs += 1
-            self._recover_framework_baseline(
-                problem, v0_identity, baseline_commit, pre_head
-            )
-            recovery_used = True
-            self._warn_restored_baseline_paths(baseline_commit)
-            problem = self._framework_baseline_problem(
-                v0_identity, baseline_commit, include_policy_review=False
-            )
-            if not problem:
-                result, problem = self._framework_baseline_external_gates(n)
+        result, problem = self._repair_framework_baseline_until_accepted(
+            problem=problem,
+            v0_identity=v0_identity,
+            baseline_commit=baseline_commit,
+            pre_head=pre_head,
+        )
         if problem:
             # Undo any session-authored commits while retaining every worktree file.  A hard reset
             # here used to erase the exact candidate and debugging experience needed by a restart.
@@ -2037,100 +2004,6 @@ class Campaign:
             raise RuntimeError("framework baseline requires a committed V0 kernel.py")
         return commit
 
-    def _framework_baseline_supervisor_order(self) -> tuple[str, ...]:
-        """Runtime order for the post-exit progress-saving supervisor only."""
-        ordered: list[str] = []
-        for agent_cli in (self.agent_cli, "codex", "qodercli"):
-            if agent_cli not in ordered:
-                ordered.append(agent_cli)
-        return tuple(ordered)
-
-    def _save_framework_baseline_exit_progress(
-        self,
-        *,
-        crash_progress: dict,
-    ) -> None:
-        """Ask a separate read-only Agent to turn crash artifacts into a restart handoff."""
-        exits = crash_progress.get("unexpected_exits")
-        if not isinstance(exits, list) or not exits or not isinstance(exits[-1], dict):
-            return
-        crash_record = exits[-1]
-        snapshot = crash_record.get("snapshot")
-        snapshot_root = (
-            self.workspace / str(snapshot.get("root"))
-            if isinstance(snapshot, dict) and snapshot.get("root")
-            else None
-        )
-        order = self._framework_baseline_supervisor_order()
-        prompt = resource("prompts/framework_baseline_exit_supervisor.md").read_text(
-            encoding="utf-8"
-        )
-        for index, supervisor_cli in enumerate(order):
-            with tempfile.TemporaryDirectory(
-                prefix="atrex-v1-exit-supervisor-"
-            ) as directory:
-                review_workspace = Path(directory)
-                if snapshot_root is not None and snapshot_root.is_dir():
-                    shutil.copytree(snapshot_root, review_workspace / "candidate")
-                (review_workspace / "crash_record.json").write_text(
-                    json.dumps(crash_record, indent=2, ensure_ascii=False) + "\n",
-                    encoding="utf-8",
-                )
-                print(
-                    "[orchestrator] V1 exit progress supervisor: launching "
-                    f"{supervisor_cli} ({index + 1}/{len(order)})",
-                    flush=True,
-                )
-                try:
-                    result = self._run_session(
-                        review_workspace,
-                        prompt,
-                        timeout=600,
-                        agent_cli=supervisor_cli,
-                        reasoning_effort="high",
-                        agent_plugins=False,
-                        extra_environment=self.agent_boundary_environment("baseline-exit-review"),
-                    )
-                except Exception as exc:
-                    print(
-                        "[orchestrator] V1 exit progress supervisor failed: "
-                        f"{supervisor_cli}: {type(exc).__name__}: {exc}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    continue
-                self._account(
-                    result, f"framework baseline exit supervisor ({supervisor_cli})"
-                )
-                if result.exit_status != 0 or result.timed_out:
-                    continue
-                try:
-                    recovery = json.loads(
-                        (review_workspace / "resume.json").read_text(encoding="utf-8")
-                    )
-                    destination = save_framework_baseline_recovery(
-                        self.workspace, recovery, agent_cli=supervisor_cli
-                    )
-                except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-                    print(
-                        "[orchestrator] V1 exit progress supervisor produced an invalid "
-                        f"handoff via {supervisor_cli}: {exc}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    continue
-                print(
-                    f"[orchestrator] V1 restart handoff saved: {destination}",
-                    flush=True,
-                )
-                return
-        print(
-            "[orchestrator] WARNING: no progress supervisor produced a structured V1 "
-            f"handoff; mechanical crash record remains at {framework_baseline_progress_path(self.workspace)}",
-            file=sys.stderr,
-            flush=True,
-        )
-
     def _capture_framework_baseline_exit(
         self,
         *,
@@ -2142,8 +2015,7 @@ class Campaign:
         stderr_tail: str,
         error: str = "",
     ) -> None:
-        order = self._framework_baseline_supervisor_order()
-        progress = capture_framework_baseline_exit(
+        capture_framework_baseline_exit(
             self.workspace,
             agent_cli=self.agent_cli,
             exit_status=exit_status,
@@ -2153,9 +2025,7 @@ class Campaign:
             stdout_tail=stdout_tail,
             stderr_tail=stderr_tail,
             error=error,
-            supervisor_order=order,
         )
-        self._save_framework_baseline_exit_progress(crash_progress=progress)
 
     def _framework_baseline_correctness_context(self) -> list[Path]:
         """Return the bounded public packet shown to the two V1 correctness reviewers."""
@@ -2257,7 +2127,7 @@ class Campaign:
                 result = self._run_session(
                     review_workspace,
                     prompt,
-                    timeout=_FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_TIMEOUT_S,
+                    timeout=None,
                     agent_cli=agent_cli,
                     reasoning_effort="max",
                     agent_plugins=False,
@@ -2472,7 +2342,7 @@ class Campaign:
         label: str,
         rejection: str = "",
     ) -> SessionResult:
-        """Run the configured outer V1 Agent; other CLIs only summarize an exit."""
+        """Run or resume the Framework Baseline Agent in its preserved trajectory."""
         # Re-project the authoritative boundary before every initial or recovery
         # Session so a prior interrupted Agent cannot leave misleading instructions.
         self._ensure_framework_baseline_workspace_contract()
@@ -2489,12 +2359,18 @@ class Campaign:
                 + prompt
             )
         if framework_baseline_progress_path(self.workspace).is_file():
+            resumable = bool(self._framework_baseline_session_id())
             prompt = (
-                "# Resume V1 from an unexpected-exit handoff\n\n"
-                "Do not start over. Read "
-                "`.atrex_long_horizon/framework_baseline/resume.json` when present, then inspect "
-                "the existing candidate and debug files. Continue at the recorded `next_step` and "
-                "avoid repeating completed research.\n\n" + prompt
+                "# Resume the interrupted Framework Baseline\n\n"
+                + (
+                    "This is the original Provider Session. Continue from the existing conversation, "
+                    "Git history, candidate and scratch files. "
+                    if resumable
+                    else "The original Provider Session is unavailable, but its Git history, "
+                    "candidate and scratch files were preserved. Inspect them before continuing. "
+                )
+                + "Do not start over or repeat completed research.\n\n"
+                + prompt
             )
         try:
             from aka.light.workflow.session import LongSessionRunner
@@ -2557,7 +2433,6 @@ class Campaign:
                 stdout_tail="",
                 stderr_tail="remote GPU environment unavailable",
                 error="EnvironmentUnavailable",
-                supervisor_order=self._framework_baseline_supervisor_order(),
             )
             raise
         except KeyboardInterrupt:
@@ -2573,7 +2448,6 @@ class Campaign:
                 stdout_tail="",
                 stderr_tail="",
                 error="KeyboardInterrupt",
-                supervisor_order=self._framework_baseline_supervisor_order(),
             )
             raise
         except Exception as exc:
@@ -3054,11 +2928,11 @@ class Campaign:
 
     def _recover_framework_baseline(
         self, problem: str, v0_identity: str, baseline_commit: str, pre_head: str
-    ) -> None:
-        """Run one recovery session; unexpected exits invoke the progress supervisor."""
+    ) -> SessionResult:
+        """Resume the Framework Baseline Agent so it can repair a rejected candidate."""
         print(
             f"[orchestrator] WARNING: framework baseline rejected ({problem}); "
-            "starting one recovery session",
+            "resuming the original Agent session for repair",
             file=sys.stderr,
             flush=True,
         )
@@ -3072,13 +2946,54 @@ class Campaign:
                 stderr=subprocess.DEVNULL,
             )
         try:
-            self._run_framework_baseline_agent(
+            return self._run_framework_baseline_agent(
                 n=FRAMEWORK_BASELINE_VERSION,
                 label="framework baseline recovery",
                 rejection=problem,
             )
         finally:
             self._warn_restored_baseline_paths(baseline_commit)
+
+    def _repair_framework_baseline_until_accepted(
+        self,
+        *,
+        problem: str,
+        v0_identity: str,
+        baseline_commit: str,
+        pre_head: str,
+    ) -> tuple[Optional[dict], str]:
+        """Resume one Baseline trajectory until its authoritative gates pass.
+
+        Candidate rejection is actionable feedback, not a retry-budget event.  The
+        same Provider Session therefore keeps repairing and resubmitting without a
+        hard-coded attempt limit.  Explicitly incomplete supplemental validation is
+        still an operator-facing blocker; user cancellation and unrecoverable
+        Agent/session failures terminate through their normal paths.
+        """
+        result: Optional[dict] = None
+        while True:
+            if problem:
+                if problem.startswith(SUPPLEMENTAL_PENDING_PREFIX):
+                    return result, problem
+                recovery = self._recover_framework_baseline(
+                    problem, v0_identity, baseline_commit, pre_head
+                )
+                if recovery.exit_status != 0 and recovery.tokens == 0:
+                    raise RuntimeError(
+                        "the resumed framework baseline Agent exited without usable output; "
+                        f"inspect {framework_baseline_progress_path(self.workspace)}"
+                    )
+                problem = self._framework_baseline_problem(
+                    v0_identity, baseline_commit, include_policy_review=False
+                )
+                if problem:
+                    continue
+
+            result, problem = self._framework_baseline_external_gates(
+                FRAMEWORK_BASELINE_VERSION
+            )
+            if not problem or problem.startswith(SUPPLEMENTAL_PENDING_PREFIX):
+                return result, problem
 
     def _record_framework_baseline_failure(self, problem: str) -> None:
         """Persist why the framework baseline was rejected, uncommitted so a reset cannot lose it."""

@@ -41,7 +41,6 @@ class WorkflowSettings:
     gateway_candidate_recovery: str = "disabled"
     framework_baseline_timeout: int = 28800
     handoff_resumes: int = 2
-    production_review_timeout: int = 600
     review_trace_mode: str = "errors"
     long_reviewer_session: str = ""
     framework_baseline_reviewers: tuple[str, ...] = ()
@@ -77,11 +76,7 @@ class WorkflowSettings:
         if len(names) != len(set(names)):
             raise ValueError("agent_reference_paths contain duplicate mount names")
         object.__setattr__(self, "agent_reference_paths", references)
-        for name in (
-            "setup_timeout",
-            "framework_baseline_timeout",
-            "production_review_timeout",
-        ):
+        for name in ("setup_timeout", "framework_baseline_timeout"):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")

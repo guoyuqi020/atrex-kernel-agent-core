@@ -29,7 +29,6 @@ WORKSPACE_LAYOUTS = {
         ("reference.py", "input.py", "shapes.json", "metadata.json"),
         ("agent_problem.json",),
     ),
-    "baseline-exit-review": (("crash_record.json", "candidate"), ("resume.json",)),
     "baseline-correctness-review": (("context",), ("correctness_review.md",)),
 }
 

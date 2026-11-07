@@ -22,7 +22,7 @@ from aka.contracts.problem import LoadedProblem
 from aka.contracts.evaluation import EvaluationUnavailable
 from aka.legacy.agent.runtime import auth_hint
 
-from aka.legacy.workflow.constants import SUPPLEMENTAL_PENDING_PREFIX, SUPPLEMENTAL_REPAIR_PREFIX, ATREX_PRIVATE_REFERENCE_ENV, DEFAULT_CONVERT_AFTER, DEFAULT_FAST_EPISODES, DEFAULT_FAST_TRIALS, DEFAULT_HANDOFF_RESUMES, DEFAULT_VERIFY_REPEATS, DEPENDENCY_REVIEW_SCHEMA_VERSION, DEPENDENCY_REVIEW_TIMEOUT_S, FRAMEWORK_BASELINE_CATEGORY, FRAMEWORK_BASELINE_TIMEOUT_S, FRAMEWORK_BASELINE_VERSION
+from aka.legacy.workflow.constants import SUPPLEMENTAL_PENDING_PREFIX, SUPPLEMENTAL_REPAIR_PREFIX, ATREX_PRIVATE_REFERENCE_ENV, DEFAULT_CONVERT_AFTER, DEFAULT_FAST_EPISODES, DEFAULT_FAST_TRIALS, DEFAULT_HANDOFF_RESUMES, DEFAULT_VERIFY_REPEATS, DEPENDENCY_REVIEW_SCHEMA_VERSION, FRAMEWORK_BASELINE_CATEGORY, FRAMEWORK_BASELINE_TIMEOUT_S, FRAMEWORK_BASELINE_VERSION
 from .resources import DEPENDENCY_REVIEW_PROMPT, PROMPTS_DIR
 from aka.legacy.execution.defaults import DEFAULT_SANDBOX_TIMEOUT
 from aka.legacy.task.candidate_workspace.filenames import FRAMEWORK_BASELINE_FILE
@@ -75,7 +75,6 @@ _LONG_REVIEWER_SESSION_ENV = {
 }
 
 
-_FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_TIMEOUT_S = 600
 _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_SCHEMA_VERSION = 3
 _FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_PATH = Path(
     ".atrex_long_horizon/framework_baseline/correctness_guidance.json"
@@ -482,7 +481,7 @@ class Campaign:
                 result = self._run_session(
                     review_workspace,
                     DEPENDENCY_REVIEW_PROMPT.read_text(encoding="utf-8"),
-                    timeout=self.production_review_timeout,
+                    timeout=None,
                     agent_cli=self.agent_cli,
                     reasoning_effort="high",
                     agent_plugins=False,
@@ -588,11 +587,11 @@ class Campaign:
         framework: str,
         require_gluon: bool,
     ) -> list[str]:
-        """Bound timeout retries across sessions and supervisor restarts."""
+        """Retry a reviewer that did not produce a usable terminal verdict."""
         from aka.legacy.workflow.review_retry import retry_review
 
         digest = _production_review_digest(workspace, framework, require_gluon)
-        stage = f"dependency-review:{digest}:{self.agent_cli}:{self.production_review_timeout}"
+        stage = f"dependency-review:{digest}:{self.agent_cli}:unbounded"
         try:
             return retry_review(
                 workspace,
@@ -1243,7 +1242,7 @@ class Campaign:
                     result = self._run_session(
                         review_workspace,
                         prompt,
-                        timeout=600,
+                        timeout=None,
                         agent_cli=supervisor_cli,
                         reasoning_effort="high",
                         agent_plugins=False,
@@ -1617,7 +1616,7 @@ class Campaign:
                 result = self._run_session(
                     review_workspace,
                     prompt,
-                    timeout=_FRAMEWORK_BASELINE_CORRECTNESS_REVIEW_TIMEOUT_S,
+                    timeout=None,
                     agent_cli=agent_cli,
                     reasoning_effort="max",
                     agent_plugins=False,

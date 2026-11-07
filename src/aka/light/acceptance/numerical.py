@@ -212,7 +212,6 @@ def _request_review(campaign, workspace, files, digest, previous=None, *, state_
 
     def review_once():
         cancel.check()
-        timeout = campaign.production_review_timeout
         with tempfile.TemporaryDirectory(prefix="atrex-numerical-advice-") as temporary:
             root = Path(temporary).resolve()
             for name, source in files.items():
@@ -223,7 +222,7 @@ def _request_review(campaign, workspace, files, digest, previous=None, *, state_
                        "world_size": _world_size(workspace)}
             (root / "review_request.json").write_text(json.dumps(request, indent=2))
             result = campaign._run_session(
-                root, PROMPT.read_text(), timeout=cancel.timeout(timeout),
+                root, PROMPT.read_text(), timeout=None,
                 agent_cli=campaign.agent_cli, reasoning_effort="high", agent_plugins=False,
                 extra_environment={**{key: "" for key in os.environ.keys() - scrub_environment(dict(os.environ)).keys()},
                     **campaign.agent_boundary_environment("numerical-review"),
@@ -233,7 +232,7 @@ def _request_review(campaign, workspace, files, digest, previous=None, *, state_
             cancel.check()
             response = root / "numerical_review.json"
             record = {"evidence_digest": digest, "session_id": result.session_id,
-                      "timeout_s": timeout, "exit_status": result.exit_status,
+                      "timeout_s": None, "exit_status": result.exit_status,
                       "timed_out": result.timed_out, "response_written": response.is_file()}
             record_path = state_root / f"numerical_planning-{uuid.uuid4().hex}.json"
             durable_write_json(record_path, record, indent=2)
@@ -269,7 +268,7 @@ def _request_review(campaign, workspace, files, digest, previous=None, *, state_
                 durable_write_json(record_path, record, indent=2, ensure_ascii=False)
 
     context = hashlib.sha256(json.dumps(previous, sort_keys=True).encode()).hexdigest()
-    stage = f"numerical-advice:{digest}:{campaign.agent_cli}:{campaign.production_review_timeout}:{context}"
+    stage = f"numerical-advice:{digest}:{campaign.agent_cli}:unbounded:{context}"
     return retry_infrastructure(campaign.workspace, stage, review_once, cancel=cancel)
 
 

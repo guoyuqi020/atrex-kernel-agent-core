@@ -89,7 +89,7 @@ than querying a different product or guessing from a marketing name.
 
 For ABBA, optional `--comparison-run-timeout SECONDS` controls each run and must fit the
 configured allocation's complete schedule. Without that option, each run uses the smaller of
-the 300-second Performance timeout and its equal share of the configured allocation. Acceptance can
+the 60-second Performance timeout and its equal share of the configured allocation. Acceptance can
 reuse only an exact matching request, including baseline commit/source, repeats and run timeout.
 The injected acceptance block supplies the exact Agent-controlled command for the current
 configuration and committed incumbent ID. Use that block instead of this generic example when

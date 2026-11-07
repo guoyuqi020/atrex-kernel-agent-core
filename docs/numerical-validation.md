@@ -29,7 +29,7 @@ The selected Acceptance service starts the numerical gate alongside ordinary cor
 
 Reference non-finite outputs, invalid generation or incomplete receipts return to the planner for one plan-repair attempt. The case IDs must be preserved. Unresolved validation yields `candidate_numerical_pending`, not a Kernel correctness failure. Baselines get up to two supplemental Kernel-repair turns; Episodes retain their existing continuation budget.
 
-Each planner uses `--production-review-timeout` (default 600 seconds). A bounded plan recovered from a timeout remains untrusted until schema/evidence validation and execution. Without a usable plan, a timeout permits a recorded `skipped_planner_timeout` only after ordinary correctness passed, evidence is unchanged and no measured supplemental candidate failure remains. Malformed non-timeout responses do not receive this exemption.
+Reviewer sessions, including the numerical planner, have no Supervisor time limit. Explicit campaign cancellation may still stop a reviewer. A provider-side timeout remains distinguishable from a local deadline and retains the existing fail-safe handling; malformed non-timeout responses remain untrusted until schema/evidence validation and execution.
 
 GPU probes use the private MeasurementStore and exact-task reuse. Python-backed probes use
 the remote numerical driver; native CUDA manifests use `aka.light.acceptance.typed_numerical`

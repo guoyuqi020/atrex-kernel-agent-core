@@ -251,6 +251,7 @@ FP4_MAX_REL_L2 = 0.2
 MAX_DEV_JOB_TIMEOUT = 600
 MAX_HTTP_REQUEST_TIMEOUT = 600
 RECOVERY_GET_TIMEOUT = 30
+SHORT_POLL_INTERVAL_SECONDS = 2.0
 SSH_CONNECT_TIMEOUT = 15
 ENVIRONMENT_TEMPFAIL = 75
 SSH_RUNTIME_BINDS_ENV = "ATREX_SANDBOX_SSH_RUNTIME_BINDS"
@@ -276,7 +277,6 @@ except subprocess.TimeoutExpired:
     status = 124
 raise SystemExit(status)
 """.strip()
-AGATE_WAIT_SLICE_SECONDS = 300
 RUNTIME_CHUNK_BYTES = 20 * 1024
 # Small inline workspace bundles stay below Linux MAX_ARG_STRLEN; larger
 # bundles use agate's OSS attachment transport.
@@ -3132,11 +3132,18 @@ def run_direct_job(
         return subprocess.CompletedProcess([], 0, json.dumps(accepted), "")
 
     def poll(initial, remaining, *, recovery_probe=False):
+        _ = recovery_probe
         job = json.loads(initial.stdout)
         job_id = job["job_id"]
         _track_agate_job(job_id, "", url, None)
-        if recovery_probe:
-            try:
+        deadline = time.monotonic() + remaining
+        try:
+            while True:
+                if job.get("status") in ("succeeded", "failed", "cancelled", "canceled"):
+                    return completed(job)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise EvidenceUnavailable("Gateway collection deadline reached; the accepted Job is saved for reconciliation")
                 try:
                     job = _gateway_json(
                         url,
@@ -3148,44 +3155,23 @@ def run_direct_job(
                 except InvalidURL:
                     raise
                 except (OSError, GatewayHTTPError, GatewayResponseError) as error:
-                    if isinstance(error, GatewayHTTPError) and error.status == 404:
-                        from aka.light.execution.gateway_jobs import AcceptedJobMissing
-                        raise AcceptedJobMissing(job_id) from error
                     if (isinstance(error, GatewayHTTPError) and error.status < 500
-                            and error.status not in {408, 429} and not request_is_infrastructure(
+                            and error.status not in {404, 408, 429} and not request_is_infrastructure(
                                 subprocess.CompletedProcess([], 1, error.detail, ""))):
                         raise
-                    raise EvidenceUnavailable(
-                        "Saved Gateway Job could not be read by the recovery probe"
-                    ) from error
-                return completed(job)
-            finally:
-                _forget_agate_job(job_id)
-        deadline = time.monotonic() + remaining
-        try:
-            while True:
-                if job.get("status") in ("succeeded", "failed", "cancelled", "canceled"):
-                    return completed(job)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise EvidenceUnavailable("Gateway collection deadline reached; the accepted Job is saved for reconciliation")
-                wait_for = min(30.0, remaining)
-                try:
-                    job = _gateway_json(url, "GET", f"/v1/jobs/{job_id}?wait=true&timeout={wait_for:.3f}",
-                                        None, wait_for + 10)
-                except InvalidURL:
-                    raise
-                except (OSError, GatewayHTTPError, GatewayResponseError) as error:
-                    if isinstance(error, GatewayHTTPError) and error.status == 404:
-                        from aka.light.execution.gateway_jobs import AcceptedJobMissing
-                        raise AcceptedJobMissing(job_id) from error
-                    if (isinstance(error, GatewayHTTPError) and error.status < 500
-                            and error.status not in {408, 429} and not request_is_infrastructure(
-                                subprocess.CompletedProcess([], 1, error.detail, ""))):
-                        raise
-                    raise EvidenceUnavailable(
-                        "Gateway collection transport unavailable"
-                    ) from error
+                    # The accepted Job survives transient GET failures and
+                    # eventual-visibility 404s. Keep snapshot-polling the same
+                    # Job within the original collection budget.
+                if isinstance(job, dict) and job.get("status") in {
+                    "succeeded", "failed", "cancelled", "canceled"
+                }:
+                    continue
+                delay = min(
+                    SHORT_POLL_INTERVAL_SECONDS,
+                    max(0.0, deadline - time.monotonic()),
+                )
+                if delay > 0:
+                    time.sleep(delay)
         except (KeyboardInterrupt, SystemExit):
             try:
                 _gateway_json(url, "POST", f"/v1/jobs/{job_id}/cancel", {}, 10)
@@ -3373,16 +3359,21 @@ def _resume_interrupted_agate_wait(
     initial: subprocess.CompletedProcess[str],
     recovery_probe: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    """Wait for an already-submitted job without resubmitting it.
+    """Short-poll an already-submitted job without resubmitting it.
 
     Submission is deliberately non-blocking so the sandbox knows the job id and
     can cancel it if its own parent terminates the sandbox while it is polling.
+    One GET transport failure is not a Job verdict: retry the same physical Job
+    within the caller's original collection budget until a valid terminal
+    snapshot is observed.
     """
+    _ = command_timeout, recovery_probe
     initial_job = parse_job_response(initial.stdout or "")
     if initial_job and initial_job.get("status") in {
         "succeeded",
         "failed",
         "cancelled",
+        "canceled",
     }:
         return initial
     job_id = (
@@ -3399,51 +3390,28 @@ def _resume_interrupted_agate_wait(
         get_command += ["--profile", gateway_profile]
     note = f"submitted job_id={job_id}; polling..."
     stderr_parts = [part.rstrip() for part in (initial.stderr, note) if part]
-    if recovery_probe:
-        timeout = min(RECOVERY_GET_TIMEOUT, max(1, remaining))
-        try:
-            resumed = subprocess.run(
-                [*get_command, "--http-timeout", str(timeout), job_id],
-                capture_output=True,
-                text=True,
-                timeout=timeout + 5,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            resumed = subprocess.CompletedProcess(
-                [], ENVIRONMENT_TEMPFAIL, "", "Gateway collection transport unavailable"
-            )
-        if resumed.stderr:
-            stderr_parts.append(resumed.stderr.rstrip())
-        return subprocess.CompletedProcess(
-            args=resumed.args,
-            returncode=resumed.returncode,
-            stdout=resumed.stdout,
-            stderr="\n".join(stderr_parts),
-        )
     deadline = time.monotonic() + remaining
     resumed = initial
-    while (remaining := int(deadline - time.monotonic())) > 0:
+    while (available := deadline - time.monotonic()) > 0:
+        get_timeout = min(RECOVERY_GET_TIMEOUT, max(1, int(available)))
         try:
             resumed = subprocess.run(
                 [
                     *get_command,
                     "--http-timeout",
-                    str(MAX_HTTP_REQUEST_TIMEOUT),
-                    "--wait-timeout",
-                    str(min(AGATE_WAIT_SLICE_SECONDS, remaining)),
-                    "--job-timeout",
-                    str(command_timeout),
-                    "--wait",
+                    str(get_timeout),
                     job_id,
                 ],
                 capture_output=True,
                 text=True,
-                timeout=min(MAX_HTTP_REQUEST_TIMEOUT + AGATE_WAIT_SLICE_SECONDS, max(1, remaining)),
+                timeout=get_timeout + 5,
             )
         except (OSError, subprocess.TimeoutExpired):
             resumed = subprocess.CompletedProcess([], ENVIRONMENT_TEMPFAIL, "", "Gateway collection transport unavailable")
         if resumed.stderr:
-            stderr_parts.append(resumed.stderr.rstrip())
+            diagnostic = resumed.stderr.rstrip()
+            if diagnostic not in stderr_parts:
+                stderr_parts.append(diagnostic)
         job = parse_job_response(resumed.stdout or "")
         if job and job.get("status") in {"succeeded", "failed", "cancelled", "canceled"}:
             break
@@ -3451,10 +3419,12 @@ def _resume_interrupted_agate_wait(
             rejection = submission_rejection(resumed)
             if rejection is not None and not rejection.retryable:
                 break
-            # Collection transport failure is returned to execute_job, which
-            # emits a bounded Agent-visible timeout and retains the accepted
-            # Job checkpoint privately. Do not keep polling in this call.
-            break
+        delay = min(
+            SHORT_POLL_INTERVAL_SECONDS,
+            max(0.0, deadline - time.monotonic()),
+        )
+        if delay > 0:
+            time.sleep(delay)
     return subprocess.CompletedProcess(
         args=resumed.args,
         returncode=resumed.returncode,

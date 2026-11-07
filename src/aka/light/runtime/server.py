@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT, derived_evaluation_timeout
 from aka.light.evaluation.policy import SHAPE_BATCH_SIZE
+from aka.light.evaluation.shapes import shape_request_timeout
 
 from aka.light.evaluation.gateway import (
     COMMAND_WORKSPACE_MANIFEST,
@@ -764,9 +765,15 @@ class SupervisorRuntime:
         if self.config.request_timeout is not None:
             return self.config.request_timeout
         # Physical-job recovery gets one complete second wait window.  Size the
-        # default Supervisor watchdog for both windows; explicit operator
-        # request timeouts remain authoritative.
-        return 2 * (self.config.timeout + self.gateway_queue_wait_grace) + 120
+        # default Supervisor watchdog for both windows, including the
+        # sequential Performance allowance for every Shape in one batch.
+        # Explicit operator request timeouts remain authoritative.
+        batch_timeout = shape_request_timeout(
+            self.config.timeout,
+            self.config.shape_batch_size,
+            performance_timeout=self.config.evaluation_step_timeout,
+        )
+        return 2 * (batch_timeout + self.gateway_queue_wait_grace) + 120
 
     def close(self):
         with self.lock:

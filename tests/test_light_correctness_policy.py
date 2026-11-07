@@ -22,6 +22,7 @@ from aka.contracts.workspace import CandidateHandle
 from aka.contracts.workflow_launch import decode_launch
 from aka.legacy.task.problem.layout import agent_visible_operator_files
 from aka.legacy.task.problem.native_harness import _parser as native_harness_parser
+from aka.light.acceptance import numerical as numerical_review
 from aka.light.acceptance.numerical import NumericalCancellation
 from aka.light.acceptance.provider import (
     CandidateValidation,
@@ -101,6 +102,7 @@ from aka.light.execution.gateway_jobs import (
     retry_kind,
 )
 from aka.light.experiment.store import JOB_ROOT_ENV, EvidenceUnavailable
+from aka.light.execution.retry import ReviewerOutputUnavailable
 from aka.light.runtime.server import (
     RuntimeConfig,
     SupervisorRuntime,
@@ -1248,22 +1250,158 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         ):
             self.assertEqual(cancel.timeout(600), 50)
 
+    def test_all_supervisor_review_sessions_are_unbounded(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "kernel.py").write_text(
+                "class Model: pass\n", encoding="utf-8"
+            )
+            evidence = workspace / "evidence.txt"
+            evidence.write_text("immutable evidence\n", encoding="utf-8")
+            files = {"trusted/evidence.txt": evidence}
+            digest = numerical_review._digest(files)
+            observed: list[tuple[str, int | None]] = []
+
+            def numerical_session(review_workspace, _prompt, *, timeout, **_kwargs):
+                observed.append(("numerical", timeout))
+                (review_workspace / "numerical_review.json").write_text(
+                    json.dumps({
+                        "schema_version": 1,
+                        "evidence_digest": digest,
+                        "action": "complete",
+                        "summary": "No supplemental probe is required.",
+                        "suite": None,
+                    }),
+                    encoding="utf-8",
+                )
+                return SimpleNamespace(
+                    exit_status=0,
+                    timed_out=False,
+                    session_id="numerical-review",
+                    stdout_tail="",
+                    stderr_tail="",
+                )
+
+            numerical_campaign = SimpleNamespace(
+                workspace=workspace,
+                agent_cli="claude",
+                _run_session=numerical_session,
+                _account=lambda *_args: None,
+                agent_boundary_environment=lambda _role: {},
+            )
+            numerical_review._request_review(
+                numerical_campaign,
+                workspace,
+                files,
+                digest,
+                state_root=workspace / "review-state",
+                cancel=SimpleNamespace(
+                    check=lambda: None,
+                    is_set=lambda: False,
+                    wait=lambda _seconds: False,
+                ),
+            )
+
+            campaign = Campaign(
+                name="operator",
+                kernel_demo=str(workspace / "kernel.py"),
+                platform="cuda",
+                framework="cuda",
+                work_dir=str(root),
+                optimization_mode="production",
+            )
+            result = SimpleNamespace(
+                exit_status=0,
+                timed_out=False,
+                session_id="policy-review",
+                stdout_tail="",
+                stderr_tail="review stopped",
+                tokens=0,
+            )
+
+            def policy_session(*_args, **kwargs):
+                observed.append(("policy", kwargs["timeout"]))
+                return result
+
+            with (
+                patch.object(
+                    campaign, "_run_session", side_effect=policy_session, create=True
+                ),
+                patch.object(campaign, "_account"),
+                patch.object(
+                    campaign, "agent_boundary_environment", return_value={}
+                ),
+            ):
+                with self.assertRaises(ReviewerOutputUnavailable):
+                    campaign._review_production_candidate_once(
+                        workspace,
+                        "cuda",
+                        False,
+                        candidate_digest="a" * 64,
+                    )
+
+            context = campaign.workspace / "README.md"
+            campaign.workspace.mkdir(parents=True, exist_ok=True)
+            context.write_text("operator contract\n", encoding="utf-8")
+
+            def baseline_session(*_args, **kwargs):
+                observed.append(("baseline", kwargs["timeout"]))
+                return result
+
+            with (
+                patch.object(
+                    campaign,
+                    "_framework_baseline_correctness_context",
+                    return_value=(context,),
+                ),
+                patch.object(
+                    campaign,
+                    "_run_session",
+                    side_effect=baseline_session,
+                    create=True,
+                ),
+                patch.object(
+                    campaign, "agent_boundary_environment", return_value={}
+                ),
+            ):
+                campaign._run_framework_baseline_correctness_reviewer("codex")
+
+            self.assertEqual(
+                observed,
+                [
+                    ("numerical", None),
+                    ("policy", None),
+                    ("baseline", None),
+                ],
+            )
+
     def test_one_runtime_step_timeout_drives_gateway_request(self):
-        self.assertEqual(derived_evaluation_timeout(), 1230)
+        self.assertEqual(derived_evaluation_timeout(), 270)
         command = RuntimeConfig("L20D").command(Path("/tmp/workspace"))
         self.assertEqual(
-            command[command.index("--evaluation-step-timeout") + 1], "300"
+            command[command.index("--evaluation-step-timeout") + 1], "60"
         )
         parser = build_parser()
         arguments = parser.parse_args(["--hardware", "L20D"])
-        self.assertEqual(arguments.evaluation_step_timeout, 300)
+        self.assertEqual(arguments.evaluation_step_timeout, 60)
+        with patch(
+            "aka.light.runtime.server.configured_queue_wait_grace",
+            return_value=120,
+        ):
+            runtime = SupervisorRuntime(RuntimeConfig("L20D"))
+        try:
+            self.assertEqual(runtime.request_timeout_seconds, 1980)
+        finally:
+            runtime.close()
 
     def test_eval_timeout_scales_with_actual_shape_count(self):
         # Only the sequential performance phase repeats.  Fixed candidate,
         # correctness, queue and cleanup budgets remain singletons.
-        self.assertEqual(shape_request_timeout(1230, 5), 2430)
-        self.assertEqual(shape_request_timeout(1230, 3), 1830)
-        self.assertEqual(effective_shape_batch_size(1230, 5, 120), 5)
+        self.assertEqual(shape_request_timeout(270, 5), 510)
+        self.assertEqual(shape_request_timeout(270, 3), 390)
+        self.assertEqual(effective_shape_batch_size(270, 5, 120), 5)
         self.assertEqual(effective_shape_batch_size(3000, 5, 120), 5)
         self.assertEqual(
             effective_shape_batch_size(
@@ -1338,21 +1476,21 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
 
     def test_only_request_performance_work_scales_by_shape(self):
         self.assertEqual(
-            _evaluation_performance_timeout(["python3", "test_kernel.py"], 300),
-            300,
+            _evaluation_performance_timeout(["python3", "test_kernel.py"], 60),
+            60,
         )
         self.assertEqual(
             _evaluation_performance_timeout(
-                ["python3", "test_kernel.py", "--version", "v0"], 300
+                ["python3", "test_kernel.py", "--version", "v0"], 60
             ),
-            300,
+            60,
         )
         self.assertEqual(
             _evaluation_performance_timeout(
                 ["python3", "test_kernel.py", "--baseline-path", "v0.py"],
-                300,
+                60,
             ),
-            1200,
+            240,
         )
         self.assertEqual(
             _evaluation_performance_timeout(
@@ -1395,7 +1533,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                     "performance": {
                         "shapes": {
                             "0": {
-                                "error": "candidate exceeded 300.0s wall-clock timeout"
+                                "error": "candidate exceeded 60.0s wall-clock timeout"
                             }
                         }
                     }
@@ -1413,7 +1551,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                     "performance": {
                         "shapes": {
                             "0": {
-                                "error": "candidate exceeded 300.0s wall-clock timeout"
+                                "error": "candidate exceeded 60.0s wall-clock timeout"
                             }
                         }
                     }
@@ -1429,7 +1567,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             requirement=[], deps_mode="auto", evaluation_input_path=None,
             evaluation_shapes_path=None, evaluation_mode=None, version=None,
             multi_seed=None, shape_id=[], timed_runs=None, shape_batch_size=5,
-            evaluation_step_timeout=300,
+            evaluation_step_timeout=60,
             dry_run=False, url=None, gateway_profile="prod",
         )
         with (
@@ -1456,7 +1594,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             embedded_candidate_wall_clock_timeouts(json.loads(final.stdout)),
-            ["candidate exceeded 300.0s wall-clock timeout"],
+            ["candidate exceeded 60.0s wall-clock timeout"],
         )
 
     @staticmethod
@@ -1679,6 +1817,145 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertEqual(polls, [("first", False), ("resumed", True)])
         self.assertEqual(json.loads(recovered.stdout)["status"], "succeeded")
         self.assertEqual(state["phase"], "terminal")
+
+    def test_sdk_collection_short_polls_same_job_until_valid_terminal(self):
+        from aka.light.evaluation.source_transport import run_sdk_job
+
+        class GatewayError(Exception):
+            def __init__(self, status=None):
+                self.status = status
+
+        class TransportError(GatewayError):
+            pass
+
+        class Client:
+            def __init__(self):
+                self.submissions = 0
+                self.polls = []
+
+            def submit_job(self, _kind, _request):
+                self.submissions += 1
+                return {"job_id": "ev_sdk", "status": "queued"}
+
+            def get_job(self, job_id, *, wait=False, timeout=30):
+                self.polls.append((job_id, wait, timeout))
+                if len(self.polls) == 1:
+                    raise TransportError()
+                if len(self.polls) == 2:
+                    return {"job_id": job_id, "status": "running"}
+                return {"job_id": job_id, "status": "succeeded", "result": {}}
+
+            def cancel_job(self, job_id):
+                raise AssertionError(f"unexpected cancellation of {job_id}")
+
+        client = Client()
+        args = SimpleNamespace(
+            url="https://gateway.invalid", gateway_profile=None, timeout=60
+        )
+        payload = {"spec": {"target_hardware": ["L20D"]}}
+        with (
+            patch(
+                "aka.light.evaluation.source_transport._load_sdk_client",
+                return_value=(
+                    client,
+                    "https://gateway.invalid",
+                    GatewayError,
+                    TransportError,
+                ),
+            ),
+            patch("aka.light.evaluation.source_transport.time.sleep") as sleep,
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            process = run_sdk_job(None, args, payload, "dev", 0)
+
+        self.assertEqual(process.returncode, 0)
+        self.assertEqual(client.submissions, 1)
+        self.assertEqual([item[0] for item in client.polls], ["ev_sdk"] * 3)
+        self.assertTrue(all(item[1] is False for item in client.polls))
+        self.assertTrue(all(1 <= item[2] <= 30 for item in client.polls))
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_direct_gateway_short_polls_same_job_until_valid_terminal(self):
+        from aka.light.evaluation import gateway
+
+        calls = []
+
+        def gateway_json(_url, method, path, _payload, timeout):
+            calls.append((method, path, timeout))
+            if method == "POST":
+                return {"job_id": "ev_direct", "status": "queued"}
+            get_count = sum(1 for item in calls if item[0] == "GET")
+            if get_count == 1:
+                raise TimeoutError("GET headers timed out")
+            if get_count == 2:
+                return {"job_id": "ev_direct", "status": "running"}
+            return {"job_id": "ev_direct", "status": "succeeded", "result": {}}
+
+        with (
+            patch("aka.light.evaluation.gateway._gateway_json", side_effect=gateway_json),
+            patch("aka.light.evaluation.gateway.time.sleep") as sleep,
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            process = gateway.run_direct_job(
+                url="https://gateway.invalid",
+                kind="dev",
+                payload={"spec": {"target_hardware": ["L20D"]}},
+                timeout=60,
+                queue_wait_grace=0,
+            )
+
+        self.assertEqual(process.returncode, 0)
+        self.assertEqual(sum(1 for item in calls if item[0] == "POST"), 1)
+        get_calls = [item for item in calls if item[0] == "GET"]
+        self.assertEqual(len(get_calls), 3)
+        self.assertTrue(all(item[1] == "/v1/jobs/ev_direct" for item in get_calls))
+        self.assertTrue(all(item[2] <= 30 for item in get_calls))
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_cli_collection_short_polls_without_server_side_wait(self):
+        from aka.light.evaluation import gateway
+
+        initial = subprocess.CompletedProcess(
+            ["agate", "eval"], 0,
+            json.dumps({"job_id": "ev_cli", "status": "queued"}), "",
+        )
+        running = subprocess.CompletedProcess(
+            ["agate", "get"], 0,
+            json.dumps({"job_id": "ev_cli", "status": "running"}), "",
+        )
+        succeeded = subprocess.CompletedProcess(
+            ["agate", "get"], 0,
+            json.dumps({"job_id": "ev_cli", "status": "succeeded", "result": {}}), "",
+        )
+        with (
+            patch(
+                "aka.light.evaluation.gateway.subprocess.run",
+                side_effect=[
+                    subprocess.TimeoutExpired(["agate", "get"], 30),
+                    running,
+                    succeeded,
+                ],
+            ) as run,
+            patch("aka.light.evaluation.gateway.time.sleep") as sleep,
+        ):
+            process = gateway._resume_interrupted_agate_wait(
+                executable="agate",
+                url="https://gateway.invalid",
+                gateway_profile=None,
+                command_timeout=60,
+                wait_budget=120,
+                elapsed=0,
+                initial=initial,
+            )
+
+        self.assertEqual(json.loads(process.stdout)["status"], "succeeded")
+        self.assertEqual(run.call_count, 3)
+        for call in run.call_args_list:
+            command = call.args[0]
+            self.assertNotIn("--wait", command)
+            self.assertNotIn("--wait-timeout", command)
+            self.assertEqual(command[-1], "ev_cli")
+        self.assertEqual(sleep.call_count, 2)
 
     def test_only_terminal_eval_selects_unbounded_deadline_retries(self):
         with patch.dict(os.environ, {}, clear=False):
@@ -2474,7 +2751,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIs(request["lock_clocks"], True)
         self.assertEqual(request["runner_overrides"]["gpu_clock_mhz"], 2377)
 
-    def test_v0_and_candidates_share_300_second_performance_timeout(self):
+    def test_v0_and_candidates_share_60_second_performance_timeout(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
             (workspace / "kernel.py").write_text("class Model: pass\n")
@@ -2503,8 +2780,8 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 "run",
             )
 
-        self.assertEqual(v0["runner_overrides"]["perf_timeout_s"], 300)
-        self.assertEqual(candidate["runner_overrides"]["perf_timeout_s"], 300)
+        self.assertEqual(v0["runner_overrides"]["perf_timeout_s"], 60)
+        self.assertEqual(candidate["runner_overrides"]["perf_timeout_s"], 60)
 
     def test_v0_baseline_uses_terminal_infrastructure_recovery(self):
         result = {

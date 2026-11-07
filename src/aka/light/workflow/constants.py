@@ -50,7 +50,6 @@ FRAMEWORK_BASELINE_VERSION = (
 FRAMEWORK_BASELINE_TIMEOUT_S = 28800
 FRAMEWORK_BASELINE_MODES = ("auto", "always", "never")
 FRAMEWORK_BASELINE_CATEGORY = "framework_baseline"
-DEPENDENCY_REVIEW_TIMEOUT_S = 600
 DEPENDENCY_REVIEW_PROMPT = resource("prompts/dependency_review.md")
 RESEARCH_CLAIM_REVIEW_PROMPT = resource("prompts/research_claim_review.md")
 AGENT_PROBLEM_GENERATION_PROMPT = resource("prompts/generalize_agent_problem.md")

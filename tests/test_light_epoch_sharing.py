@@ -1183,7 +1183,6 @@ def test_research_claim_reviewer_returns_durable_conversation_links(tmp_path):
         )
 
     campaign = SimpleNamespace(
-        production_review_timeout=300,
         agent_boundary_environment=lambda _role: {
             "ATREX_AGENT_SANDBOX": "none"
         },
@@ -1222,7 +1221,6 @@ def test_research_claim_reviewer_launch_failures_are_privately_auditable(tmp_pat
         raise ValueError("Unknown Agent workspace role: research-claim-review")
 
     campaign = SimpleNamespace(
-        production_review_timeout=300,
         agent_boundary_environment=lambda _role: {
             "ATREX_AGENT_SANDBOX": "none"
         },
@@ -3048,6 +3046,106 @@ def test_framework_baseline_session_seeds_first_episode_resume(tmp_path):
     campaign._seed_episode_session_from_framework_baseline()
     restored = CampaignStore(campaign.workspace).load_state()
     assert restored.session_id == "episode-session"
+
+
+def test_interrupted_framework_baseline_resumes_original_provider_session(
+    tmp_path, monkeypatch
+):
+    campaign = Campaign(
+        name="operator",
+        kernel_demo="unused.py",
+        platform="cuda",
+        framework="cuda",
+        work_dir=str(tmp_path),
+    )
+    campaign.workspace.mkdir(parents=True)
+    campaign.agent = object()
+    campaign._remember_framework_baseline_session(
+        SimpleNamespace(session_id="framework-session")
+    )
+    from aka.light.workflow.baseline_progress import progress_path
+
+    crash_record = progress_path(campaign.workspace)
+    crash_record.parent.mkdir(parents=True, exist_ok=True)
+    crash_record.write_text(
+        json.dumps({"schema_version": "atrex_framework_baseline_crash_v1"}),
+        encoding="utf-8",
+    )
+    campaign._ensure_framework_baseline_workspace_contract = lambda: None
+    campaign._framework_baseline_prompt = lambda _version: "Baseline prompt"
+    campaign.agent_environment = lambda: {}
+    campaign._assert_generalized_inputs_are_private = lambda: None
+    campaign._account = lambda *_args: None
+    observed = {}
+
+    def run(_runner, workspace, prompt, **kwargs):
+        observed.update(workspace=workspace, prompt=prompt, kwargs=kwargs)
+        return SimpleNamespace(
+            exit_status=0,
+            timed_out=False,
+            tokens=1,
+            session_id="framework-session",
+        )
+
+    monkeypatch.setattr(LongSessionRunner, "run", run)
+    monkeypatch.setattr(
+        "aka.light.workflow.context.session_execution_policy",
+        lambda _campaign: {},
+    )
+
+    campaign._run_framework_baseline_agent(n=1, label="framework baseline")
+
+    assert observed["kwargs"]["session_id"] == "framework-session"
+    assert observed["kwargs"]["resume_session"] is True
+    assert "original Provider Session" in observed["prompt"]
+    assert "resume.json" not in observed["prompt"]
+
+
+def test_framework_baseline_keeps_resuming_after_multiple_gate_rejections(
+    tmp_path,
+):
+    campaign = Campaign(
+        name="operator",
+        kernel_demo="unused.py",
+        platform="cuda",
+        framework="cuda",
+        work_dir=str(tmp_path),
+    )
+    campaign.workspace.mkdir(parents=True)
+    repairs = []
+    local_checks = iter(["", ""])
+    external_checks = iter(
+        [
+            (None, "independent production policy review rejected candidate"),
+            ({"latency_us_geomean": 1.0}, ""),
+        ]
+    )
+
+    def recover(problem, *_args):
+        repairs.append(problem)
+        return SimpleNamespace(exit_status=0, tokens=1)
+
+    campaign._recover_framework_baseline = recover
+    campaign._framework_baseline_problem = lambda *_args, **_kwargs: next(
+        local_checks
+    )
+    campaign._framework_baseline_external_gates = lambda _version: next(
+        external_checks
+    )
+
+    result, problem = campaign._repair_framework_baseline_until_accepted(
+        problem="candidate source tree is incomplete",
+        v0_identity="v0",
+        baseline_commit="baseline",
+        pre_head="head",
+    )
+
+    assert problem == ""
+    assert result == {"latency_us_geomean": 1.0}
+    assert repairs == [
+        "candidate source tree is incomplete",
+        "independent production policy review rejected candidate",
+    ]
 
 
 def test_framework_baseline_registers_as_episode_zero(tmp_path):

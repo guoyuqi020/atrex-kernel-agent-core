@@ -257,10 +257,6 @@ def parse_arguments(argv):
         help="Same-session recovery turns after an incomplete episode handoff (default: 2).",
     )
     ap.add_argument(
-        "--production-review-timeout", type=int, default=600,
-        help="Independent production dependency review timeout in seconds (default: 600).",
-    )
-    ap.add_argument(
         "--review-trace-mode",
         choices=("off", "errors", "all"),
         default=os.environ.get("ATREX_REVIEW_TRACE_MODE", "errors"),

@@ -15,7 +15,7 @@ from .problem import EvaluationInput
 # Light owns one default per-Shape step budget. Candidate construction,
 # correctness, performance and one A/B run remain aligned unless the caller
 # explicitly supplies an override.
-DEFAULT_EVALUATION_STEP_TIMEOUT = 300
+DEFAULT_EVALUATION_STEP_TIMEOUT = 60
 DEFAULT_CANDIDATE_TIMEOUT = DEFAULT_EVALUATION_STEP_TIMEOUT
 DEFAULT_PERFORMANCE_TIMEOUT = DEFAULT_EVALUATION_STEP_TIMEOUT
 DEFAULT_ABBA_RUN_TIMEOUT = DEFAULT_EVALUATION_STEP_TIMEOUT
