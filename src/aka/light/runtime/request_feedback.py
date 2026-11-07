@@ -183,6 +183,10 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
                                   derived_from_direction_ids=_ids("direction_", maximum=32),
                                   **({"derived_from_experiment_ids": _ids("experiment_", maximum=32)}
                                      if experiments_enabled else {}))
+                if not experiments_enabled:
+                    properties["gateway_record_ids"] = _ids(
+                        "gateway-", minimum=0, maximum=64
+                    )
             else:
                 properties["direction_id"] = {
                     "type": "string",
@@ -192,6 +196,10 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
                         "the next reviewed revision."
                     ),
                 }
+                if not experiments_enabled:
+                    properties["gateway_record_ids"] = _ids(
+                        "gateway-", minimum=0, maximum=64
+                    )
             for key in DIRECTION_PROPOSAL_OPTIONAL_FIELDS:
                 properties.setdefault(key, _text())
         else:
@@ -202,6 +210,10 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
                 if experiments_enabled:
                     properties["supporting_experiment_ids"] = _ids(
                         "experiment_", minimum=1, maximum=32
+                    )
+                else:
+                    properties["gateway_record_ids"] = _ids(
+                        "gateway-", minimum=0, maximum=64
                     )
         return _object(properties, fields)
     return None

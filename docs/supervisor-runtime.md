@@ -58,8 +58,10 @@ trusted diagnostic route. Native CUDA manifests support Evaluate, Profile, and A
 not Check/Disassemble or SOL/SSH. Light ABBA requires Agate Atrex-Bench.
 See [source-layout compatibility](native-cuda.md) before selecting an operation.
 
-The Episode prompt contains the exact acceptance ABBA command and incumbent commit. Use those
-values rather than assuming that any exploratory comparison can be reused for promotion.
+During exploration the Agent may choose any reachable Git commit with `--baseline-commit` for a
+research comparison. After terminal handoff, the Supervisor automatically selects the promoted
+incumbent Agent commit and the candidate clean HEAD for acceptance ABBA. The Agent cannot override
+that terminal baseline; an exploratory Record is reused only when every request identity matches.
 
 ## Public results and original GPU errors
 

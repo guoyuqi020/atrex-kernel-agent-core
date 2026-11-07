@@ -42,6 +42,10 @@ class WorkflowLaunch:
                             ("framework_baseline_timeout", settings.framework_baseline_timeout)):
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if runtime.gpu_clock_mhz is not None and (
+            type(runtime.gpu_clock_mhz) is not int or runtime.gpu_clock_mhz <= 0
+        ):
+            raise ValueError("gpu_clock_mhz must be a positive integer")
         if settings.conversion_budget_action not in {"fail", "retain_verified"}:
             raise ValueError("conversion_budget_action must be fail or retain_verified")
         if settings.gateway_candidate_recovery not in {"disabled", "typed-once"}:

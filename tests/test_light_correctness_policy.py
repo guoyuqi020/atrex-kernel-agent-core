@@ -4,6 +4,7 @@ from contextlib import ExitStack
 import base64
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -28,6 +29,7 @@ from aka.light.acceptance.provider import (
     candidate_acceptance_argv,
 )
 from aka.light.acceptance.recorded_verifier import RecordedABBAValidator
+from aka.light.acceptance.verifier import merge_abba_batch_payloads
 from aka.light.acceptance.source_policy import (
     install_workspace_policy,
     optimization_mode_directive,
@@ -40,6 +42,7 @@ from aka.light.evaluation.gateway import (
     _make_input_bundle,
     _requested_gateway_kind,
     _run_typed_gateway,
+    _with_workspace_performance_score,
     build_parser,
     build_typed_request,
     evaluation_policy,
@@ -59,6 +62,8 @@ from aka.light.evaluation.policy import (
     BENCH_ITERS,
     CORRECTNESS_CASES,
     SHAPE_BATCH_SIZE,
+    measurement_defaults,
+    resolved_gpu_clock_mhz,
 )
 from aka.light.evaluation.native_abba import (
     _clock_configuration_error,
@@ -74,7 +79,10 @@ from aka.light.evaluation.projection import (
     gateway_error_result,
     project_response,
 )
-from aka.light.evaluation.result_conversion import optimizer_result_from_eval
+from aka.light.evaluation.result_conversion import (
+    merge_optimizer_results,
+    optimizer_result_from_eval,
+)
 from aka.light.evaluation.shapes import (
     batch_shape_ids,
     effective_shape_batch_size,
@@ -1307,9 +1315,22 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertTrue(all("shape_ids" not in item["runner_overrides"]
                             for item in requests))
         self.assertTrue(all("shape_shards" not in item["options"] for item in requests))
-        self.assertTrue(all(item["lock_clocks"] is False for item in requests))
+        self.assertTrue(all(item["lock_clocks"] is True for item in requests))
         self.assertEqual(len(request["reference"]["shapes"]), 21)
         self.assertEqual(len(request["runner_overrides"]["shape_ids"]), 21)
+
+    def test_l20n_eval_defaults_to_verified_locked_clock(self):
+        defaults = measurement_defaults("L20N")
+
+        self.assertIs(defaults["lock_clocks"], True)
+        self.assertEqual(defaults["runner_overrides"]["gpu_clock_mhz"], 2377)
+        self.assertEqual(resolved_gpu_clock_mhz("NVIDIA L20N"), 2377)
+        self.assertEqual(
+            resolved_gpu_clock_mhz("NVIDIA RTX PRO 5000 Blackwell"), 2377
+        )
+        self.assertEqual(resolved_gpu_clock_mhz("l20n", 2400), 2400)
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            resolved_gpu_clock_mhz("L20N", 0)
 
     def test_eval_timeout_rejects_one_shape_above_gateway_limit(self):
         with self.assertRaisesRegex(ValueError, "One Shape exceeds"):
@@ -2132,6 +2153,27 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertNotIn("--multi-seed", candidate)
         self.assertNotIn("--multi-seed", verifier.request_argv("a" * 40))
 
+    def test_abba_prompt_separates_research_baseline_from_terminal_incumbent(self):
+        verifier = RecordedABBAValidator(execute=lambda *_: None, hardware="L20D")
+        prompt = verifier.agent_instructions(measurement_repetitions=1)
+        self.assertIn("--baseline-commit <FULL_GIT_COMMIT>", prompt)
+        self.assertIn("you choose its baseline", prompt)
+        self.assertIn("terminal baseline is not Agent-selectable", prompt)
+        self.assertIn("Supervisor automatically compares", prompt)
+        self.assertNotIn("run this exact command", prompt)
+
+    def test_supervisor_state_migrates_promoted_agent_kernel_identity(self):
+        from aka.light.workflow.models import SupervisorState
+
+        promoted = "a" * 40
+        state = SupervisorState.from_dict({
+            "attempts": [
+                {"accepted": False, "candidate_kernel_commit_id": "b" * 40},
+                {"accepted": True, "candidate_kernel_commit_id": promoted},
+            ],
+        })
+        self.assertEqual(state.incumbent_kernel_commit_id, promoted)
+
     def test_framework_baseline_uses_episode_evaluator_policy(self):
         native = framework_baseline_validation_command(1, atrex_bench=True)
         sol = framework_baseline_validation_command(1, atrex_bench=False)
@@ -2231,14 +2273,18 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("one passing check never overrides another reported failure", directive)
 
     def test_light_policy_describes_disabled_numerical_validation_truthfully(self):
-        directive = optimization_mode_directive(
-            "production", "CUDA", numerical_validation_enabled=False
-        )
+        self.assertFalse(WorkflowOptions().numerical_validation)
+        self.assertFalse(WORKFLOW_PLUGIN_DEFAULTS["numerical_validation"])
+        directive = optimization_mode_directive("production", "CUDA")
         self.assertNotIn("Numerical review produces targeted", directive)
-        open_dsl = optimization_mode_directive(
-            "production", "", specify_dsl=False, numerical_validation_enabled=False
-        )
+        self.assertIn("Supplemental numerical review is disabled", directive)
+        open_dsl = optimization_mode_directive("production", "", specify_dsl=False)
         self.assertIn("Supplemental numerical review is disabled", open_dsl)
+
+        enabled = optimization_mode_directive(
+            "production", "CUDA", numerical_validation_enabled=True
+        )
+        self.assertIn("Numerical review produces targeted", enabled)
 
     def test_pinned_production_dsl_only_constrains_submitted_candidate(self):
         cuda = optimization_mode_directive("production", "Cuda")
@@ -2414,7 +2460,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
 
             request = build_typed_request(
                 workspace,
-                "L20D",
+                "L20N",
                 600,
                 [],
                 ["python3", "test_kernel.py"],
@@ -2425,6 +2471,8 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertNotIn("atol", request["options"])
         self.assertNotIn("rtol", request["options"])
         self.assertNotIn("correctness_max_rel_l2", request["options"])
+        self.assertIs(request["lock_clocks"], True)
+        self.assertEqual(request["runner_overrides"]["gpu_clock_mhz"], 2377)
 
     def test_v0_and_candidates_share_300_second_performance_timeout(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -2809,6 +2857,160 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertEqual(parsed, result)
         self.assertIn(root_cause, problem)
         self.assertNotIn("diagnostic truncated", problem)
+
+    def test_performance_objective_is_computed_after_all_shape_shards_merge(self):
+        metadata = {
+            "performance_objective": "shape_speedup_geometric_mean",
+            "shapes": {
+                "0": {"production_performance": {"performance_us": 100.0}},
+                "1": {"production_performance": {"performance_us": 100.0}},
+            },
+        }
+
+        def shard(shape_id, latency_us):
+            raw = {
+                "passed": {
+                    "compile": {"status": "passed"},
+                    "correctness": {shape_id: {"status": "passed"}},
+                },
+                "correctness": {"shapes": {shape_id: {"cases": []}}},
+                "performance": {
+                    "shapes": {
+                        shape_id: {
+                            "samples": [
+                                {"end_to_end_time_ms": latency_us / 1000.0}
+                            ]
+                        }
+                    }
+                },
+            }
+            return optimizer_result_from_eval(
+                raw,
+                [shape_id],
+                metadata,
+                finalize_performance=False,
+            )
+
+        first = shard("0", 10.0)
+        second = shard("1", 100.0)
+        self.assertIsNone(first["performance_score"])
+        self.assertIsNone(second["performance_score"])
+
+        merged = merge_optimizer_results(
+            [first, second], ["0", "1"], metadata
+        )
+        self.assertEqual(
+            merged["performance_objective"], "shape_speedup_geometric_mean"
+        )
+        self.assertAlmostEqual(merged["speedup_vs_ref_mean"], 5.5)
+        self.assertAlmostEqual(
+            merged["speedup_vs_ref_geomean"], math.sqrt(10.0)
+        )
+        self.assertAlmostEqual(merged["performance_score"], math.sqrt(10.0))
+
+        arithmetic = merge_optimizer_results(
+            [first, second],
+            ["0", "1"],
+            dict(metadata, performance_objective="shape_speedup_arithmetic_mean"),
+        )
+        self.assertAlmostEqual(arithmetic["performance_score"], 5.5)
+
+        latency = merge_optimizer_results(
+            [first, second],
+            ["0", "1"],
+            {
+                "performance_objective": "shape_latency_geometric_mean",
+                "shapes": {"0": {}, "1": {}},
+            },
+        )
+        self.assertAlmostEqual(latency["performance_score"], math.sqrt(1000.0))
+
+    def test_workspace_score_hydration_obeys_metadata_objective(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "performance_objective": "shape_speedup_geometric_mean",
+                        "shapes": {
+                            "0": {
+                                "production_performance": {
+                                    "performance_us": 100.0
+                                }
+                            },
+                            "1": {
+                                "production_performance": {
+                                    "performance_us": 100.0
+                                }
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = _with_workspace_performance_score(
+                workspace,
+                {
+                    "latency_us_by_shape": {"0": 10.0, "1": 100.0},
+                    "performance_objective": "shape_speedup_arithmetic_mean",
+                    "performance_score": 5.5,
+                },
+            )
+
+        self.assertEqual(
+            result["performance_objective"], "shape_speedup_geometric_mean"
+        )
+        self.assertAlmostEqual(result["performance_score"], math.sqrt(10.0))
+
+    def test_abba_shape_shards_use_one_full_metadata_objective_score(self):
+        schedule = [
+            {"revision": "candidate", "repeat": 0},
+            {"revision": "incumbent", "repeat": 0},
+        ]
+        metadata = {
+            "performance_objective": "shape_speedup_geometric_mean",
+            "shapes": {
+                "0": {"production_performance": {"performance_us": 100.0}},
+                "1": {"production_performance": {"performance_us": 100.0}},
+            },
+        }
+
+        def payload(shape_id, candidate_latency):
+            def row(step, latency):
+                return {
+                    **step,
+                    "exit_code": 0,
+                    "result": {
+                        "all_pass": True,
+                        "failures": [],
+                        "latency_us_by_shape": {shape_id: latency},
+                    },
+                }
+
+            return {
+                "schema_version": 1,
+                "runs": [
+                    row(schedule[0], candidate_latency),
+                    row(schedule[1], 100.0),
+                ],
+                "error": None,
+            }
+
+        merged = merge_abba_batch_payloads(
+            [payload("0", 10.0), payload("1", 100.0)],
+            schedule,
+            ["0", "1"],
+            metadata,
+        )
+
+        candidate = merged["runs"][0]["result"]
+        incumbent = merged["runs"][1]["result"]
+        self.assertAlmostEqual(candidate["performance_score"], math.sqrt(10.0))
+        self.assertAlmostEqual(incumbent["performance_score"], 1.0)
+        self.assertEqual(
+            candidate["performance_objective"],
+            "shape_speedup_geometric_mean",
+        )
 
     def test_repeated_long_diagnostics_are_deduplicated_not_truncated(self):
         root_cause = "nvcc: fatal error: unsupported gpu architecture 'compute_103'"

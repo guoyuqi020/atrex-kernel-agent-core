@@ -81,6 +81,9 @@ class SupervisorState:
     # island boundaries.
     session_id: str = ""
     session_backend: str = ""
+    # Exact Agent-Git commit of the promoted incumbent. Controller promotion
+    # commits belong to a private history and are never Kernel identities.
+    incumbent_kernel_commit_id: str = ""
     consecutive_without_promotion: int = 0
     attempts: list[dict[str, Any]] = field(default_factory=list)
 
@@ -89,7 +92,14 @@ class SupervisorState:
         if not isinstance(value, dict):
             return cls()
         fields = cls.__dataclass_fields__
-        return cls(**{key: value[key] for key in fields if key in value})
+        state = cls(**{key: value[key] for key in fields if key in value})
+        if not state.incumbent_kernel_commit_id:
+            for attempt in reversed(state.attempts):
+                candidate = attempt.get("candidate_kernel_commit_id")
+                if attempt.get("accepted") is True and isinstance(candidate, str):
+                    state.incumbent_kernel_commit_id = candidate
+                    break
+        return state
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

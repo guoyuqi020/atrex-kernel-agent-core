@@ -262,10 +262,23 @@ def project_feedback(value: dict) -> dict:
     return bound_feedback(projected)
 
 
-def optimizer_result_with_feedback(payload, shape_ids, metadata, *, require_performance=True):
+def optimizer_result_with_feedback(
+    payload,
+    shape_ids,
+    metadata,
+    *,
+    require_performance=True,
+    finalize_performance=True,
+):
     from .result_conversion import optimizer_result_from_eval
     from .public_result import correctness_summary
-    result = optimizer_result_from_eval(payload, shape_ids, metadata, require_performance=require_performance)
+    result = optimizer_result_from_eval(
+        payload,
+        shape_ids,
+        metadata,
+        require_performance=require_performance,
+        finalize_performance=finalize_performance,
+    )
     return {**result, "correctness": correctness_summary(payload, passed=result["all_pass"]),
             **evaluation_feedback(payload, shape_ids)}
 

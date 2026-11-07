@@ -126,6 +126,7 @@ from aka.light.experiment.store import BATCH_ROOT_ENV, JOB_ROOT_ENV, EvidenceUna
 from aka.light.evaluation.policy import (  # noqa: E402
     CORRECTNESS_CASES, BENCH_ITERS, WARMUP_ITERS, SHAPE_BATCH_SIZE, BATCH_WORKERS,
     PERFORMANCE_TIMEOUT, runner_overrides, measurement_defaults,
+    resolved_gpu_clock_mhz,
 )
 from aka.light.evaluation.projection import (  # noqa: E402
     GATEWAY_ERROR_PREFIX,
@@ -175,7 +176,7 @@ from aka.light.evaluation.result_conversion import (
     candidate_exception_diagnostics as _candidate_exception_diagnostics,
     metadata_shape_latency_us as _metadata_shape_latency_us,
     metadata_speedup_mean as metadata_speedup_mean,
-    PERFORMANCE_OBJECTIVE,
+    metadata_performance_metrics as metadata_performance_metrics,
 )
 from aka.light.evaluation.evaluation_feedback import (
     optimizer_result_with_feedback as _optimizer_result_from_eval,
@@ -1326,6 +1327,7 @@ def build_typed_request(
     evaluation_shapes_path: str | None = None,
     evaluation_mode: str | None = None,
     evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT,
+    gpu_clock_mhz: int | None = None,
 ) -> dict[str, Any]:
     """Build a Gateway typed request without importing the agate package."""
     dependency_specs = list(requirements)
@@ -1510,9 +1512,13 @@ def build_typed_request(
         "env_vars": _parse_env_items(env_items),
     }
     if kind == "run":
+        locked_graphics_mhz = resolved_gpu_clock_mhz(hardware, gpu_clock_mhz)
         request["mode"] = policy["mode"]
         request["lock_clocks"] = True
-        request["runner_overrides"] = runner_overrides(evaluation_step_timeout)
+        request["runner_overrides"] = runner_overrides(
+            evaluation_step_timeout,
+            gpu_clock_mhz=locked_graphics_mhz,
+        )
         if dependency_specs:
             request["requirements"] = dependency_specs
         if deps_mode is not None:
@@ -2030,6 +2036,15 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
         help=(
             "Runtime-owned seconds limit for candidate initialization/correctness, "
             "one Shape performance phase, and one ABBA A/B run."
+        ),
+    )
+    parser.add_argument(
+        "--gpu-clock-mhz",
+        type=int,
+        default=os.environ.get("ATREX_EVAL_GPU_CLOCK_MHZ") or None,
+        help=(
+            "Locked Eval graphics clock in MHz. L20N defaults to the verified "
+            "2377 MHz application-clock bin. This is Runtime-owned in managed Sessions."
         ),
     )
     parser.add_argument(
@@ -3782,37 +3797,51 @@ def _positive_number(value: object) -> float | None:
 def _with_workspace_performance_score(
     workspace: Path, result: dict[str, Any]
 ) -> dict[str, Any]:
-    """Normalize legacy per-shape results to the shared arithmetic-mean score."""
+    """Hydrate a legacy result without overriding the task objective.
+
+    The evaluator metadata is authoritative.  In particular, this adapter must
+    never relabel a geometric objective as Light's historical arithmetic one.
+    """
     from aka.light.workspace.baseline import read_baseline_record
-    if result.get("performance_objective") == PERFORMANCE_OBJECTIVE:
-        return result
     candidate_by_shape = result.get("latency_us_by_shape")
     if not isinstance(candidate_by_shape, dict) or not candidate_by_shape:
         return result
-    baseline = read_baseline_record(workspace) or {}
-    performance = baseline.get("performance")
-    performance = performance if isinstance(performance, dict) else {}
-    baseline_by_shape = performance.get("latency_us_by_shape")
-    if (
-        not isinstance(baseline_by_shape, dict)
-        or set(candidate_by_shape) != set(baseline_by_shape)
-    ):
-        return result
-    speedups: list[float] = []
-    for shape_id, raw_candidate in candidate_by_shape.items():
-        candidate = _positive_number(raw_candidate)
-        reference = _positive_number(baseline_by_shape.get(shape_id))
-        if candidate is None or reference is None:
+
+    try:
+        metadata = read_json_object(
+            _evaluator_input_path(workspace, "metadata.json", required=False)
+        )
+    except (OSError, ValueError):
+        metadata = None
+    if not isinstance(metadata, dict):
+        baseline = read_baseline_record(workspace) or {}
+        performance = baseline.get("performance")
+        performance = performance if isinstance(performance, dict) else {}
+        baseline_by_shape = performance.get("latency_us_by_shape")
+        objective = performance.get("performance_objective")
+        if not isinstance(objective, str) or not isinstance(baseline_by_shape, dict):
             return result
-        speedups.append(reference / candidate)
-    if not speedups:
+        metadata = {
+            "performance_objective": objective,
+            "shapes": {
+                str(shape_id): {
+                    "production_performance": {"performance_us": latency}
+                }
+                for shape_id, latency in baseline_by_shape.items()
+            },
+        }
+
+    normalized_candidate = {
+        str(shape_id): latency for shape_id, latency in candidate_by_shape.items()
+    }
+    shape_ids = list(normalized_candidate)
+    metrics, failures = metadata_performance_metrics(
+        metadata, shape_ids, normalized_candidate
+    )
+    if failures or metrics.get("performance_score") is None:
         return result
-    score = sum(speedups) / len(speedups)
     hydrated = dict(result)
-    hydrated["speedup_vs_ref_mean"] = score
-    hydrated["speedup_vs_ref_geomean"] = None
-    hydrated["performance_score"] = score
-    hydrated["performance_objective"] = PERFORMANCE_OBJECTIVE
+    hydrated.update(metrics)
     return hydrated
 
 
@@ -4031,6 +4060,7 @@ def _run_typed_gateway(
                 "evaluation_step_timeout",
                 DEFAULT_EVALUATION_STEP_TIMEOUT,
             ),
+            gpu_clock_mhz=getattr(args, "gpu_clock_mhz", None),
         )
         from aka.light.evaluation.agate_native import apply_request
         request = apply_request(request, args, kind)
@@ -4316,6 +4346,7 @@ def _run_typed_gateway(
                 shape_ids,
                 metadata,
                 require_performance=require_performance,
+                finalize_performance=not batched,
             )
             for job, shape_ids in zip(jobs, shape_batches)
         ]
@@ -4408,6 +4439,8 @@ def _main(argv: list[str] | None = None) -> int:
         raise SystemExit("sandbox: --timeout must be positive")
     if args.evaluation_step_timeout < 1:
         raise SystemExit("sandbox: --evaluation-step-timeout must be positive")
+    if args.gpu_clock_mhz is not None and args.gpu_clock_mhz < 1:
+        raise SystemExit("sandbox: --gpu-clock-mhz must be positive")
     if args.shape_batch_size <= 0:
         raise SystemExit("sandbox: --shape-batch-size must be positive")
     try:
@@ -5217,7 +5250,9 @@ def measurement_inputs(args, workspace: Path, environment: dict, *,
     options["workspace_mode"] = "full_roundtrip" if args.kind == "command" else "minimal"
     options["command"] = normalized
     if operation in {"evaluate", "same_allocation_abba"}:
-        options["measurement_defaults"] = measurement_defaults()
+        options["measurement_defaults"] = measurement_defaults(
+            args.hardware, args.gpu_clock_mhz
+        )
     if operation == "same_allocation_abba":
         options["transport"] = "agate_native_eval_abba"
     if operation == "evaluate" and for_command:

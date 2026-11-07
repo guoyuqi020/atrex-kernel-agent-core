@@ -11,7 +11,10 @@ import copy
 from dataclasses import asdict, replace
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 from threading import Event, Lock
 
@@ -33,6 +36,7 @@ from aka.light.workflow.journal_service import (
     shared_research_path,
 )
 from aka.light.workspace.shared_history import export_epoch, import_exports
+from aka.light.workspace.agent_git import AgentGit
 from aka.light.research import ResearchStore
 
 
@@ -112,7 +116,8 @@ class EpisodeSearchDriver:
                   "repetitions": self.campaign.tool_runtime.measurement_repetitions,
                   "evaluation": {name: getattr(self.campaign, name) for name in (
                       "sandbox_hardware", "sandbox_profile", "sandbox_url", "sandbox_ssh",
-                      "sandbox_timeout", "verify_repeats", "evaluation_step_timeout", "min_improvement_pct")}}
+                      "sandbox_timeout", "verify_repeats", "evaluation_step_timeout",
+                      "gpu_clock_mhz", "min_improvement_pct")}}
         return hashlib.sha256(json.dumps(values, sort_keys=True, default=str).encode()).hexdigest()
 
     def bootstrap(self):
@@ -128,7 +133,243 @@ class EpisodeSearchDriver:
         record = main_adapter.read_memory(self.campaign.workspace, version)
         if not isinstance(record, dict) or record.get("quality_gate", {}).get("result") != "PASS":
             raise RuntimeError("Pooled search requires a verified Bootstrap/Framework baseline")
-        return self._kernel(self.campaign.workspace, git_head(self.campaign.workspace), record, 0, 0)
+        seed = self._kernel(
+            self.campaign.workspace,
+            git_head(self.campaign.workspace),
+            record,
+            0,
+            0,
+        )
+        canonical = self._canonical_agent_root(seed)
+        seed["kernel_id"] = canonical["framework_baseline_commit_id"]
+        return seed
+
+    @property
+    def _canonical_agent_bundle(self) -> Path:
+        return self.root / "shared" / "git" / "canonical-agent-root.bundle"
+
+    @property
+    def _canonical_agent_receipt(self) -> Path:
+        return self.root / "shared" / "git" / "canonical-agent-root.json"
+
+    @staticmethod
+    def _bundle_contains_commit(bundle: Path, commit_id: str) -> bool:
+        """Check a private recovery bundle without trusting its advertised refs."""
+        if not bundle.is_file():
+            return False
+        with tempfile.TemporaryDirectory(prefix="aka-agent-root-check-") as temporary:
+            workspace = Path(temporary) / "repo"
+            workspace.mkdir()
+            git(workspace, "init", "--bare", "--quiet")
+            result = subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "protocol.file.allow=always",
+                    "fetch",
+                    "--quiet",
+                    str(bundle),
+                    "+refs/heads/*:refs/heads/*",
+                    "+refs/tags/*:refs/tags/*",
+                    "+refs/atrex/*:refs/atrex/*",
+                ],
+                cwd=workspace,
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                return False
+            present = subprocess.run(
+                ["git", "cat-file", "-e", f"{commit_id}^{{commit}}"],
+                cwd=workspace,
+                capture_output=True,
+                check=False,
+            )
+            return present.returncode == 0
+
+    def _canonical_agent_root(self, bootstrap: dict) -> dict:
+        """Seal one Agent Git root shared by every pooled trajectory.
+
+        The root Framework Baseline is executed once before search fan-out.  Its
+        persistent Agent repository already contains the Supervisor-created V0
+        commit and the accepted Framework Baseline descendant.  Export that
+        exact ancestry once instead of letting each trajectory independently
+        create an initial commit whose timestamp would change its identity.
+        """
+        source = self.source(bootstrap)
+        source_sha256 = hashlib.sha256(source).hexdigest()
+        bundle = self._canonical_agent_bundle
+        receipt_path = self._canonical_agent_receipt
+        existing_receipt = None
+        if receipt_path.is_file():
+            existing_receipt = read_state(receipt_path)
+        if bundle.is_file() and receipt_path.is_file():
+            receipt = existing_receipt
+            if not isinstance(receipt, dict):
+                raise RuntimeError("Canonical Agent root receipt is invalid")
+            if receipt.get("source_sha256") != source_sha256:
+                raise RuntimeError(
+                    "Canonical Agent root source differs from the frozen Framework Baseline"
+                )
+            baseline_commit = receipt.get("framework_baseline_commit_id")
+            v0_commit = receipt.get("agent_v0_commit_id")
+            if not isinstance(baseline_commit, str) or not isinstance(v0_commit, str):
+                raise RuntimeError("Canonical Agent root receipt is incomplete")
+            if not self._bundle_contains_commit(bundle, baseline_commit):
+                raise RuntimeError("Canonical Agent root bundle lost its Framework Baseline")
+            if not self._bundle_contains_commit(bundle, v0_commit):
+                raise RuntimeError("Canonical Agent root bundle lost its V0 commit")
+            return receipt
+
+        runtime_root = supervisor_campaign_root(self.campaign.workspace)
+        root_agent_workspace = runtime_root / "agent-workspace"
+        root_agent_bundle = runtime_root / "adaptive-state" / "agent-git.bundle"
+        source_repository: Path | None = None
+        baseline_commit: str | None = None
+
+        if (root_agent_workspace / ".git").is_dir():
+            root_git = AgentGit(root_agent_workspace, root_agent_bundle)
+            baseline_commit = root_git.find_kernel_commit(source)
+            source_repository = root_agent_workspace
+
+        recovery_directory: tempfile.TemporaryDirectory[str] | None = None
+        try:
+            if baseline_commit is None and root_agent_bundle.is_file():
+                recovery_directory = tempfile.TemporaryDirectory(
+                    prefix="aka-framework-agent-recovery-"
+                )
+                recovered = Path(recovery_directory.name) / "repo"
+                recovered.mkdir()
+                git(recovered, "init", "-b", "work", "--quiet")
+                git(
+                    recovered,
+                    "-c",
+                    "protocol.file.allow=always",
+                    "fetch",
+                    "--quiet",
+                    str(root_agent_bundle),
+                    "+refs/heads/*:refs/heads/*",
+                    "+refs/tags/*:refs/tags/*",
+                    "+refs/atrex/*:refs/atrex/*",
+                )
+                baseline_commit = AgentGit(
+                    recovered, recovered / ".git" / "unused.bundle"
+                ).find_kernel_commit(source)
+                source_repository = recovered
+
+            # Legacy/pinned baselines may predate an Agent repository.  Create
+            # the canonical root exactly once here; trajectories still copy the
+            # resulting commit rather than independently manufacturing one.
+            if baseline_commit is None or source_repository is None:
+                recovery_directory = tempfile.TemporaryDirectory(
+                    prefix="aka-canonical-agent-v0-"
+                )
+                source_repository = Path(recovery_directory.name) / "repo"
+                from aka.light.workspace.sources import install
+
+                install(source_repository, source)
+                repository = AgentGit(source_repository, bundle)
+                repository.prepare()
+                baseline_commit = repository.persist()
+                if baseline_commit is None:
+                    raise RuntimeError("Supervisor could not create the canonical Agent V0")
+            else:
+                with tempfile.TemporaryDirectory(
+                    prefix="aka-canonical-agent-root-"
+                ) as temporary:
+                    canonical_workspace = Path(temporary) / "repo"
+                    canonical_workspace.mkdir()
+                    git(canonical_workspace, "init", "-b", "work", "--quiet")
+                    git(
+                        canonical_workspace,
+                        "-c",
+                        "protocol.file.allow=always",
+                        "fetch",
+                        "--quiet",
+                        str(source_repository),
+                        f"+{baseline_commit}:refs/remotes/atrex-bootstrap/work",
+                    )
+                    git(
+                        canonical_workspace,
+                        "checkout",
+                        "--quiet",
+                        "-B",
+                        "work",
+                        "refs/remotes/atrex-bootstrap/work",
+                    )
+                    canonical_git = AgentGit(canonical_workspace, bundle)
+                    persisted = canonical_git.persist()
+                    if persisted != baseline_commit:
+                        raise RuntimeError(
+                            "Canonical Agent root persistence changed the Framework Baseline commit"
+                        )
+
+            roots = git(
+                source_repository,
+                "rev-list",
+                "--max-parents=0",
+                baseline_commit,
+            ).decode().splitlines()
+            if len(roots) != 1:
+                raise RuntimeError("Canonical Agent history must have exactly one V0 root")
+            v0_commit = roots[0]
+            if not self._bundle_contains_commit(bundle, baseline_commit):
+                raise RuntimeError("Canonical Agent bundle does not contain its baseline commit")
+            if not self._bundle_contains_commit(bundle, v0_commit):
+                raise RuntimeError("Canonical Agent bundle does not contain its V0 root")
+            receipt = {
+                "schema_version": 1,
+                "source_sha256": source_sha256,
+                "agent_v0_commit_id": v0_commit,
+                "framework_baseline_commit_id": baseline_commit,
+                "framework_baseline_controller_commit_id": bootstrap["commit"],
+            }
+            if existing_receipt is not None and existing_receipt != receipt:
+                raise RuntimeError(
+                    "Recovered canonical Agent root differs from its durable receipt"
+                )
+            durable_write_json(receipt_path, receipt)
+            return receipt
+        finally:
+            if recovery_directory is not None:
+                recovery_directory.cleanup()
+
+    def _seed_trajectory_agent_root(self, child, canonical: dict) -> None:
+        """Install the immutable canonical bundle before a child Runtime starts."""
+        target_root = supervisor_campaign_root(child.workspace)
+        target = target_root / "adaptive-state" / "agent-git.bundle"
+        baseline_commit = canonical["framework_baseline_commit_id"]
+        if target.is_file():
+            if not self._bundle_contains_commit(target, baseline_commit):
+                raise RuntimeError(
+                    "Existing trajectory Agent Git predates the canonical shared V0; "
+                    "resume it with its original code or start a new pooled Campaign"
+                )
+            return
+        agent_workspace = target_root / "agent-workspace"
+        if (agent_workspace / ".git").is_dir():
+            present = subprocess.run(
+                ["git", "cat-file", "-e", f"{baseline_commit}^{{commit}}"],
+                cwd=agent_workspace,
+                capture_output=True,
+                check=False,
+            )
+            if present.returncode != 0:
+                raise RuntimeError(
+                    "Existing trajectory Agent repository has a different V0 root"
+                )
+            return
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        temporary.unlink(missing_ok=True)
+        try:
+            shutil.copyfile(self._canonical_agent_bundle, temporary)
+            temporary.chmod(0o600)
+            with temporary.open("rb") as stream:
+                os.fsync(stream.fileno())
+            durable_replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _kernel(
         self, workspace, commit, record, trajectory, episode, kernel_id=None
@@ -481,6 +722,12 @@ class EpisodeSearchDriver:
         baseline = read_baseline_record(self.campaign.workspace)
         if not isinstance(baseline, dict):
             raise RuntimeError("Pooled search requires private V0 baseline evidence")
+        canonical = self._canonical_agent_root(bootstrap)
+        if bootstrap.get("kernel_id") != canonical["framework_baseline_commit_id"]:
+            raise RuntimeError(
+                "Pooled search checkpoint predates the canonical shared Agent V0; "
+                "start a new pooled Campaign rather than rewriting trajectory Git history"
+            )
         for number in range(1, trajectories + 1):
             workspace = self.root / "trajectories" / f"t{number:04d}"
             marker = workspace / ".git/atrex-search-origin.json"
@@ -514,6 +761,7 @@ class EpisodeSearchDriver:
             # Copy V0 evaluator facts into each trajectory's private Supervisor
             # scope so scoring and validation never depend on a tracked V0 file.
             write_baseline_record(workspace, baseline)
+            self._seed_trajectory_agent_root(child, canonical)
             self.children[number] = child
 
     def _publish(self, workspace, epoch, kernel, label):

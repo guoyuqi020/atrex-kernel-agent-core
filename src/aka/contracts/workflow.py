@@ -9,6 +9,7 @@ from collections.abc import Callable
 from .evaluation import (
     DEFAULT_ABBA_REPEATS,
     DEFAULT_EVALUATION_STEP_TIMEOUT,
+    DEFAULT_SHAPE_BATCH_SIZE,
     derived_evaluation_timeout,
 )
 
@@ -110,7 +111,10 @@ class CampaignRuntimeSettings:
     verify_repeats: int = DEFAULT_ABBA_REPEATS
     evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT
     min_improvement_pct: float = 0.0
-    shape_batch_size: int = 10
+    shape_batch_size: int = DEFAULT_SHAPE_BATCH_SIZE
+    # None selects a verified product default when one is known (L20N: 2377).
+    # Eval always requests clock locking; this field selects the graphics bin.
+    gpu_clock_mhz: int | None = None
 
     def __post_init__(self):
         if self.timeout is None:
@@ -125,6 +129,10 @@ class CampaignRuntimeSettings:
             raise ValueError("evaluation_step_timeout must be a positive integer")
         if type(self.shape_batch_size) is not int or self.shape_batch_size <= 0:
             raise ValueError("shape_batch_size must be a positive integer")
+        if self.gpu_clock_mhz is not None and (
+            type(self.gpu_clock_mhz) is not int or self.gpu_clock_mhz <= 0
+        ):
+            raise ValueError("gpu_clock_mhz must be a positive integer")
 
 
 

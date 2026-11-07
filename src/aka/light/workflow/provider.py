@@ -15,7 +15,7 @@ from .search import SearchOptions
 
 @dataclass(frozen=True)
 class WorkflowOptions:
-    numerical_validation: bool = True
+    numerical_validation: bool = False
     goal_episodes: bool = False
     generate_memory: bool = False
     output_limit_recovery_retries: int = DEFAULT_OUTPUT_LIMIT_RECOVERY_RETRIES
@@ -97,14 +97,19 @@ class LightWorkflow:
                       else SimpleNamespace(profile="", url="", ssh="", ssh_init="",
                                            ssh_gpu=None, health_command=""))
         runtime = request.runtime
+        hardware = runtime.hardware or request.settings.platform
+        from aka.light.evaluation.policy import resolved_gpu_clock_mhz
         return SimpleNamespace(
-            hardware=runtime.hardware or request.settings.platform,
+            hardware=hardware,
             profile=connection.profile,
             url=connection.url,
             timeout=runtime.timeout,
             verify_repeats=runtime.verify_repeats,
             evaluation_step_timeout=runtime.evaluation_step_timeout,
             shape_batch_size=runtime.shape_batch_size,
+            gpu_clock_mhz=resolved_gpu_clock_mhz(
+                hardware, runtime.gpu_clock_mhz
+            ),
             min_improvement_pct=runtime.min_improvement_pct,
             ssh=connection.ssh,
             ssh_init=connection.ssh_init,

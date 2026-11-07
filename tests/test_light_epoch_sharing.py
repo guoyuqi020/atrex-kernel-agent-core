@@ -174,6 +174,216 @@ def test_unresolved_direction_closure_may_omit_supporting_experiments(tmp_path):
     assert "supporting_experiment_ids" not in schema["required"]
 
 
+def _supported_claim_review(evidence):
+    return {
+        "verdict": "supported",
+        "primary_issue": "No unsupported claim remains.",
+        "findings": [{
+            "claim": "The submitted bounded claim.",
+            "judgment": "supported",
+            "decision_critical": True,
+            "reason": "The cited Gateway Record is present in the evidence bundle.",
+            "evidence": list(evidence),
+        }],
+        "scope_safe_interpretation": "Use the claim only within its stated scope.",
+        "next_check": "Continue with the next bounded candidate.",
+        "confidence": "high",
+    }
+
+
+def test_direction_only_review_receives_direct_gateway_records(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    journals = tmp_path / "scope" / "journals"
+    evidence = journals / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    initialize_journal(
+        evidence / "journal.json",
+        episode=1,
+        base_commit="a" * 40,
+        branch="work",
+        tool_modules=("directions",),
+    )
+    record_id, _ = _passing_full_measurement(
+        MeasurementStore(tmp_path / "scope" / "measurements"),
+        b"def kernel():\n    return 1\n",
+        "direction-only-review",
+        {"shape_a": 1.0},
+    )
+
+    def reviewer(root):
+        manifest = json.loads((root / "evidence-manifest.json").read_text())
+        assert manifest["gateway_record_count"] == 1
+        assert manifest["missing_gateway_records"] == []
+        record_path = root / "gateway-records" / record_id / "record.json"
+        assert record_path.is_file()
+        record = json.loads(record_path.read_text())
+        assert record["gateway_record_id"] == record_id
+        return _supported_claim_review(
+            [f"gateway-records/{record_id}/record.json"]
+        )
+
+    service = SupervisorJournalService(
+        workspace=workspace,
+        campaign_root=journals,
+        evidence_root=evidence,
+        research_root=tmp_path / "research",
+        claim_reviewer=reviewer,
+    )
+    result = service.execute({
+        "operation": "direction_update",
+        "request": {
+            "action": "propose",
+            "name": "Vectorized load",
+            "change_scope": "incremental",
+            "hypothesis": "A wider load can reduce instruction overhead.",
+            "applicability": "Aligned vector-add shapes.",
+            "expected_benefit": "Reduce latency on aligned shapes.",
+            "plan": ["Compare scalar and vectorized candidates."],
+            "gateway_record_ids": [record_id],
+        },
+    })
+    revised = service.execute({
+        "operation": "direction_update",
+        "request": {
+            "action": "revise",
+            "direction_id": result["direction_id"],
+            "name": "Aligned vectorized load",
+            "change_scope": "incremental",
+            "hypothesis": "An aligned wider load can reduce instruction overhead.",
+            "applicability": "Aligned vector-add shapes.",
+            "expected_benefit": "Reduce latency on aligned shapes.",
+            "plan": ["Compare scalar and aligned vectorized candidates."],
+        },
+    })
+
+    assert result["review"]["claim_review_quality"] == "supported"
+    assert revised["review"]["claim_review_quality"] == "supported"
+    direction = json.loads(
+        (workspace / revised["archive_path"]).read_text()
+    )
+    assert direction["gateway_record_ids"] == [record_id]
+    schema = journal_schema(
+        "direction_update",
+        {"action": "propose"},
+        directions_enabled=True,
+        experiments_enabled=False,
+    )
+    assert "gateway_record_ids" in schema["properties"]
+
+
+def test_derived_direction_review_resolves_experiment_gateway_records(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    journals = tmp_path / "scope" / "journals"
+    evidence = journals / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    initialize_journal(
+        evidence / "journal.json",
+        episode=1,
+        base_commit="a" * 40,
+        branch="work",
+    )
+    record_id, _ = _passing_full_measurement(
+        MeasurementStore(tmp_path / "scope" / "measurements"),
+        b"def kernel():\n    return 2\n",
+        "derived-direction-review",
+        {"shape_a": 0.8},
+    )
+    reviewed_derived = []
+
+    def reviewer(root):
+        target = json.loads((root / "submissions" / "target.json").read_text())
+        proposal = json.loads(
+            (root / "submissions" / "direction-proposal.json").read_text()
+        )
+        if proposal.get("derived_from_experiment_ids"):
+            manifest = json.loads((root / "evidence-manifest.json").read_text())
+            assert manifest["gateway_record_count"] == 1
+            assert manifest["missing_gateway_records"] == []
+            assert (root / "gateway-records" / record_id / "record.json").is_file()
+            derived_experiment = proposal["derived_from_experiment_ids"][0]
+            assert (
+                root / "submissions" / "supporting-experiments"
+                / f"{derived_experiment}.json"
+            ).is_file()
+            reviewed_derived.append((target["direction_id"], target["action"]))
+        return _supported_claim_review(["submissions/target.json"])
+
+    service = SupervisorJournalService(
+        workspace=workspace,
+        campaign_root=journals,
+        evidence_root=evidence,
+        research_root=tmp_path / "research",
+        claim_reviewer=reviewer,
+    )
+    source = service.execute({
+        "operation": "direction_update",
+        "request": {
+            "action": "propose",
+            "name": "Scalar baseline",
+            "change_scope": "incremental",
+            "hypothesis": "The scalar implementation is launch bound.",
+            "applicability": "Small vector-add shapes.",
+            "expected_benefit": "Identify the next scheduling change.",
+            "plan": ["Measure the scalar implementation."],
+        },
+    })
+    service.execute({
+        "operation": "direction_update",
+        "request": {
+            "action": "start",
+            "direction_id": source["direction_id"],
+            "analysis": "Measure before deriving the next path.",
+        },
+    })
+    experiment = service.execute({
+        "operation": "experiment_record",
+        "request": {
+            "name": "Scalar measurement",
+            "intent": "Measure the launch-bound baseline.",
+            "gateway_record_ids": [record_id],
+            "interpretation": "The measured result motivates a vectorized alternative.",
+        },
+    })
+    derived = service.execute({
+        "operation": "direction_update",
+        "request": {
+            "action": "propose",
+            "name": "Vectorized alternative",
+            "change_scope": "incremental",
+            "hypothesis": "Vectorized loads reduce the measured overhead.",
+            "applicability": "Aligned vector-add shapes.",
+            "expected_benefit": "Improve the measured launch-bound regime.",
+            "plan": ["Measure one vectorized candidate."],
+            "relationship": "refinement",
+            "derived_from_direction_ids": [source["direction_id"]],
+            "derived_from_experiment_ids": [experiment["experiment_id"]],
+        },
+    })
+
+    revised = service.execute({
+        "operation": "direction_update",
+        "request": {
+            "action": "revise",
+            "direction_id": derived["direction_id"],
+            "name": "Vectorized alternative",
+            "change_scope": "incremental",
+            "hypothesis": "Aligned vectorized loads reduce the measured overhead.",
+            "applicability": "Aligned vector-add shapes.",
+            "expected_benefit": "Improve the measured launch-bound regime.",
+            "plan": ["Measure one aligned vectorized candidate."],
+        },
+    })
+
+    assert reviewed_derived == [
+        (derived["direction_id"], "propose"),
+        (derived["direction_id"], "revise"),
+    ]
+    assert derived["review"]["claim_review_quality"] == "supported"
+    assert revised["review"]["claim_review_quality"] == "supported"
+
+
 def test_research_records_are_projected_as_normal_workspace_files(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -3748,6 +3958,81 @@ def _controller_repository(workspace: Path, text: str) -> Path:
     return workspace
 
 
+def test_pooled_trajectories_restore_one_canonical_agent_v0_and_baseline(tmp_path):
+    controller = _controller_repository(
+        tmp_path / "controller", "def run():\n    return 0\n"
+    )
+    (controller / "kernel.py").write_text(
+        "def run():\n    return 1\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "kernel.py"], cwd=controller, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "framework baseline"],
+        cwd=controller,
+        check=True,
+    )
+    controller_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=controller,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    framework_source = snapshot(controller)
+
+    runtime_root = supervisor_campaign_root(controller)
+    root_agent_workspace = runtime_root / "agent-workspace"
+    root_bundle = runtime_root / "adaptive-state" / "agent-git.bundle"
+    _install(root_agent_workspace, "def run():\n    return 0\n")
+    root_agent = AgentGit(root_agent_workspace, root_bundle)
+    root_agent.prepare()
+    v0_commit = root_agent.head()
+    assert v0_commit
+    (root_agent_workspace / "kernel.py").write_text(
+        "def run():\n    return 1\n", encoding="utf-8"
+    )
+    framework_commit = root_agent.checkpoint("accepted Framework Baseline")
+    assert framework_commit and framework_commit != v0_commit
+    assert root_agent.persist() == framework_commit
+
+    driver = EpisodeSearchDriver.__new__(EpisodeSearchDriver)
+    driver.campaign = SimpleNamespace(workspace=controller)
+    driver.root = tmp_path / "search"
+    driver.children = {}
+    record = {
+        "quality_gate": {"result": "PASS"},
+        "performance": {"latency_us_geomean": 1.0},
+    }
+    bootstrap = driver._kernel(
+        controller, controller_commit, record, trajectory=0, episode=0
+    )
+    canonical = driver._canonical_agent_root(bootstrap)
+
+    assert canonical["agent_v0_commit_id"] == v0_commit
+    assert canonical["framework_baseline_commit_id"] == framework_commit
+    assert canonical["framework_baseline_controller_commit_id"] == controller_commit
+    assert driver._canonical_agent_root(bootstrap) == canonical
+
+    restored_heads = []
+    for number in (1, 2, 3):
+        child = SimpleNamespace(workspace=tmp_path / f"trajectory-{number}")
+        child.workspace.mkdir()
+        driver._seed_trajectory_agent_root(child, canonical)
+        child_runtime_root = supervisor_campaign_root(child.workspace)
+        child_agent_workspace = child_runtime_root / "agent-workspace"
+        install(child_agent_workspace, framework_source)
+        child_agent = AgentGit(
+            child_agent_workspace,
+            child_runtime_root / "adaptive-state" / "agent-git.bundle",
+        )
+        child_agent.prepare()
+        restored_heads.append(child_agent.head())
+        assert child_agent.commit_reachable(v0_commit)
+        assert snapshot(child_agent_workspace) == framework_source
+
+    assert restored_heads == [framework_commit, framework_commit, framework_commit]
+
+
 def test_research_store_rebuilds_queue_ignores_legacy_progress_and_adoption(tmp_path):
     store = ResearchStore(tmp_path / "research")
     first = "direction_" + "1" * 32
@@ -4233,13 +4518,23 @@ def test_runtime_rebinds_stable_agent_workspace_to_next_episode_journal(tmp_path
         )
         first_baseline = runtime.baseline_kernel_commit(first_controller)
         assert runtime.baseline_kernel_commit(first) == first_baseline
-        assert subprocess.run(
-            ["git", "rev-parse", "refs/atrex/baselines/e00000001"],
+        assert first_baseline == subprocess.run(
+            ["git", "rev-parse", "HEAD"],
             cwd=first,
             text=True,
             capture_output=True,
             check=True,
         ).stdout.strip() == first_baseline
+        assert subprocess.run(
+            ["git", "show-ref", "--verify", "refs/atrex/baselines/e00000001"],
+            cwd=first,
+            text=True,
+            capture_output=True,
+        ).returncode != 0
+        commits_before = subprocess.run(
+            ["git", "rev-list", "--all", "--count"], cwd=first,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
         assert runtime.measurements.read_kernel(first_baseline) == (
             from_git(first_controller, subprocess.run(
                 ["git", "rev-parse", "HEAD"],
@@ -4268,9 +4563,19 @@ def test_runtime_rebinds_stable_agent_workspace_to_next_episode_journal(tmp_path
             ).stdout.strip(),
             branch="episode-2",
             memory_version=2,
+            baseline_kernel_commit_id=first_baseline,
             supervisor_git=True,
         )
         assert second == first
+        assert runtime.baseline_kernel_commit(second) == first_baseline
+        assert subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=second,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip() == first_baseline
+        assert subprocess.run(
+            ["git", "rev-list", "--all", "--count"], cwd=second,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip() == commits_before
         assert runtime.journals[second].service.path == runtime.episode_journal_path(2)
         assert runtime.journals[first_controller.resolve()].service.path == (
             runtime.episode_journal_path(1)
@@ -4343,6 +4648,7 @@ def test_framework_baseline_episode_zero_seeds_episode_one_agent_git(tmp_path):
             base_commit=v1_commit,
             branch="episode-1",
             memory_version=2,
+            baseline_kernel_commit_id=baseline_agent_commit,
             supervisor_git=True,
         )
 
@@ -4355,6 +4661,17 @@ def test_framework_baseline_episode_zero_seeds_episode_one_agent_git(tmp_path):
         assert (episode_workspace / "kernel.py").read_text(encoding="utf-8") == (
             "def run():\n    return 7\n"
         )
+        assert runtime.baseline_kernel_commit(episode_workspace) == baseline_agent_commit
+        assert subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=episode_workspace,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip() == baseline_agent_commit
+        assert subprocess.run(
+            ["git", "show-ref", "--verify", "refs/atrex/baselines/e00000001"],
+            cwd=episode_workspace,
+            text=True,
+            capture_output=True,
+        ).returncode != 0
         assert runtime.journals[episode_workspace.resolve()].service.path == (
             runtime.episode_journal_path(1)
         )

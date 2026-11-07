@@ -96,6 +96,12 @@ and switch to an imported parent Git ref separately when the new work actually c
 Runtime validates visible parents, parent counts and cycles, but not whether the chosen relationship
 label is scientifically correct.
 
+When Experiment recording is disabled, a claim-bearing Direction may cite its measurement evidence
+directly with `gateway_record_ids`. Include the relevant IDs on `propose`, `revise`, or a terminal
+action so the independent Review receives the corresponding standardized Records. When Experiment
+recording is enabled, keep measurement citations in Experiments: a derived Direction cites
+`derived_from_experiment_ids`, while a terminal conclusion cites `supporting_experiment_ids`.
+
 Correct an existing open local Direction without inventing a replacement identity:
 
 ```json

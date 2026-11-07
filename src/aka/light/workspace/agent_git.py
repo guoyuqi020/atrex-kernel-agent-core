@@ -330,6 +330,38 @@ class AgentGit:
         )
         return refs.returncode == 0 and bool(refs.stdout.strip())
 
+    def find_kernel_commit(self, source: bytes) -> str | None:
+        """Find an existing Agent commit for exact Kernel bytes without changing Git.
+
+        Episode boundaries must not manufacture a second commit for an already
+        promoted Kernel. Prefer the current HEAD, then search Agent-visible
+        history and imported shared refs.
+        """
+        from aka.light.workspace.sources import from_git
+
+        head = self.head()
+        candidates: list[str] = [head] if head else []
+        history = _run(
+            self.workspace,
+            "rev-list",
+            "--date-order",
+            "--all",
+            check=False,
+        )
+        if history.returncode == 0:
+            candidates.extend(history.stdout.splitlines())
+        seen: set[str] = set()
+        for commit_id in candidates:
+            if commit_id in seen or GIT_COMMIT_ID.fullmatch(commit_id) is None:
+                continue
+            seen.add(commit_id)
+            try:
+                if from_git(self.workspace, commit_id) == source:
+                    return commit_id
+            except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
+                continue
+        return None
+
     def head(self) -> str | None:
         result = _run(self.workspace, "rev-parse", "HEAD", check=False)
         value = result.stdout.strip()

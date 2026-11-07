@@ -129,7 +129,7 @@ Save a composition patch, then pass `--patch /path/to/options.json` before `--`:
 }
 ```
 
-This example keeps the default supplemental numerical probes, enables generated memory, adds a
+This example explicitly enables supplemental numerical probes and generated memory, adds a
 four-hour Episode limit, and selects Direction-only research recording. Direction and Experiment
 modules are both enabled by default; use `[]` for report-only mode. Standard evaluator correctness,
 measurement records, report validation, and ABBA remain required regardless of these options.

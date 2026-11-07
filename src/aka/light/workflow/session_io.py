@@ -46,9 +46,6 @@ from aka.light.evaluation.shapes import (
     effective_shape_batch_size,
     shape_request_timeout,
 )
-from aka.light.workspace.state import speedup_vs_reference
-
-
 def _status_is(value: object, expected: str) -> bool:
     """Accept a status even when a CLI accidentally stored it as a JSON-quoted string."""
     current = value
@@ -373,6 +370,7 @@ def _sandbox_command(
     preflight: bool = False,
     terminal_validation: bool = False,
     evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT,
+    gpu_clock_mhz: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the private GPU executor for trusted Supervisor verification."""
     if sum(bool(value) for value in (ssh, url, profile)) > 1:
@@ -391,6 +389,10 @@ def _sandbox_command(
         "--evaluation-step-timeout",
         str(evaluation_step_timeout),
     ]
+    if gpu_clock_mhz is not None:
+        if type(gpu_clock_mhz) is not int or gpu_clock_mhz <= 0:
+            raise ValueError("gpu_clock_mhz must be a positive integer")
+        cmd += ["--gpu-clock-mhz", str(gpu_clock_mhz)]
     if url:
         cmd += ["--url", url]
     elif profile:
@@ -582,15 +584,7 @@ def _local_test_record(workspace: Path, version: str, result: dict, *, existing:
         "performance_score", result.get("speedup_vs_ref_geomean")
     )
     perf["speedup_vs_ref_mean"] = result.get("speedup_vs_ref_mean")
-    perf["speedup_vs_ref_geomean"] = (
-        None
-        if number == 0 or performance_objective == "shape_speedup_arithmetic_mean"
-        else speedup_vs_reference(
-            workspace,
-            result.get("latency_us_geomean"),
-            result.get("speedup_vs_ref_geomean"),
-        )
-    )
+    perf["speedup_vs_ref_geomean"] = result.get("speedup_vs_ref_geomean")
     all_pass = bool(result.get("all_pass"))
     corr = data.setdefault("correctness", {})
     corr["status"] = "PASS" if all_pass else "FAIL"

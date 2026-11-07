@@ -323,6 +323,7 @@ class Campaign:
     # alias for upstream v0.4 call sites.
     evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT
     shape_batch_size: int = SHAPE_BATCH_SIZE
+    gpu_clock_mhz: int | None = None
     min_improvement_pct: float = 0.0
     v1_ask_codex: bool = False
     v1_ask_qoder: bool = False
@@ -368,6 +369,10 @@ class Campaign:
             raise ValueError("production_review_timeout must be positive")
         if type(self.shape_batch_size) is not int or self.shape_batch_size <= 0:
             raise ValueError("shape_batch_size must be a positive integer")
+        if self.gpu_clock_mhz is not None and (
+            type(self.gpu_clock_mhz) is not int or self.gpu_clock_mhz <= 0
+        ):
+            raise ValueError("gpu_clock_mhz must be a positive integer")
         if self.agent_reference_paths and self.agent_sandbox != "bwrap":
             raise ValueError(
                 "--agent-reference-dir requires an Agent profile with sandbox=bwrap"
@@ -568,6 +573,7 @@ class Campaign:
             hardware=self.sandbox_hardware or self.platform, timeout=self.sandbox_timeout,
             evaluation_step_timeout=self.evaluation_step_timeout,
             shape_batch_size=self.shape_batch_size,
+            gpu_clock_mhz=self.gpu_clock_mhz,
             url=self.sandbox_url, profile=self.sandbox_profile, ssh=self.sandbox_ssh,
             ssh_init=self.sandbox_ssh_init, ssh_gpu=self.sandbox_ssh_gpu,
             health_command=self.sandbox_health_command, private_reference_dir=self.private_reference_dir,
@@ -881,6 +887,7 @@ class Campaign:
         base_commit: str,
         branch: str,
         memory_version: int,
+        baseline_kernel_commit_id: str | None = None,
         supervisor_git: bool = True,
         require_gluon: bool = False,
         origin: dict[str, int] | None = None,
@@ -893,6 +900,7 @@ class Campaign:
             base_commit=base_commit,
             branch=branch,
             memory_version=memory_version,
+            baseline_kernel_commit_id=baseline_kernel_commit_id,
             supervisor_git=supervisor_git,
             require_gluon=require_gluon,
             origin=(origin or getattr(self, "search_coordinate", None) or {
@@ -1535,6 +1543,7 @@ class Campaign:
             health_command=self.sandbox_health_command,
             gateway_kind="run",
             private_reference_dir=self.private_reference_dir,
+            gpu_clock_mhz=self.gpu_clock_mhz,
             # V0 is mandatory campaign evidence.  Keep polling/retrying through
             # infrastructure failures exactly like the later terminal candidate
             # gates; a completed incorrect V0 still returns normally and is
@@ -2655,6 +2664,21 @@ class Campaign:
 
     def _seed_episode_session_from_framework_baseline(self) -> None:
         """Make Episode 1 resume the latest accepted Framework Baseline Session."""
+        from aka.light.workflow.store import CampaignStore
+
+        store = CampaignStore(self.workspace)
+        state = store.load_state()
+        runtime = getattr(self, "_supervisor_runtime", None)
+        if runtime is not None:
+            try:
+                candidate = runtime.read_episode_journal(
+                    _FRAMEWORK_BASELINE_EPISODE
+                ).get("candidate_kernel_id")
+            except (OSError, RuntimeError, ValueError):
+                candidate = None
+            if isinstance(candidate, str) and candidate:
+                state.incumbent_kernel_commit_id = candidate
+                store.save_state(state)
         if self.agent_cli != "claude":
             return
         marker_path = self.workspace / FRAMEWORK_BASELINE_FILE
@@ -2675,10 +2699,6 @@ class Campaign:
         ):
             return
 
-        from aka.light.workflow.store import CampaignStore
-
-        store = CampaignStore(self.workspace)
-        state = store.load_state()
         # Never replace an Episode Session. This path only seeds a trajectory
         # before Episode 1; later resumes keep the latest Episode-owned ID.
         if state.episodes or state.session_id:
@@ -2955,6 +2975,7 @@ class Campaign:
                 gateway_kind="run",
                 private_reference_dir=self.private_reference_dir,
                 evaluation_step_timeout=getattr(self, "evaluation_step_timeout", None),
+                gpu_clock_mhz=self.gpu_clock_mhz,
                 terminal_validation=True,
             )
         except (OSError, subprocess.SubprocessError) as exc:

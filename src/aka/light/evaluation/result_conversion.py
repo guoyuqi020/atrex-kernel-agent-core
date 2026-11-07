@@ -11,6 +11,14 @@ import math
 import statistics
 
 PERFORMANCE_OBJECTIVE = "shape_speedup_arithmetic_mean"
+SPEEDUP_ARITHMETIC_MEAN = PERFORMANCE_OBJECTIVE
+SPEEDUP_GEOMETRIC_MEAN = "shape_speedup_geometric_mean"
+LATENCY_GEOMETRIC_MEAN = "shape_latency_geometric_mean"
+SUPPORTED_PERFORMANCE_OBJECTIVES = frozenset({
+    SPEEDUP_ARITHMETIC_MEAN,
+    SPEEDUP_GEOMETRIC_MEAN,
+    LATENCY_GEOMETRIC_MEAN,
+})
 
 
 def finite_number(value: object) -> float | None:
@@ -154,12 +162,64 @@ def metadata_shape_latency_us(metadata: object, shape_id: str) -> float | None:
     return nested[0] if len(nested) == 1 else None
 
 
-def metadata_speedup_mean(metadata: object, shape_ids: list[str],
-                          latency_by_shape: dict[str, float]) -> tuple[float | None, list[str]]:
+def metadata_performance_objective(metadata: object) -> str:
+    """Return the task's declared objective, retaining the legacy default.
+
+    Older tasks predate ``metadata.performance_objective`` and used the
+    arithmetic mean of per-Shape speedups.  An explicit value is never
+    rewritten to that compatibility default.
+    """
+    if isinstance(metadata, dict):
+        objective = metadata.get("performance_objective")
+        if isinstance(objective, str) and objective.strip():
+            return objective.strip()
+    return PERFORMANCE_OBJECTIVE
+
+
+def metadata_performance_metrics(
+    metadata: object,
+    shape_ids: list[str],
+    latency_by_shape: dict[str, float],
+) -> tuple[dict[str, float | str | None], list[str]]:
+    """Aggregate a complete Shape set according to the task metadata.
+
+    This function is intentionally a whole-request operation.  Callers must
+    first merge all outer Shape shards and pass the complete requested Shape
+    set; averaging shard-level scores changes geometric objectives.
+    """
+    objective = metadata_performance_objective(metadata)
+    metrics: dict[str, float | str | None] = {
+        "performance_objective": objective,
+        "performance_score": None,
+        "speedup_vs_ref_mean": None,
+        "speedup_vs_ref_geomean": None,
+    }
+    if objective not in SUPPORTED_PERFORMANCE_OBJECTIVES:
+        return metrics, [
+            "unsupported metadata.performance_objective: " + objective
+        ]
     if any(shape_id not in latency_by_shape for shape_id in shape_ids):
-        return None, []
-    speedups = []
-    failures = []
+        return metrics, []
+    latencies = [latency_by_shape[shape_id] for shape_id in shape_ids]
+    if not latencies:
+        return metrics, []
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) <= 0.0
+        for value in latencies
+    ):
+        return metrics, ["performance aggregation received an invalid latency"]
+
+    latency_geomean = math.exp(
+        sum(math.log(float(value)) for value in latencies) / len(latencies)
+    )
+    if objective == LATENCY_GEOMETRIC_MEAN:
+        metrics["performance_score"] = latency_geomean
+
+    speedups: list[float] = []
+    failures: list[str] = []
     for shape_id in shape_ids:
         reference_us = metadata_shape_latency_us(metadata, shape_id)
         if reference_us is None:
@@ -169,13 +229,39 @@ def metadata_speedup_mean(metadata: object, shape_ids: list[str],
             )
         else:
             speedups.append(reference_us / latency_by_shape[shape_id])
-    if failures or len(speedups) != len(shape_ids) or not speedups:
-        return None, failures
-    return sum(speedups) / len(speedups), []
+    if not failures and len(speedups) == len(shape_ids) and speedups:
+        arithmetic = sum(speedups) / len(speedups)
+        geometric = math.exp(
+            sum(math.log(value) for value in speedups) / len(speedups)
+        )
+        metrics["speedup_vs_ref_mean"] = arithmetic
+        metrics["speedup_vs_ref_geomean"] = geometric
+        if objective == SPEEDUP_ARITHMETIC_MEAN:
+            metrics["performance_score"] = arithmetic
+        elif objective == SPEEDUP_GEOMETRIC_MEAN:
+            metrics["performance_score"] = geometric
+    elif objective == LATENCY_GEOMETRIC_MEAN:
+        # Reference speedups are optional diagnostics for a latency objective.
+        failures = []
+    return metrics, failures
+
+
+def metadata_speedup_mean(
+    metadata: object,
+    shape_ids: list[str],
+    latency_by_shape: dict[str, float],
+) -> tuple[float | None, list[str]]:
+    """Compatibility adapter returning the metadata-selected score."""
+    metrics, failures = metadata_performance_metrics(
+        metadata, shape_ids, latency_by_shape
+    )
+    score = metrics.get("performance_score")
+    return (float(score) if isinstance(score, (int, float)) else None), failures
 
 
 def optimizer_result_from_eval(payload: dict[str, Any], shape_ids: list[str],
-                               metadata: object, *, require_performance: bool = True) -> dict[str, Any]:
+                               metadata: object, *, require_performance: bool = True,
+                               finalize_performance: bool = True) -> dict[str, Any]:
     failures = []
     if payload.get("error"):
         failures.append("evaluation: " + str(payload["error"]))
@@ -248,18 +334,26 @@ def optimizer_result_from_eval(payload: dict[str, Any], shape_ids: list[str],
     geomean = (math.exp(sum(math.log(value) for value in latencies) / len(latencies))
                if complete and latencies else 0.0)
     arithmetic = sum(latencies) / len(latencies) if complete and latencies else 0.0
-    speedup_mean, _ = (metadata_speedup_mean(metadata, shape_ids, latency_by_shape)
-                       if require_performance else (None, []))
+    performance_metrics, _ = (
+        metadata_performance_metrics(metadata, shape_ids, latency_by_shape)
+        if require_performance and finalize_performance
+        else (
+            {
+                "performance_objective": metadata_performance_objective(metadata),
+                "performance_score": None,
+                "speedup_vs_ref_mean": None,
+                "speedup_vs_ref_geomean": None,
+            },
+            [],
+        )
+    )
     return {
         "all_pass": not failures,
         "failures": failures,
         "latency_us_geomean": geomean,
         "latency_us_arith_mean": arithmetic,
         "latency_us_by_shape": latency_by_shape,
-        "speedup_vs_ref_mean": speedup_mean,
-        "speedup_vs_ref_geomean": None,
-        "performance_score": speedup_mean,
-        "performance_objective": PERFORMANCE_OBJECTIVE,
+        **performance_metrics,
         "max_abs_err": max_abs,
         "max_rel_err": max_rel,
         "evaluator": "atrex-gpu-gateway/run",
@@ -310,8 +404,19 @@ def merge_optimizer_results(results: list[dict[str, Any]], shape_ids: list[str],
                 item["shape_ids"] = shape_ids_for_item
             seen[key] = item
             diagnostics.append(item)
-    speedup_mean, _ = (metadata_speedup_mean(metadata, shape_ids, latency_by_shape)
-                       if require_performance else (None, []))
+    performance_metrics, _metadata_failures = (
+        metadata_performance_metrics(metadata, shape_ids, latency_by_shape)
+        if require_performance
+        else (
+            {
+                "performance_objective": metadata_performance_objective(metadata),
+                "performance_score": None,
+                "speedup_vs_ref_mean": None,
+                "speedup_vs_ref_geomean": None,
+            },
+            [],
+        )
+    )
     failures = [str(failure) for result in results
                 for failure in (result.get("failures") or [])]
     return {
@@ -325,10 +430,7 @@ def merge_optimizer_results(results: list[dict[str, Any]], shape_ids: list[str],
             sum(latencies) / len(latencies) if complete and latencies else 0.0
         ),
         "latency_us_by_shape": latency_by_shape,
-        "speedup_vs_ref_mean": speedup_mean,
-        "speedup_vs_ref_geomean": None,
-        "performance_score": speedup_mean,
-        "performance_objective": PERFORMANCE_OBJECTIVE,
+        **performance_metrics,
         "max_abs_err": max(float(result.get("max_abs_err") or 0.0) for result in results),
         "max_rel_err": max(float(result.get("max_rel_err") or 0.0) for result in results),
         "evaluator": "atrex-gpu-gateway/run/batched",

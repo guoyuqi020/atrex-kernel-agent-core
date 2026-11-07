@@ -78,7 +78,10 @@ the remote GPU executor.
    and selected candidate format. Production preprocessing provides a generalized public
    contract while detailed inputs remain private.
 2. **Establish baselines.** Measure V0 and, when configured, establish V1 in the target
-   framework. Imported source trees retain their pinned initial package.
+   framework. Imported source trees retain their pinned initial package. Before pooled
+   trajectories fan out, Supervisor seals one canonical Agent Git bundle: every trajectory
+   receives the same V0 root commit and, when Framework Baseline ran, the same accepted V1
+   descendant and Git ancestry. Trajectories never manufacture independent baseline commits.
 3. **Explore.** Start or resume an Episode in the trajectory's stable Agent Git repository.
    Uncommitted work, local branches, tags, `scratch/`, tools, and Skills survive Episode
    boundaries. Runtime capabilities, public inputs, and shared evidence are refreshed for
@@ -120,8 +123,8 @@ and [evaluator outcomes](evaluator-outcomes/README.md).
 Native Atrex-Bench candidate acceptance uses five correctness cases per Shape (the base case plus
 four Runtime-owned additional cases). A targeted
 smoke test, custom-input probe, or partial-shape measurement cannot replace full-contract
-evidence. Supplemental numerical planning is enabled by default in Production and adds measured
-risk probes; it can be disabled independently.
+evidence. Supplemental numerical planning is disabled by default; when explicitly enabled in
+Production it adds measured risk probes without replacing the ordinary correctness gate.
 
 Light uses native same-allocation A/B/B/A measurements. Its promotion metric is:
 

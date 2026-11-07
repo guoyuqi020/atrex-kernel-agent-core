@@ -80,7 +80,8 @@ _RUNTIME_LOCK = threading.RLock()
 AUTHORITY = frozenset({
     "--workspace", "--hardware", "--url", "--gateway-profile", "--ssh", "--ssh-init",
     "--ssh-gpu", "--ssh-runtime-bind", "--health-command", "--runtime-health-command",
-    "--timeout", "--shape-batch-size", "--max-input-file-mb", "--max-output-file-mb",
+    "--timeout", "--shape-batch-size", "--gpu-clock-mhz",
+    "--max-input-file-mb", "--max-output-file-mb",
 })
 FORBIDDEN = frozenset({
     "--preflight",
@@ -334,6 +335,7 @@ class RuntimeConfig:
     timeout: int = derived_evaluation_timeout()
     evaluation_step_timeout: int = DEFAULT_EVALUATION_STEP_TIMEOUT
     shape_batch_size: int = SHAPE_BATCH_SIZE
+    gpu_clock_mhz: int | None = None
     url: str = ""
     profile: str = ""
     ssh: str = ""
@@ -366,6 +368,10 @@ class RuntimeConfig:
             raise ValueError("Runtime evaluation_step_timeout must be a positive integer")
         if type(self.shape_batch_size) is not int or self.shape_batch_size <= 0:
             raise ValueError("Runtime shape_batch_size must be a positive integer")
+        if self.gpu_clock_mhz is not None and (
+            type(self.gpu_clock_mhz) is not int or self.gpu_clock_mhz <= 0
+        ):
+            raise ValueError("Runtime gpu_clock_mhz must be a positive integer")
         for name in ("request_timeout", "queue_timeout"):
             value = getattr(self, name)
             if name == "request_timeout" and value is None:
@@ -379,6 +385,8 @@ class RuntimeConfig:
                   "--timeout", str(self.timeout),
                   "--evaluation-step-timeout", str(self.evaluation_step_timeout),
                   "--shape-batch-size", str(self.shape_batch_size)]
+        if self.gpu_clock_mhz is not None:
+            result += ["--gpu-clock-mhz", str(self.gpu_clock_mhz)]
         for flag, value in (("--url", self.url), ("--gateway-profile", self.profile), ("--ssh", self.ssh)):
             if value:
                 result += [flag, value]
@@ -820,6 +828,7 @@ class SupervisorRuntime:
 
     def register_episode(self, workspace: Path, *, episode: int, base_commit: str,
                          branch: str, memory_version: int,
+                         baseline_kernel_commit_id: str | None = None,
                          supervisor_git: bool = False,
                          require_gluon: bool = False,
                          origin: Mapping[str, object] | None = None):
@@ -828,7 +837,14 @@ class SupervisorRuntime:
         if (type(episode) is not int or episode < 0 or type(memory_version) is not int
                 or memory_version < 1 or not isinstance(branch, str) or not branch
                 or type(require_gluon) is not bool
-                or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", base_commit) is None):
+                or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", base_commit) is None
+                or (
+                    baseline_kernel_commit_id is not None
+                    and re.fullmatch(
+                        r"[0-9a-f]{40}(?:[0-9a-f]{24})?",
+                        baseline_kernel_commit_id,
+                    ) is None
+                )):
             raise ValueError("Invalid controller Episode identity")
         path = self.episode_journal_path(episode)
         evidence = path.parent
@@ -848,7 +864,7 @@ class SupervisorRuntime:
                 return existing.view.prepare() if existing.view else workspace
             view = None
             agent_workspace = workspace
-            baseline_kernel_commit_id = None
+            registered_baseline_kernel_commit_id = None
             if supervisor_git:
                 from aka.light.evaluation.hardware import hardware_vendor
                 from aka.light.workspace.history import EpisodeHistory
@@ -874,27 +890,36 @@ class SupervisorRuntime:
                 agent_workspace = view.prepare()
                 from aka.light.workspace.sources import from_git
                 incumbent_source = from_git(workspace, base_commit)
-                baseline_ref = f"refs/atrex/baselines/e{episode:08d}"
-                baseline_kernel_commit_id = view.agent_git.install_runtime_ref(
-                    baseline_ref,
-                    incumbent_source,
-                    message=(
-                        f"Runtime: Episode {episode} incumbent from controller "
-                        f"{base_commit}"
-                    ),
-                )
-                # The moving convenience tag and the immutable per-Episode ref
-                # both point at the same source-only Agent commit. Do not try to
-                # reuse the private controller SHA: it belongs to another Git
-                # history even when the Kernel bytes are identical.
-                view.agent_git.install_runtime_ref(
-                    "refs/tags/atrex/incumbent",
-                    incumbent_source,
-                    message=f"Runtime: Episode {episode} incumbent",
-                    commit_id=baseline_kernel_commit_id,
-                )
+                registered_baseline_kernel_commit_id = baseline_kernel_commit_id
+                if registered_baseline_kernel_commit_id is not None:
+                    if (
+                        not view.agent_git.commit_reachable(
+                            registered_baseline_kernel_commit_id
+                        )
+                        or from_git(
+                            view.agent_git.workspace,
+                            registered_baseline_kernel_commit_id,
+                        )
+                        != incumbent_source
+                    ):
+                        raise RuntimeError(
+                            "Promoted Agent incumbent is not reachable or does not match "
+                            "the private Controller baseline"
+                        )
+                else:
+                    # Initial migration/Framework Baseline can discover an
+                    # already existing exact commit. Never manufacture an
+                    # Episode-boundary commit or expose the private Controller
+                    # commit as a Kernel identity.
+                    registered_baseline_kernel_commit_id = (
+                        view.agent_git.find_kernel_commit(incumbent_source)
+                    )
+                    if registered_baseline_kernel_commit_id is None:
+                        raise RuntimeError(
+                            "No Agent-visible Git commit matches the Episode incumbent"
+                        )
                 self.measurements.kernel(
-                    incumbent_source, baseline_kernel_commit_id
+                    incumbent_source, registered_baseline_kernel_commit_id
                 )
                 trajectory = (
                     origin.get("trajectory", 1) if isinstance(origin, Mapping) else 1
@@ -940,7 +965,7 @@ class SupervisorRuntime:
                 origin=origin,
                 claim_reviewer=getattr(self, "research_claim_reviewer", None),
             ), view=view, require_gluon=require_gluon,
-                baseline_kernel_commit_id=baseline_kernel_commit_id)
+                baseline_kernel_commit_id=registered_baseline_kernel_commit_id)
             # Rebuild normal-file research projections at every Episode bind,
             # including recovery and Epoch-shared history import.
             binding.service.publish_research_files()

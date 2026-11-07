@@ -25,6 +25,7 @@ class ManagedCampaign(Campaign):
             verify_repeats=evaluation.verify_repeats,
             evaluation_step_timeout=evaluation.evaluation_step_timeout,
             shape_batch_size=evaluation.shape_batch_size,
+            gpu_clock_mhz=evaluation.gpu_clock_mhz,
             min_improvement_pct=evaluation.min_improvement_pct,
             problem_generation_timeout=settings.setup_timeout,
             v1_ask_codex="codex" in settings.framework_baseline_reviewers,

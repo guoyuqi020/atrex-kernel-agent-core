@@ -26,7 +26,7 @@ class RecordedABBAValidator(GatewayABBAValidator):
         self.execute = execute
 
     def request_argv(self, baseline_kernel_id: str) -> list[str]:
-        """One canonical request for trusted acceptance and the Agent prompt."""
+        """Canonical Supervisor-owned terminal acceptance request."""
         return [
             "--kind", "run", "--mode", "full", "--no-sync",
             "--baseline-commit", baseline_kernel_id,
@@ -34,38 +34,33 @@ class RecordedABBAValidator(GatewayABBAValidator):
             "--comparison-run-timeout", str(self.per_run_timeout),
         ]
 
-    def agent_instructions(self, *, baseline_kernel_id: str, measurement_repetitions: int) -> str:
-        import shlex
-        measure = shlex.join(
-            ["python3", "tools/sandbox.py", *self.request_argv(baseline_kernel_id)]
-        )
-        return f"""## This Episode's acceptance request
+    def agent_instructions(self, *, measurement_repetitions: int) -> str:
+        return f"""## ABBA comparisons and terminal acceptance
 
-ABBA is optional during exploration. To make a comparison eligible for acceptance reuse,
-commit the complete candidate, verify `git status` is clean, and run this exact command:
+During exploration, you may compare the clean committed candidate against any baseline commit
+reachable from local Git or `refs/atrex/shared/` by running:
 
 ```bash
-{measure}
+python3 tools/sandbox.py --kind run --mode full --baseline-commit <FULL_GIT_COMMIT>
 ```
 
-`--baseline-commit` names this Episode's committed incumbent, not the current draft. Runtime
-exports that exact Git source into private request staging before submission. The command matches
-the Supervisor's configured ABBA repeats and per-run timeout.
-Runtime applies the Campaign's Shape batch size; the separate candidate correctness gate owns its
-Runtime-defined coverage. Do not add
-command/input/Shape/seed/benchmark/dependency overrides.
-The Runtime supplies the evaluator, full workload and target; private inputs stay private.
+That is a research comparison: you choose its baseline and interpret the result. It cannot weaken
+the promotion gate. After `episode-report`, the Supervisor automatically compares the candidate
+against the already promoted incumbent Agent commit; the terminal baseline is not Agent-selectable.
+You do not need to submit a separate acceptance ABBA. An exploratory comparison may use supported
+research controls, but it does not alter terminal policy. An earlier Record is reused only when its
+candidate, incumbent, inputs, evaluator and complete task policy exactly match the terminal request.
 
-Supervisor measurement repetitions: **{measurement_repetitions}** per request (one result if 1;
+For terminal acceptance, Runtime supplies the evaluator, full workload, target, Shape batching and
+candidate correctness gate; private inputs stay private. Agent-selected command, input, Shape, seed,
+benchmark or dependency overrides never enter that terminal request.
+
+Terminal Supervisor measurement repetitions: **{measurement_repetitions}** per request (one result if 1;
 per-Shape median if 3). The enclosing allocation is derived from the per-run limits above.
-These are Runtime-owned settings, already applied to this request; do not loop the command
-or set environment variables to reproduce them.
+These are Runtime-owned terminal settings; do not loop the research command or set environment
+variables in an attempt to reproduce or influence acceptance.
 
-Reuse requires the same candidate, incumbent, inputs, evaluator and complete task policy.
-A duplicate-task error names an existing Record: read `records/<ID>.json` and do not make another
-GPU submission.
-Acceptance reuses a completed matching Record or measures when none exists; it is not a
-zero-submission guarantee. ABBA does not replace the standard full Evaluate required by
+ABBA does not replace the standard full Evaluate required by
 `episode-report`, and the Supervisor still applies policy and performance gates.
 """
 

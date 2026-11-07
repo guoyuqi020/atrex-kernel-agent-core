@@ -23,7 +23,7 @@ def optimization_mode_directive(
     *,
     source_checks_enabled: bool = True,
     specify_dsl: bool = True,
-    numerical_validation_enabled: bool = True,
+    numerical_validation_enabled: bool = False,
 ) -> str:
     """Use the same production rules, without requiring Agent Git/private-file access."""
     if mode == "leaderboard":
@@ -127,7 +127,7 @@ def workspace_policy_block(
     *,
     source_checks_enabled: bool = True,
     specify_dsl: bool = True,
-    numerical_validation_enabled: bool = True,
+    numerical_validation_enabled: bool = False,
 ) -> str:
     directive = optimization_mode_directive(
         mode,
@@ -148,7 +148,7 @@ def install_workspace_policy(
     update_tracked_files: bool = True,
     source_checks_enabled: bool = True,
     specify_dsl: bool = True,
-    numerical_validation_enabled: bool = True,
+    numerical_validation_enabled: bool = False,
     expose_evaluator_shapes: bool = True,
 ) -> None:
     """Persist immutable mode, framework, shape visibility, and runtime identity.

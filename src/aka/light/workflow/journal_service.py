@@ -730,6 +730,7 @@ def _apply_direction_events(
                 if type(revision) is not int or revision < 1:
                     raise ValueError("Direction revision must be a positive integer")
             _text_list(event.get("supporting_experiment_ids", []), "supporting_experiment_ids")
+            _text_list(event.get("gateway_record_ids", []), "gateway_record_ids")
         except ValueError as error:
             raise RuntimeStateError(
                 f"Invalid Direction history in Episode {journal['episode']}: {error}"
@@ -755,6 +756,7 @@ def _apply_direction_events(
                 "analysis": None,
                 "recorded_at": event["recorded_at"],
                 "supporting_experiment_ids": [],
+                "gateway_record_ids": list(event.get("gateway_record_ids", [])),
                 "hypothesis_status": "unresolved",
                 "reopen_condition": None,
                 **_durable_review_fields(event),
@@ -780,6 +782,10 @@ def _apply_direction_events(
             direction["change_scope"] = _change_scope(event["change_scope"])
             direction["revision"] = event["revision"]
             direction["updated_at"] = event["recorded_at"]
+            if "gateway_record_ids" in event:
+                direction["gateway_record_ids"] = list(
+                    event["gateway_record_ids"]
+                )
             direction.update(_durable_review_fields(event))
         elif direction_id in views:
             direction = _editable_direction(views, direction_id)
@@ -793,6 +799,8 @@ def _apply_direction_events(
             direction["supporting_experiment_ids"] = (
                 list(support) if assessment is not None and action in _CLOSURES else []
             )
+            if action in _CLOSURES and "gateway_record_ids" in event:
+                direction["gateway_record_ids"] = list(event["gateway_record_ids"])
             direction.update(_durable_review_fields(event))
 
 
@@ -2039,10 +2047,13 @@ def update_direction(
             if experiments_enabled
             else RELATIONSHIP_FIELDS - {"derived_from_experiment_ids"}
         )
+        proposal_optional = DIRECTION_PROPOSAL_OPTIONAL_FIELDS | relationship_fields
+        if not experiments_enabled:
+            proposal_optional = proposal_optional | {"gateway_record_ids"}
         require_fields(
             value,
             DIRECTION_PROPOSAL_FIELDS,
-            optional=DIRECTION_PROPOSAL_OPTIONAL_FIELDS | relationship_fields,
+            optional=proposal_optional,
             label="Direction proposal",
         )
         direction_id = f"direction_{uuid.uuid4().hex}"
@@ -2084,16 +2095,26 @@ def update_direction(
             "recorded_at": _now(),
             **ancestry,
         }
+        if not experiments_enabled:
+            event["gateway_record_ids"] = _validate_record_ids(
+                campaign_root,
+                value.get("gateway_record_ids", []),
+                allow_empty=True,
+                label="Direction",
+            )
     elif action == _DIRECTION_REVISION_ACTION:
         if set(value) & RELATIONSHIP_FIELDS:
             raise ValueError(
                 "Direction genealogy is immutable; propose a new derived Direction instead of "
                 "changing ancestry in a revision"
             )
+        revision_optional = set(DIRECTION_PROPOSAL_OPTIONAL_FIELDS)
+        if not experiments_enabled:
+            revision_optional.add("gateway_record_ids")
         require_fields(
             value,
             DIRECTION_REVISION_FIELDS,
-            optional=DIRECTION_PROPOSAL_OPTIONAL_FIELDS,
+            optional=revision_optional,
             label="Direction revision",
         )
         direction_id = _text(value["direction_id"], "Direction ID")
@@ -2149,6 +2170,17 @@ def update_direction(
             ),
             "recorded_at": _now(),
         }
+        if not experiments_enabled:
+            event["gateway_record_ids"] = _validate_record_ids(
+                campaign_root,
+                (
+                    value["gateway_record_ids"]
+                    if "gateway_record_ids" in value
+                    else previous.get("gateway_record_ids", [])
+                ),
+                allow_empty=True,
+                label="Direction",
+            )
     else:
         if set(value) & RELATIONSHIP_FIELDS:
             raise ValueError(
@@ -2165,6 +2197,7 @@ def update_direction(
         closure_optional = set(DIRECTION_CLOSURE_OPTIONAL_FIELDS)
         if not experiments_enabled:
             closure_optional.remove("supporting_experiment_ids")
+            closure_optional.add("gateway_record_ids")
         require_fields(
             value,
             fields if action in _CLOSURES else DIRECTION_UPDATE_FIELDS,
@@ -2226,6 +2259,42 @@ def update_direction(
                 if reopen_condition is not None else None
             ),
         }
+        if not experiments_enabled and action in _CLOSURES:
+            records = _validate_record_ids(
+                campaign_root,
+                (
+                    value["gateway_record_ids"]
+                    if "gateway_record_ids" in value
+                    else views[direction_id].get("gateway_record_ids", [])
+                ),
+                allow_empty=True,
+                label="Direction",
+            )
+            if value.get("hypothesis_status") in {"supported", "refuted"}:
+                if not records:
+                    raise field_error(
+                        "gateway_record_ids",
+                        "A supported/refuted Direction closure requires at least one completed "
+                        "Kernel-bound Gateway Record when Experiment recording is disabled.",
+                        code="direction_support_required",
+                        next_action=(
+                            "Cite the relevant records/<gateway_record_id>.json result, or use "
+                            "hypothesis_status=unresolved until a completed measurement exists."
+                        ),
+                    )
+                if not any(
+                    _completed_record(
+                        _read_private_gateway_evidence(campaign_root, record_id)
+                    )
+                    for record_id in records
+                ):
+                    raise field_error(
+                        "gateway_record_ids",
+                        "A supported/refuted Direction closure requires a completed Gateway "
+                        "observation; failed or unfinished jobs do not establish a verdict.",
+                        code="direction_assessment_requires_completed_result",
+                    )
+            event["gateway_record_ids"] = records
     review = (
         review_claim("direction", event)
         if review_claim is not None
@@ -3674,35 +3743,60 @@ class SupervisorJournalService:
         documents: list[dict[str, Any]] = [target]
         if claim_type == "direction":
             direction_id = target.get("direction_id")
-            proposal = (
-                target
-                if target.get("action") in {"propose", _DIRECTION_REVISION_ACTION}
-                else _direction_views(self.path, self.campaign_root).get(direction_id)
-            )
+            existing = _direction_views(self.path, self.campaign_root).get(direction_id)
+            if target.get("action") == "propose":
+                proposal = target
+            elif (
+                target.get("action") == _DIRECTION_REVISION_ACTION
+                and isinstance(existing, Mapping)
+            ):
+                # A revision deliberately omits immutable genealogy.  Review
+                # the effective Direction rather than the sparse revision
+                # event so its Experiment and Gateway evidence remains
+                # available to the reviewer.
+                proposal = {**deepcopy(dict(existing)), **target}
+            else:
+                proposal = existing
             proposal = _public_direction(proposal) if isinstance(proposal, Mapping) else target
+            documents.append(proposal)
             publish(
                 root / "submissions",
                 "direction-proposal.json",
                 _projection_json(proposal),
             )
-            experiment_ids = target.get("supporting_experiment_ids", [])
-            if isinstance(experiment_ids, list):
-                experiments = {
-                    item.get("experiment_id"): item
-                    for item in _visible_experiments(self.path, self.campaign_root)
-                    if isinstance(item, dict)
-                }
-                for experiment_id in experiment_ids:
-                    experiment = experiments.get(experiment_id)
-                    if not isinstance(experiment, dict):
-                        continue
-                    public = _public_experiment(experiment)
-                    documents.append(public)
-                    publish(
-                        root / "submissions" / "supporting-experiments",
-                        f"{experiment_id}.json",
-                        _projection_json(public),
-                    )
+            # Direction evidence may arrive through terminal-support edges or
+            # through the Experiments from which a new Direction was derived.
+            # Resolve both before collecting Gateway Records; copying only the
+            # Direction event leaves the reviewer with IDs but no measurements.
+            experiment_ids: list[str] = []
+            for document in (proposal, target):
+                if not isinstance(document, Mapping):
+                    continue
+                for field in (
+                    "supporting_experiment_ids",
+                    "derived_from_experiment_ids",
+                ):
+                    values = document.get(field, [])
+                    if isinstance(values, list):
+                        experiment_ids.extend(
+                            value for value in values if isinstance(value, str)
+                        )
+            experiments = {
+                item.get("experiment_id"): item
+                for item in _visible_experiments(self.path, self.campaign_root)
+                if isinstance(item, dict)
+            }
+            for experiment_id in dict.fromkeys(experiment_ids):
+                experiment = experiments.get(experiment_id)
+                if not isinstance(experiment, dict):
+                    continue
+                public = _public_experiment(experiment)
+                documents.append(public)
+                publish(
+                    root / "submissions" / "supporting-experiments",
+                    f"{experiment_id}.json",
+                    _projection_json(public),
+                )
         elif claim_type == "experiment":
             direction_id = target.get("direction_id")
             if isinstance(direction_id, str):

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from aka.legacy.evaluation.abba import verification_schedule
 from aka.light.evaluation.result_conversion import compile_failures
-from aka.legacy.evaluation.shapes import batch_shape_ids, shape_batch_request
+from aka.light.evaluation.shapes import batch_shape_ids, shape_batch_request
 from aka.light.evaluation.evaluation_feedback import evaluation_feedback
 from aka.light.evaluation.policy import BATCH_WORKERS, validate_abba_repeats
 from aka.light.evaluation.public_result import correctness_summary
@@ -606,7 +606,12 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
                 "are retained and only incomplete Shapes will be retried"
             )
         return 1
-    payload = merge_abba_batch_payloads([value for value, _ in results], schedule, shapes)
+    payload = merge_abba_batch_payloads(
+        [value for value, _ in results],
+        schedule,
+        shapes,
+        request["reference"].get("metadata"),
+    )
     value = abba(payload, schedule, shapes, args.comparison_repeats)
     print("[sandbox] ABBA_JSON=" + json.dumps(value))
     return 0 if value["correct"] else 1

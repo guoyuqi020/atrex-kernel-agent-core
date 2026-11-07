@@ -103,13 +103,16 @@ class GatewayEvaluation:
         return result_from_response(response, operation)
 
     def aggregate(self, samples, plan):
-        from aka.light.evaluation.gateway import metadata_speedup_mean
+        from aka.light.evaluation.gateway import metadata_performance_metrics
         value = aggregate(samples, plan.operation)
         if "metadata.json" in plan.inputs:
+            metadata = json.loads(plan.inputs["metadata.json"])
             sides = [value] if plan.operation == "evaluate" else [value["baseline"], value["candidate"]]
             for side in sides:
                 latencies = side.get("latency_us_by_shape", {})
-                score, failures = metadata_speedup_mean(json.loads(plan.inputs["metadata.json"]), list(latencies), latencies)
-                if not failures and score is not None:
-                    side.update(performance_score=score, speedup_vs_ref_mean=score)
+                metrics, failures = metadata_performance_metrics(
+                    metadata, list(latencies), latencies
+                )
+                if not failures and metrics.get("performance_score") is not None:
+                    side.update(metrics)
         return value

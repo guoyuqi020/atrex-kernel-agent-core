@@ -20,6 +20,7 @@ DEFAULT_CANDIDATE_TIMEOUT = DEFAULT_EVALUATION_STEP_TIMEOUT
 DEFAULT_PERFORMANCE_TIMEOUT = DEFAULT_EVALUATION_STEP_TIMEOUT
 DEFAULT_ABBA_RUN_TIMEOUT = DEFAULT_EVALUATION_STEP_TIMEOUT
 DEFAULT_ABBA_REPEATS = 2
+DEFAULT_SHAPE_BATCH_SIZE = 10
 ABBA_SCHEDULING_OVERHEAD = 30
 MAX_TYPED_GATEWAY_JOB_TIMEOUT = 10_800
 
@@ -171,7 +172,7 @@ class EvaluationConfiguration:
     timeout: int = derived_evaluation_timeout()
     repeats: int = DEFAULT_ABBA_REPEATS
     per_run_timeout: int = DEFAULT_ABBA_RUN_TIMEOUT
-    shape_batch_size: int = 10
+    shape_batch_size: int = DEFAULT_SHAPE_BATCH_SIZE
     max_parallelism: int = 4
     private_reference_dir: Path | None = None
     native: bool = False

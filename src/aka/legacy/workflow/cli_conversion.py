@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse, json, os, re, sys
 from pathlib import Path
 from aka.legacy.workflow.constants import AGENT_CLI_CHOICES, DEFAULT_CONVERT_AFTER, DEFAULT_FAST_EPISODES, DEFAULT_FAST_TRIALS, DEFAULT_HANDOFF_RESUMES, DEFAULT_VERIFY_REPEATS, FRAMEWORK_BASELINE_MODES, FRAMEWORK_BASELINE_TIMEOUT_S, GATEWAY_CANDIDATE_RECOVERY_MODES
-from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT
+from aka.contracts.evaluation import (
+    DEFAULT_EVALUATION_STEP_TIMEOUT,
+    DEFAULT_SHAPE_BATCH_SIZE,
+)
 from aka.legacy.execution.recovery import DEFAULT_SSH_HEALTH_COMMAND
 from aka.legacy.task.hardware import _workspace_slug
 from aka.legacy.workflow.policy import OPTIMIZATION_MODE_CHOICES
@@ -20,8 +23,18 @@ def parse_arguments(argv):
     ap.add_argument("--conversion-budget-action", choices=("fail", "retain_verified"), default="fail")
     ap.add_argument("--resume-framework-candidate", action="store_true",
                     help="Validate a retained framework candidate before generating another implementation")
-    ap.add_argument("--verify-shape-batch-size", dest="shape_batch_size", type=int, default=4,
+    ap.add_argument("--verify-shape-batch-size", dest="shape_batch_size", type=int,
+                    default=DEFAULT_SHAPE_BATCH_SIZE,
                     help="Maximum workload shapes in one verification allocation")
+    ap.add_argument(
+        "--gpu-clock-mhz",
+        type=int,
+        default=None,
+        help=(
+            "Locked Eval graphics clock in MHz. L20N defaults to its verified "
+            "2377 MHz application-clock bin; an explicit value overrides the product default."
+        ),
+    )
     ap.add_argument(
         "--op-dir",
         required=True,
@@ -385,6 +398,8 @@ def parse_arguments(argv):
         ap.error("--verify-repeats must be positive")
     if args.shape_batch_size <= 0:
         ap.error("--verify-shape-batch-size must be positive")
+    if args.gpu_clock_mhz is not None and args.gpu_clock_mhz <= 0:
+        ap.error("--gpu-clock-mhz must be positive")
     if args.evaluation_step_timeout <= 0:
         ap.error("--evaluation-step-timeout must be positive")
     if not 0.0 <= args.min_improvement_pct < 100.0:

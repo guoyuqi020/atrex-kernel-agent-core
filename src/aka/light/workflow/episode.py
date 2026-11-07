@@ -578,7 +578,9 @@ class LongHorizonCampaign:
                 agent_workspace,
                 source_from_git(worktree.path, worktree.base_commit),
             )
-            acceptance_request = selected_verifier.agent_instructions(**context)
+            acceptance_request = selected_verifier.agent_instructions(
+                measurement_repetitions=context["measurement_repetitions"]
+            )
         research_records = self.base_campaign.research_records
         research_modules = set(self.base_campaign.research_modules)
         if research_modules == {"directions", "experiments"}:
@@ -1100,15 +1102,8 @@ class LongHorizonCampaign:
                 "performance_objective": representative.get("performance_objective"),
                 "performance_score": representative.get("performance_score"),
                 "speedup_vs_ref_mean": representative.get("speedup_vs_ref_mean"),
-                "speedup_vs_ref_geomean": (
-                    None
-                    if representative.get("performance_objective")
-                    == "shape_speedup_arithmetic_mean"
-                    else main_adapter.speedup_vs_reference(
-                        self.workspace,
-                        representative.get("latency_us_geomean"),
-                        representative.get("speedup_vs_ref_geomean"),
-                    )
+                "speedup_vs_ref_geomean": representative.get(
+                    "speedup_vs_ref_geomean"
                 ),
             },
             "optimization": {
@@ -1392,6 +1387,12 @@ class LongHorizonCampaign:
                 generate_memory=self.base_campaign.generate_memory,
             )
             attempt["promotion_commit"] = promotion_commit
+            promoted_kernel_id = journal.get("candidate_kernel_id")
+            if not isinstance(promoted_kernel_id, str) or not promoted_kernel_id:
+                raise RuntimeError(
+                    "Promoted Episode has no sealed Agent Kernel commit identity"
+                )
+            state.incumbent_kernel_commit_id = promoted_kernel_id
             state.accepted += 1
             state.consecutive_without_promotion = 0
             main_adapter.save_stall(self.workspace, 0)
@@ -1705,6 +1706,16 @@ class LongHorizonCampaign:
                 # The episode never reached a terminal handoff and its base is now
                 # stale, so it is superseded rather than rejected on its merits.
                 terminal_status = "interrupted"
+            recovered_kernel_id = None
+            if promoted:
+                try:
+                    recovered_kernel_id = (
+                        self.base_campaign._supervisor_runtime.read_episode_journal(
+                            episode
+                        ).get("candidate_kernel_id")
+                    )
+                except (AttributeError, OSError, RuntimeError, ValueError):
+                    recovered_kernel_id = None
             self._require_canonical_memory(memory_version)
             if not already_recorded:
                 state.episodes = max(state.episodes, episode)
@@ -1722,6 +1733,11 @@ class LongHorizonCampaign:
                 if promoted:
                     state.accepted += 1
                     state.consecutive_without_promotion = 0
+                    if isinstance(recovered_kernel_id, str) and recovered_kernel_id:
+                        state.incumbent_kernel_commit_id = recovered_kernel_id
+                        recovered_attempt["candidate_kernel_commit_id"] = (
+                            recovered_kernel_id
+                        )
                     recovered_attempt["promotion_commit"] = git_head(self.workspace)
                     recovered_attempt["promotion_audit"] = audit_recovery
                 else:
@@ -1999,6 +2015,9 @@ class LongHorizonCampaign:
             agent_workspace = self.base_campaign.register_runtime_episode(
                 worktree.path, episode=episode, memory_version=memory_version,
                 base_commit=base_commit, branch=worktree.branch,
+                baseline_kernel_commit_id=(
+                    state.incumbent_kernel_commit_id or None
+                ),
                 require_gluon=(
                     conversion_pending
                     or main_adapter.candidate_is_gluon(self.workspace)

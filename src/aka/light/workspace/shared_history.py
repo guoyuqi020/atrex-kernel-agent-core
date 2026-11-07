@@ -11,10 +11,6 @@ from pathlib import Path
 
 from aka.legacy.task.persistence import durable_write_json
 
-MAX_EXPORT_BYTES = 32 * 1024 * 1024
-MAX_EXPORT_COMMITS = 512
-
-
 def _run(workspace: Path, *args: str, input_bytes: bytes | None = None,
          check: bool = True) -> subprocess.CompletedProcess[bytes]:
     environment = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
@@ -29,8 +25,6 @@ def _validate_source_history(workspace: Path, ref: str) -> int:
     from aka.light.workspace.sources import Artifact, from_git
 
     commits = _run(workspace, "rev-list", ref).stdout.decode().splitlines()
-    if len(commits) > MAX_EXPORT_COMMITS:
-        raise ValueError(f"Shared Git history exceeds {MAX_EXPORT_COMMITS} commits")
     for commit in commits:
         artifact = Artifact(from_git(workspace, commit))
         allowed = {*artifact.materialized_files, ".gitignore"}
@@ -68,9 +62,6 @@ def export_epoch(
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode(errors="replace").strip())
     size = temporary.stat().st_size
-    if size > MAX_EXPORT_BYTES:
-        temporary.unlink(missing_ok=True)
-        raise ValueError(f"Shared Git history exceeds {MAX_EXPORT_BYTES} bytes")
     os.replace(temporary, destination)
     receipt = {
         "schema_version": 1,
@@ -125,8 +116,6 @@ def import_exports(
         imported = []
         mappings = []
         for path in exports:
-            if path.stat().st_size > MAX_EXPORT_BYTES:
-                raise ValueError("Shared Git export exceeds its size limit")
             audit = path.with_suffix(".json")
             try:
                 metadata = json.loads(audit.read_text(encoding="utf-8"))

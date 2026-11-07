@@ -163,7 +163,10 @@ def shape_batch_request(
     overrides = dict(request.get("runner_overrides") or {})
     overrides.pop("shape_ids", None)
     batched["runner_overrides"] = overrides
-    batched["lock_clocks"] = False
+    # Every outer Eval batch, including Ray Data batches, owns a deterministic
+    # locked-clock measurement. The precise bin remains in runner_overrides and
+    # is therefore identical for ordinary Eval and native ABBA.
+    batched["lock_clocks"] = True
     if timeout_s is not None:
         if type(timeout_s) is not int or timeout_s <= 0:
             raise ValueError("Shape batch timeout must be a positive integer")
