@@ -29,7 +29,7 @@ branch from, restore or compare the corresponding source.
 Use returned IDs, not these illustrative examples. Shape parameters are public through
 `shapes.json` only in exposed mode; in hidden mode every Shape ID is opaque. Profile duration and
 Evaluate latency are different measurements; a diagnostic cannot establish untested performance.
-When checking out an older Kernel, reuse a fully supported visible Experiment whose saved full Evaluate
+When checking out an older Kernel, reuse a visible Experiment whose measured decision has a `supported` Review and whose saved full Evaluate
 still matches that exact commit, or record a new Experiment when the interpretation or evidence has
 changed. With the Experiment module disabled, cite the Record directly in `episode-report`.
 

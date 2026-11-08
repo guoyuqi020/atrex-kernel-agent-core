@@ -2322,7 +2322,7 @@ def update_direction(
         and review_projection.get("claim_review_quality") != "supported"
     ):
         error = AgentRequestError(
-            "A supported/refuted Direction closure requires a fully supported independent review.",
+            "A supported/refuted Direction closure requires a supported review of its terminal decision.",
             code="direction_closure_review_incomplete",
             review=_agent_claim_review(review),
             next_action=(
@@ -2604,14 +2604,14 @@ def _closure_support(
         review_quality = experiment.get("claim_review_quality", experiment.get("review_quality"))
         if assessment != "unresolved" and review_quality != "supported":
             raise AgentRequestError(
-                "supported/refuted requires fully reviewed supporting Experiments.",
+                "supported/refuted requires supporting Experiments whose measured decision is supported.",
                 code="direction_support_review_incomplete",
                 experiment_id=experiment_id,
                 claim_review_quality=review_quality,
                 next_action=(
                     "Revise the Experiment using its stable experiment_id and address its saved "
                     "scope_safe_interpretation/scientific_next_check, or close the Direction as "
-                    "unresolved until the claim is fully supported."
+                    "unresolved until the decision-critical evidence is supported."
                 ),
             )
     return selected
@@ -2980,14 +2980,14 @@ def validate_report_evidence(
     )
     if selected_review_quality != "supported":
         raise AgentRequestError(
-            "candidate_ready requires a fully supported visible Experiment.",
+            "candidate_ready requires a visible Experiment with a supported measured decision.",
             code="candidate_experiment_review_incomplete",
             experiment_id=selected_id,
             claim_review_quality=selected_review_quality,
             next_action=(
                 "Revise a local Experiment using its stable experiment_id and address its projected "
                 "scope_safe_interpretation/scientific_next_check before nominating the candidate. "
-                "A historical Experiment may be reused without revision when it is fully supported "
+                "A historical Experiment may be reused without revision when its measured decision is supported "
                 "and still cites a passing full Evaluate of the exact current commit."
             ),
         )
@@ -4479,7 +4479,7 @@ class SupervisorJournalService:
             and item.get("experiment_id") == selected_id
             for item in current["experiments"]
         ):
-            # Evidence preflight deliberately permits a fully supported visible
+            # Evidence preflight deliberately permits a decision-supported visible
             # Experiment from an earlier Episode when its passing full Evaluate
             # still binds the exact candidate commit.  Finalized Journals and the
             # compatibility handoff are Episode-local, however, so retain the

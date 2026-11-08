@@ -50,7 +50,7 @@ alone is not correctness or performance evidence; evaluate the resulting clean H
 
 ## Submit the Episode report
 
-Candidate reports select a fully supported visible Experiment:
+Candidate reports select a visible Experiment whose measured decision has a `supported` Review:
 
 ```json
 {

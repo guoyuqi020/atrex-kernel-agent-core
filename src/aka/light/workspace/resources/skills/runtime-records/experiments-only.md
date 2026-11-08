@@ -14,4 +14,4 @@ Revise only `local_writable` Experiments by resubmitting their required fields a
 Runtime increments `revision`, reruns Review, and preserves omitted optional evidence. Extend
 `peer_read_only` evidence with a new local Experiment.
 
-For `candidate_ready`, set `selected_experiment_id` to a fully supported visible Experiment that cites a passing standard full Evaluate of the exact clean HEAD. A historical Experiment may be reused when its evidence still matches. Follow [the exact Experiment and report schemas](references/journal.md) and [saved result/source semantics](references/records.md). Never invent IDs or measured results.
+For `candidate_ready`, set `selected_experiment_id` to a visible Experiment with a `supported` Review under the Experiment decision standard that cites a passing standard full Evaluate of the exact clean HEAD. A historical Experiment may be reused when its evidence still matches. Follow [the exact Experiment and report schemas](references/journal.md) and [saved result/source semantics](references/records.md). Never invent IDs or measured results.

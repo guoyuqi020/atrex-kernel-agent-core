@@ -26,6 +26,7 @@ from aka.light.runtime.server import RuntimeConfig, SupervisorRuntime
 from aka.light.workflow.journal_projection import validate_terminal
 from aka.light.workflow.journal_service import (
     SupervisorJournalService,
+    _archive_experiment_references,
     _remove_stale_direction_projection,
     copy_experiment_reference_archive,
     initialize_journal,
@@ -38,6 +39,7 @@ from aka.light.workflow.journal_service import (
 )
 from aka.light.workflow.models import EpisodeHandoff, SupervisorState
 from aka.light.workflow.bootstrap import Campaign
+from aka.light.workflow.claim_review import validate_review
 from aka.light.workflow.constants import FRAMEWORK_BASELINE_FILE
 from aka.light.workflow.episode import LongHorizonCampaign
 from aka.light.workflow.search import PooledSearch, SearchOptions, read_state
@@ -56,6 +58,63 @@ from aka.light.workspace.git import EpisodeWorktree, promote_candidate
 from aka.light.workspace.provider import ManagedCandidateWorkspace
 from aka.light.workspace.shared_history import export_epoch, import_exports
 from aka.light.workspace.sources import default_tree, from_git, install, pack, snapshot
+
+
+def _claim_review(verdict: str, findings: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "verdict": verdict,
+        "primary_issue": "The decision is usable within the measured scope.",
+        "findings": findings,
+        "scope_safe_interpretation": (
+            "Use the measured decision without the secondary mechanism claim."
+        ),
+        "next_check": "Measure the secondary mechanism only if it affects a later decision.",
+        "confidence": "medium",
+    }
+
+
+def _claim_finding(judgment: str, *, critical: bool) -> dict[str, object]:
+    return {
+        "claim": "A bounded decision or a secondary explanation.",
+        "judgment": judgment,
+        "decision_critical": critical,
+        "reason": "The supplied evidence has the stated level of support.",
+        "evidence": ["gateway-records/gateway-example/record.json"],
+    }
+
+
+def test_claim_review_verdict_ignores_noncritical_limitations():
+    result = validate_review(_claim_review("supported", [
+        _claim_finding("supported", critical=True),
+        _claim_finding("partially_supported", critical=False),
+        _claim_finding("unsupported", critical=False),
+    ]))
+    assert result["verdict"] == "supported"
+
+
+def test_claim_review_verdict_tracks_decision_critical_findings():
+    with pytest.raises(ValueError, match="decision-critical finding"):
+        validate_review(_claim_review("supported", [
+            _claim_finding("partially_supported", critical=True),
+        ]))
+
+    assert validate_review(_claim_review("partially_supported", [
+        _claim_finding("partially_supported", critical=True),
+        _claim_finding("unsupported", critical=False),
+    ]))["verdict"] == "partially_supported"
+
+    with pytest.raises(ValueError, match="no decision-critical unsupported"):
+        validate_review(_claim_review("partially_supported", [
+            _claim_finding("partially_supported", critical=True),
+            _claim_finding("unsupported", critical=True),
+        ]))
+
+
+def test_claim_review_requires_a_decision_critical_finding():
+    with pytest.raises(ValueError, match="requires a decision-critical finding"):
+        validate_review(_claim_review("supported", [
+            _claim_finding("supported", critical=False),
+        ]))
 
 
 def _measurement(
@@ -1966,7 +2025,7 @@ def test_episode_report_schema_and_prompt_require_explicit_handoff_reason():
     [
         (
             "candidate_ready",
-            "Select a fully supported visible Experiment that cites a passing standard full Evaluate",
+            "Select a visible Experiment with a supported measured decision that cites a passing standard full Evaluate",
         ),
         (
             "pivot",
@@ -3694,6 +3753,24 @@ def test_shared_direction_queue_uses_peer_pool_votes_without_overwriting_local_o
     assert states[3]["queue"] == ["c"]
 
 
+def test_shared_direction_queue_preserves_unvoted_inherited_order():
+    directions = {
+        name: {"direction_id": name, "status": "proposed"}
+        for name in ("a", "b", "c")
+    }
+    states = {
+        1: {"queue": []},
+        2: {"queue": []},
+        3: {"queue": []},
+    }
+
+    assert _aggregate_direction_queue(
+        states,
+        directions,
+        inherited_queue=["c", "a", "b"],
+    ) == ["c", "a", "b"]
+
+
 def test_only_explicitly_low_quality_reviewed_claims_are_withheld_from_sharing():
     assert _shareable_claim({"claim_review_quality": "supported"}) is True
     assert _shareable_claim({}) is True  # legacy/pre-review compatibility
@@ -4279,6 +4356,21 @@ def test_pooled_trajectories_restore_one_canonical_agent_v0_and_baseline(tmp_pat
     )
     framework_commit = root_agent.checkpoint("accepted Framework Baseline")
     assert framework_commit and framework_commit != v0_commit
+    subprocess.run(
+        ["git", "switch", "-q", "-c", "baseline-probe"],
+        cwd=root_agent_workspace,
+        check=True,
+    )
+    (root_agent_workspace / "kernel.py").write_text(
+        "def run():\n    return 2\n", encoding="utf-8"
+    )
+    probe_commit = root_agent.checkpoint("Framework Baseline probe")
+    assert probe_commit and probe_commit != framework_commit
+    subprocess.run(
+        ["git", "switch", "-q", "work"],
+        cwd=root_agent_workspace,
+        check=True,
+    )
     assert root_agent.persist() == framework_commit
 
     driver = EpisodeSearchDriver.__new__(EpisodeSearchDriver)
@@ -4314,9 +4406,111 @@ def test_pooled_trajectories_restore_one_canonical_agent_v0_and_baseline(tmp_pat
         child_agent.prepare()
         restored_heads.append(child_agent.head())
         assert child_agent.commit_reachable(v0_commit)
+        assert child_agent.commit_reachable(probe_commit)
         assert snapshot(child_agent_workspace) == framework_source
 
     assert restored_heads == [framework_commit, framework_commit, framework_commit]
+
+
+def test_pooled_trajectories_inherit_framework_baseline_research(tmp_path):
+    controller = _controller_repository(
+        tmp_path / "controller", "def run():\n    return 0\n"
+    )
+    source_root = supervisor_campaign_root(controller)
+    measurements = MeasurementStore(source_root / "measurements")
+    record_id, kernel_id = _measurement(
+        measurements,
+        b"def kernel():\n    return 1\n",
+        "framework-baseline-probe",
+        kernel_id="3" * 40,
+    )
+    direction_id = "direction_" + "1" * 32
+    experiment_id = "experiment_" + "2" * 32
+    (controller / "scratch").mkdir()
+    (controller / "scratch" / "probe.txt").write_text(
+        "baseline probe evidence\n", encoding="utf-8"
+    )
+    references = _archive_experiment_references(
+        controller,
+        source_root / "journals",
+        experiment_id,
+        1,
+        ["scratch/probe.txt"],
+    )
+    research = ResearchStore(source_root / "research")
+    research.observe_direction(
+        {
+            "direction_id": direction_id,
+            "name": "Framework Baseline launch probe",
+            "change_scope": "incremental",
+            "status": "proposed",
+            "gateway_record_ids": [record_id],
+            "claim_review_quality": "supported",
+        },
+        origin={"epoch": 0, "trajectory": 1, "episode": 0},
+    )
+    research.observe_experiment(
+        {
+            "experiment_id": experiment_id,
+            "name": "Framework Baseline probe result",
+            "intent": "Establish a reusable launch fact.",
+            "interpretation": "The probe is valid for later Episodes.",
+            "gateway_record_ids": [record_id],
+            "references": references,
+            "reference_revision": 1,
+            "revision": 1,
+            "claim_review_quality": "supported",
+        },
+        origin={"epoch": 0, "trajectory": 1, "episode": 0},
+    )
+
+    driver = EpisodeSearchDriver.__new__(EpisodeSearchDriver)
+    driver.campaign = SimpleNamespace(workspace=controller)
+    driver.root = tmp_path / "search"
+    driver.children = {}
+    seed = driver._framework_baseline_research_seed()
+    driver._seed_framework_baseline_search_state(seed)
+
+    for number in (1, 2, 3):
+        child = SimpleNamespace(workspace=tmp_path / f"trajectory-{number}")
+        child.workspace.mkdir()
+        driver._seed_trajectory_framework_baseline_research(child, seed)
+        driver._seed_trajectory_framework_baseline_research(child, seed)
+        destination_root = supervisor_campaign_root(child.workspace)
+        shared = json.loads(
+            shared_research_path(destination_root / "journals").read_text()
+        )
+        assert shared["research_queue"] == [direction_id]
+        assert shared["directions"][direction_id]["access"] == "peer_read_only"
+        assert shared["directions"][direction_id]["proposed_by"] == "Framework Baseline"
+        assert shared["experiments"][0]["access"] == "peer_read_only"
+        assert shared["experiments"][0]["recorded_by"] == "Framework Baseline"
+        copied = MeasurementStore(destination_root / "measurements")
+        assert copied.read(record_id) == measurements.read(record_id)
+        assert copied.read_kernel(kernel_id) == measurements.read_kernel(kernel_id)
+        assert (
+            destination_root
+            / "journals"
+            / "experiment-archives"
+            / experiment_id
+            / "files"
+            / "scratch"
+            / "probe.txt"
+        ).read_text() == "baseline probe evidence\n"
+
+    manifest = json.loads(
+        (driver.root / "shared" / "manifest.json").read_text()
+    )
+    assert manifest["directions"][direction_id] == {
+        "source": "framework_baseline",
+        "epoch": 0,
+        "trajectory": 0,
+        "episode": 0,
+    }
+    assert manifest["experiments"][experiment_id]["source"] == "framework_baseline"
+    assert manifest["records"][record_id]["source"] == "framework_baseline"
+    assert manifest["research_queue"] == [direction_id]
+    assert MeasurementStore(driver.root / "shared" / "measurements").read(record_id)
 
 
 def test_research_store_rebuilds_queue_ignores_legacy_progress_and_adoption(tmp_path):

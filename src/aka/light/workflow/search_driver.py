@@ -51,7 +51,7 @@ def _shareable_claim(item):
     }
 
 
-def _aggregate_direction_queue(research_states, directions):
+def _aggregate_direction_queue(research_states, directions, inherited_queue=()):
     """Merge trajectory-local rankings without letting the last writer win.
 
     Rank is normalized inside each trajectory before averaging so a longer
@@ -84,13 +84,29 @@ def _aggregate_direction_queue(research_states, directions):
         for offset, direction_id in enumerate(queue):
             votes[direction_id].append((offset / denominator, offset + 1))
 
+    inherited_rank = {
+        direction_id: rank
+        for rank, direction_id in enumerate(inherited_queue)
+        if direction_id in open_ids
+    }
+
     def rank(direction_id):
         observed = votes[direction_id]
         if not observed:
-            return (1.0, 0, float("inf"), direction_id)
+            # A previously published queue is only a deterministic tiebreaker
+            # for Directions that received no fresh local vote. It is never
+            # counted as another trajectory vote, so inherited ordering cannot
+            # amplify itself across Epochs.
+            return (
+                1.0,
+                0,
+                float("inf"),
+                inherited_rank.get(direction_id, float("inf")),
+                direction_id,
+            )
         mean_normalized = sum(item[0] for item in observed) / len(observed)
         mean_raw = sum(item[1] for item in observed) / len(observed)
-        return (mean_normalized, -len(observed), mean_raw, direction_id)
+        return (mean_normalized, -len(observed), mean_raw, float("inf"), direction_id)
 
     return sorted(open_ids, key=rank)
 
@@ -248,7 +264,7 @@ class EpisodeSearchDriver:
                     "fetch",
                     "--quiet",
                     str(root_agent_bundle),
-                    "+refs/heads/*:refs/heads/*",
+                    "+refs/heads/*:refs/atrex/framework-baseline-heads/*",
                     "+refs/tags/*:refs/tags/*",
                     "+refs/atrex/*:refs/atrex/*",
                 )
@@ -287,7 +303,11 @@ class EpisodeSearchDriver:
                         "fetch",
                         "--quiet",
                         str(source_repository),
-                        f"+{baseline_commit}:refs/remotes/atrex-bootstrap/work",
+                        "+refs/heads/*:refs/atrex/framework-baseline-heads/*",
+                        "+refs/tags/*:refs/tags/*",
+                        "+refs/atrex/*:refs/atrex/*",
+                        "+refs/notes/*:refs/notes/*",
+                        f"+{baseline_commit}:refs/atrex/framework-baseline",
                     )
                     git(
                         canonical_workspace,
@@ -295,7 +315,7 @@ class EpisodeSearchDriver:
                         "--quiet",
                         "-B",
                         "work",
-                        "refs/remotes/atrex-bootstrap/work",
+                        "refs/atrex/framework-baseline",
                     )
                     canonical_git = AgentGit(canonical_workspace, bundle)
                     persisted = canonical_git.persist()
@@ -371,6 +391,192 @@ class EpisodeSearchDriver:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def _framework_baseline_research_seed(self) -> dict:
+        """Return Episode-zero research as immutable pooled-search evidence."""
+        source_root = supervisor_campaign_root(self.campaign.workspace)
+        state = ResearchStore(source_root / "research").read_through_episode(0)
+        directions = {}
+        for direction_id, raw in state.get("directions", {}).items():
+            item = copy.deepcopy(raw)
+            item.pop("origin", None)
+            item["access"] = "peer_read_only"
+            item["proposed_by"] = "Framework Baseline"
+            if item.get("status") == "in_progress":
+                item["owner"] = "Framework Baseline"
+            else:
+                item.pop("owner", None)
+            directions[direction_id] = item
+
+        experiments = []
+        for experiment_id in sorted(state.get("experiments", {})):
+            item = copy.deepcopy(state["experiments"][experiment_id])
+            item.pop("origin", None)
+            item["access"] = "peer_read_only"
+            item["recorded_by"] = "Framework Baseline"
+            experiments.append(item)
+
+        queue = []
+        for direction_id in (*state.get("queue", []), *state.get("shared_queue", [])):
+            direction = directions.get(direction_id)
+            if (
+                direction_id not in queue
+                and isinstance(direction, dict)
+                and direction.get("status") in _OPEN_DIRECTION_STATUSES
+            ):
+                queue.append(direction_id)
+
+        record_ids = set()
+        for item in (*directions.values(), *experiments):
+            values = item.get("gateway_record_ids", [])
+            if isinstance(values, list):
+                record_ids.update(value for value in values if isinstance(value, str))
+
+        public = {
+            "schema_version": 1,
+            "through_epoch": 0,
+            "directions": directions,
+            "experiments": experiments,
+            "research_queue": queue,
+        }
+        public["revision"] = evidence_digest({
+            "directions": directions,
+            "experiments": experiments,
+            "research_queue": queue,
+        })
+        return {
+            "public": public,
+            "record_ids": sorted(record_ids),
+            "source_root": source_root,
+        }
+
+    @staticmethod
+    def _merge_framework_baseline_research(existing: dict, seed: dict) -> dict:
+        """Merge an Episode-zero seed without replacing later shared evidence."""
+        directions = copy.deepcopy(existing.get("directions", {}))
+        for direction_id, item in seed["directions"].items():
+            previous = directions.get(direction_id)
+            if previous is not None and previous != item:
+                raise RuntimeError(
+                    f"Framework Baseline Direction identity changed: {direction_id}"
+                )
+            directions.setdefault(direction_id, copy.deepcopy(item))
+
+        experiments_by_id = {
+            item["experiment_id"]: copy.deepcopy(item)
+            for item in existing.get("experiments", [])
+        }
+        for item in seed["experiments"]:
+            experiment_id = item["experiment_id"]
+            previous = experiments_by_id.get(experiment_id)
+            if previous is not None and previous != item:
+                raise RuntimeError(
+                    f"Framework Baseline Experiment identity changed: {experiment_id}"
+                )
+            experiments_by_id.setdefault(experiment_id, copy.deepcopy(item))
+
+        queue = []
+        for direction_id in (
+            *existing.get("research_queue", []),
+            *seed.get("research_queue", []),
+        ):
+            if direction_id in directions and direction_id not in queue:
+                queue.append(direction_id)
+        result = {
+            "schema_version": 1,
+            "through_epoch": max(existing.get("through_epoch", 0), 0),
+            "directions": directions,
+            "experiments": [experiments_by_id[key] for key in sorted(experiments_by_id)],
+            "research_queue": queue,
+        }
+        result["revision"] = evidence_digest({
+            "directions": result["directions"],
+            "experiments": result["experiments"],
+            "research_queue": result["research_queue"],
+        })
+        return result
+
+    def _seed_framework_baseline_search_state(self, seed: dict) -> None:
+        """Pin common Baseline evidence and provenance before trajectory fan-out."""
+        public = seed["public"]
+        if not public["directions"] and not public["experiments"]:
+            return
+        source_root = seed["source_root"]
+        source_measurements = MeasurementStore(source_root / "measurements")
+        central = MeasurementStore(self.root / "shared" / "measurements")
+        for record_id in seed["record_ids"]:
+            central.import_record(source_measurements, record_id)
+
+        manifest_path = self.root / "shared" / "manifest.json"
+        try:
+            manifest = read_state(manifest_path)
+        except FileNotFoundError:
+            manifest = {"directions": {}, "experiments": {}, "records": {}}
+        origin = {
+            "source": "framework_baseline",
+            "epoch": 0,
+            "trajectory": 0,
+            "episode": 0,
+        }
+        def pin_identity(kind, identifier):
+            identities = manifest.setdefault(kind, {})
+            previous = identities.get(identifier)
+            if previous is not None and previous != origin:
+                raise RuntimeError(
+                    f"Framework Baseline {kind[:-1]} identity conflicts with "
+                    f"pooled search state: {identifier}"
+                )
+            identities.setdefault(identifier, copy.deepcopy(origin))
+
+        for direction_id in public["directions"]:
+            pin_identity("directions", direction_id)
+        for experiment in public["experiments"]:
+            pin_identity("experiments", experiment["experiment_id"])
+        for record_id in seed["record_ids"]:
+            pin_identity("records", record_id)
+        inherited = manifest.get("research_queue", [])
+        manifest["research_queue"] = list(dict.fromkeys(
+            [*inherited, *public["research_queue"]]
+        ))
+        private_write(manifest_path, manifest)
+
+    def _seed_trajectory_framework_baseline_research(self, child, seed: dict) -> None:
+        """Install common Baseline claims, attachments and Records in one child."""
+        public = seed["public"]
+        if not public["directions"] and not public["experiments"]:
+            return
+        source_root = seed["source_root"]
+        destination_root = supervisor_campaign_root(child.workspace)
+        source_measurements = MeasurementStore(source_root / "measurements")
+        destination_measurements = MeasurementStore(destination_root / "measurements")
+        for record_id in seed["record_ids"]:
+            destination_measurements.import_record(source_measurements, record_id)
+        for experiment in public["experiments"]:
+            if not experiment.get("references"):
+                continue
+            copy_experiment_reference_archive(
+                source_root / "journals",
+                destination_root / "journals",
+                experiment["experiment_id"],
+                int(experiment.get("reference_revision", 1)),
+            )
+
+        path = shared_research_path(destination_root / "journals")
+        try:
+            existing = read_state(path)
+        except FileNotFoundError:
+            existing = {
+                "schema_version": 1,
+                "revision": "",
+                "through_epoch": 0,
+                "directions": {},
+                "experiments": [],
+                "research_queue": [],
+            }
+        private_write(
+            path,
+            self._merge_framework_baseline_research(existing, public),
+        )
+
     def _kernel(
         self, workspace, commit, record, trajectory, episode, kernel_id=None
     ):
@@ -429,7 +635,17 @@ class EpisodeSearchDriver:
             candidates = {number: rows[identifier] for number, rows in values.items() if identifier in rows}
             origin = origins.get(identifier, {})
             owner = origin.get("trajectory")
-            if owner in candidates:
+            if origin.get("source") == "framework_baseline":
+                serialized = {
+                    json.dumps(item, sort_keys=True, allow_nan=False)
+                    for item in candidates.values()
+                }
+                if len(serialized) != 1:
+                    raise RuntimeError(
+                        f"Conflicting inherited Framework Baseline {label}: {identifier}"
+                    )
+                selected = candidates[min(candidates)]
+            elif owner in candidates:
                 selected = candidates[owner]
             else:
                 serialized = {json.dumps(item, sort_keys=True, allow_nan=False) for item in candidates.values()}
@@ -561,7 +777,11 @@ class EpisodeSearchDriver:
         for experiment_id, experiment in experiments.items():
             if not experiment.get("references"):
                 continue
-            owner = experiment_origins.get(experiment_id, {}).get("trajectory")
+            experiment_origin = experiment_origins.get(experiment_id, {})
+            if experiment_origin.get("source") == "framework_baseline":
+                # Baseline attachments were copied to every child before fan-out.
+                continue
+            owner = experiment_origin.get("trajectory")
             if owner not in self.children:
                 raise RuntimeError(
                     f"Shared Experiment {experiment_id} has no archive owner"
@@ -594,7 +814,11 @@ class EpisodeSearchDriver:
             )
             for number, store in research_stores.items()
         }
-        research_queue = _aggregate_direction_queue(research_states, directions)
+        research_queue = _aggregate_direction_queue(
+            research_states,
+            directions,
+            inherited_queue=previous.get("research_queue", []),
+        )
 
         central = MeasurementStore(self.root / "shared" / "measurements")
         record_origins = copy.deepcopy(previous.get("records", {}))
@@ -644,7 +868,12 @@ class EpisodeSearchDriver:
                     value,
                     **(
                         {"owner": f"T{direction_origins[key]['trajectory']}"}
-                        if value.get("status") == "in_progress" else {}
+                        if (
+                            value.get("status") == "in_progress"
+                            and direction_origins[key].get("source")
+                            != "framework_baseline"
+                        )
+                        else {}
                     ),
                 )
                 for key, value in directions.items()
@@ -671,6 +900,7 @@ class EpisodeSearchDriver:
             "directions": direction_origins,
             "experiments": experiment_origins,
             "records": record_origins,
+            "research_queue": research_queue,
         }
         private_write(manifest_path, manifest)
         receipt = {
@@ -723,6 +953,8 @@ class EpisodeSearchDriver:
         if not isinstance(baseline, dict):
             raise RuntimeError("Pooled search requires private V0 baseline evidence")
         canonical = self._canonical_agent_root(bootstrap)
+        baseline_research = self._framework_baseline_research_seed()
+        self._seed_framework_baseline_search_state(baseline_research)
         if bootstrap.get("kernel_id") != canonical["framework_baseline_commit_id"]:
             raise RuntimeError(
                 "Pooled search checkpoint predates the canonical shared Agent V0; "
@@ -762,6 +994,9 @@ class EpisodeSearchDriver:
             # scope so scoring and validation never depend on a tracked V0 file.
             write_baseline_record(workspace, baseline)
             self._seed_trajectory_agent_root(child, canonical)
+            self._seed_trajectory_framework_baseline_research(
+                child, baseline_research
+            )
             self.children[number] = child
 
     def _publish(self, workspace, epoch, kernel, label):

@@ -1,4 +1,4 @@
-"""Strict, bounded validation for independent research-claim reviews."""
+"""Bounded validation for independent research-claim reviews."""
 
 from __future__ import annotations
 
@@ -64,15 +64,25 @@ def validate_review(value: object) -> dict[str, Any]:
             "reason": _text(raw.get("reason"), f"findings.{index}.reason"),
             "evidence": [item.strip() for item in evidence],
         })
-    judgments = [item["judgment"] for item in normalized]
-    if verdict == "supported" and any(item != "supported" for item in judgments):
-        raise ValueError("supported review requires every finding to be supported")
-    if verdict == "partially_supported" and all(item == "supported" for item in judgments):
-        raise ValueError("partially_supported review requires a non-supported finding")
-    if verdict == "unsupported" and not any(
-        item["decision_critical"] and item["judgment"] == "unsupported"
-        for item in normalized
+    critical = [item for item in normalized if item["decision_critical"]]
+    if not critical:
+        raise ValueError("research review requires a decision-critical finding")
+    critical_judgments = [item["judgment"] for item in critical]
+    if verdict == "supported" and any(
+        item != "supported" for item in critical_judgments
     ):
+        raise ValueError(
+            "supported review requires every decision-critical finding to be supported"
+        )
+    if verdict == "partially_supported" and (
+        "partially_supported" not in critical_judgments
+        or "unsupported" in critical_judgments
+    ):
+        raise ValueError(
+            "partially_supported review requires a decision-critical partial finding "
+            "and no decision-critical unsupported finding"
+        )
+    if verdict == "unsupported" and "unsupported" not in critical_judgments:
         raise ValueError(
             "unsupported review requires a decision-critical unsupported finding"
         )

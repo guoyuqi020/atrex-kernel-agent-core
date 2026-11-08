@@ -381,7 +381,7 @@ def augment_error(response, *, route, request, research_records=False, direction
             status = body.get("status")
             evidence_instruction = (
                 (
-                    "Select a fully supported visible Experiment that cites a passing standard "
+                    "Select a visible Experiment with a supported measured decision that cites a passing standard "
                     "full Evaluate of the exact committed source. Historical evidence may be "
                     "reused when it still matches; do not add gateway_record_ids directly. "
                     if experiments_enabled
