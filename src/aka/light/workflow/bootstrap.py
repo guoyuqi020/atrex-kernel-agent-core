@@ -1277,6 +1277,7 @@ class Campaign:
             workspace or self.workspace,
             self.framework,
             require_gluon=require_gluon,
+            specify_dsl=self.specify_dsl,
             production_reviewer=self._review_production_candidate,
         )
 
@@ -1970,7 +1971,9 @@ class Campaign:
             if not self.source_checks_enabled:
                 return "pin", "multi-GPU Agate source checks are disabled; retain the validated V0"
             structural = production_structure_violations(
-                self.workspace, self.framework
+                self.workspace,
+                self.framework,
+                specify_dsl=self.specify_dsl,
             )
             if any(
                 value.startswith("unsupported production framework")
@@ -1979,10 +1982,15 @@ class Campaign:
                 return "skip", "; ".join(structural)
             known_reference_wrapper = known_reference_wrapper or is_sol_op(Path(self.kernel_demo).resolve().parent)
             if known_reference_wrapper:
+                target = (
+                    self.framework
+                    if self.specify_dsl
+                    else "Agent-selected supported GPU DSL"
+                )
                 return (
                     "run",
                     f"the supervisor-seeded V0 is the PyTorch reference wrapper, not "
-                    f"a self-contained {self.framework} kernel",
+                    f"a self-contained {target} kernel",
                 )
             violations = self._production_kernel_violations()
             if not violations:
@@ -2718,11 +2726,20 @@ class Campaign:
         violations = [] if not self.source_checks_enabled else (
             self._production_kernel_violations()
             if include_policy_review
-            else production_structure_violations(self.workspace, self.framework)
+            else production_structure_violations(
+                self.workspace,
+                self.framework,
+                specify_dsl=self.specify_dsl,
+            )
         )
         if violations:
+            target = (
+                self.framework
+                if self.specify_dsl
+                else "an Agent-selected supported GPU DSL"
+            )
             return (
-                f"the candidate is not a self-contained {self.framework} implementation: "
+                f"the candidate is not a self-contained {target} implementation: "
                 + "; ".join(violations)
             )
         if (self.source_checks_enabled

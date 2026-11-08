@@ -1073,7 +1073,12 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         )
 
     def _framework_baseline_decision_patches(
-        self, directory, *, reference_blob, implementation_blob
+        self,
+        directory,
+        *,
+        reference_blob,
+        implementation_blob,
+        structure_side_effect=None,
     ):
         def committed_blob(_workspace, _revision, path):
             if path == "reference.py":
@@ -1082,6 +1087,17 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 return implementation_blob
             return ""
 
+        structure_patch = (
+            patch(
+                "aka.light.workflow.bootstrap.production_structure_violations",
+                side_effect=structure_side_effect,
+            )
+            if structure_side_effect is not None
+            else patch(
+                "aka.light.workflow.bootstrap.production_structure_violations",
+                return_value=[],
+            )
+        )
         return (
             patch("aka.light.workflow.bootstrap.latest_version", return_value=0),
             patch("aka.light.workflow.bootstrap.git_head", return_value="head"),
@@ -1103,10 +1119,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 new_callable=PropertyMock,
                 return_value=True,
             ),
-            patch(
-                "aka.light.workflow.bootstrap.production_structure_violations",
-                return_value=[],
-            ),
+            structure_patch,
             patch.object(Campaign, "_v0_baseline_commit", return_value="v0"),
             patch("aka.light.workspace.sources.revision_contains_reference",
                   return_value=reference_blob == implementation_blob),
@@ -1144,6 +1157,112 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
 
         self.assertEqual(action, "run")
         self.assertIn("PyTorch reference wrapper", reason)
+
+    def test_open_dsl_framework_baseline_runs_without_pinning_a_framework(self):
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = Campaign(
+                name="operator",
+                kernel_demo=str(Path(directory) / "reference.py"),
+                platform="cuda",
+                framework="",
+                specify_dsl=False,
+                work_dir=directory,
+                optimization_mode="leaderboard",
+                framework_baseline="always",
+            )
+
+            def check_structure(_workspace, framework, *, specify_dsl):
+                self.assertEqual(framework, "")
+                self.assertFalse(specify_dsl)
+                return []
+
+            patches = self._framework_baseline_decision_patches(
+                directory,
+                reference_blob="same-blob",
+                implementation_blob="same-blob",
+                structure_side_effect=check_structure,
+            )
+            with ExitStack() as stack:
+                for current in patches:
+                    stack.enter_context(current)
+                action, reason = campaign._framework_baseline_decision()
+
+        self.assertEqual(action, "run")
+        self.assertIn("Agent-selected supported GPU DSL", reason)
+
+    def test_open_dsl_framework_baseline_acceptance_keeps_structure_check_neutral(self):
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = Campaign(
+                name="operator",
+                kernel_demo=str(Path(directory) / "reference.py"),
+                platform="cuda",
+                framework="",
+                specify_dsl=False,
+                work_dir=directory,
+                optimization_mode="leaderboard",
+                framework_baseline="always",
+            )
+            campaign.workspace.mkdir(parents=True, exist_ok=True)
+            (campaign.workspace / "WORKSPACE.md").write_bytes(b"contract")
+
+            def check_structure(_workspace, framework, *, specify_dsl):
+                self.assertEqual(framework, "")
+                self.assertFalse(specify_dsl)
+                return []
+
+            with (
+                patch.object(
+                    Campaign,
+                    "source_checks_enabled",
+                    new_callable=PropertyMock,
+                    return_value=True,
+                ),
+                patch(
+                    "aka.light.workspace.sources.workspace_identity",
+                    return_value=b"candidate",
+                ),
+                patch(
+                    "aka.light.workflow.bootstrap.framework_baseline_workspace_contract",
+                    return_value=b"contract",
+                ),
+                patch(
+                    "aka.light.workflow.bootstrap.production_structure_violations",
+                    side_effect=check_structure,
+                ),
+                patch("aka.light.workflow.bootstrap.git_path_blob", return_value=b""),
+            ):
+                problem = campaign._framework_baseline_problem(
+                    "v0", "baseline", include_policy_review=False
+                )
+
+        self.assertEqual(problem, "")
+
+    def test_open_dsl_production_check_forwards_neutral_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = Campaign(
+                name="operator",
+                kernel_demo=str(Path(directory) / "reference.py"),
+                platform="cuda",
+                framework="",
+                specify_dsl=False,
+                work_dir=directory,
+                optimization_mode="leaderboard",
+            )
+            with (
+                patch.object(
+                    Campaign,
+                    "source_checks_enabled",
+                    new_callable=PropertyMock,
+                    return_value=True,
+                ),
+                patch(
+                    "aka.light.workflow.bootstrap.production_kernel_violations",
+                    return_value=[],
+                ) as check,
+            ):
+                self.assertEqual(campaign._production_kernel_violations(), [])
+
+        self.assertFalse(check.call_args.kwargs["specify_dsl"])
 
     def test_distinct_v0_implementation_still_uses_production_review(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -7,6 +7,7 @@ whose stored source bytes match that commit exactly.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -121,6 +122,8 @@ class AgentGit:
 
     def _ensure_private_excludes(self) -> None:
         """Upgrade Runtime exclusions without dirtying the tracked repository."""
+        from aka.light.workspace.sources import read
+
         result = _run(
             self.workspace,
             "rev-parse",
@@ -132,15 +135,42 @@ class AgentGit:
             path = self.workspace / path
         path.parent.mkdir(parents=True, exist_ok=True)
         existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        present = set(existing.splitlines())
-        missing = [entry for entry in IGNORED if entry not in present]
-        if not missing:
+        try:
+            candidate_paths = sorted(read(self.workspace).files)
+        except (OSError, ValueError):
+            candidate_paths = []
+
+        def ignored(candidate: str) -> bool:
+            for pattern in IGNORED:
+                normalized = pattern.lstrip("/")
+                if normalized.endswith("/"):
+                    root = normalized.rstrip("/")
+                    if candidate == root or candidate.startswith(root + "/"):
+                        return True
+                elif fnmatch.fnmatchcase(candidate, normalized):
+                    return True
+            return False
+
+        # A layout may promote evaluator metadata (for example solution.json)
+        # into the exact Kernel identity.  Keep the broad Runtime exclusions,
+        # then explicitly re-include every candidate-owned path they match.
+        reincluded = [
+            "!/" + candidate.replace(" ", "\\ ")
+            for candidate in sorted(candidate_paths)
+            if ignored(candidate)
+        ]
+        marker = "# Atrex Runtime private workspace exclusions"
+        prefix = existing.split(marker, 1)[0].rstrip()
+        desired = (
+            (prefix + "\n\n" if prefix else "")
+            + marker
+            + "\n"
+            + "\n".join((*IGNORED, *reincluded))
+            + "\n"
+        )
+        if existing == desired:
             return
-        suffix = "" if not existing or existing.endswith("\n") else "\n"
-        suffix += "\n# Atrex Runtime private workspace exclusions\n"
-        suffix += "\n".join(missing) + "\n"
-        with path.open("a", encoding="utf-8") as stream:
-            stream.write(suffix)
+        path.write_text(desired, encoding="utf-8")
 
     def _restore_branches(self) -> None:
         """Restore every Agent branch and the previously checked-out branch."""

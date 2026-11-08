@@ -149,7 +149,7 @@ def commit_paths(workspace: Path, *, normalize: bool = False) -> list[str]:
     names = set(artifact.files)
     if previous:
         names.update(previous.files)
-    names.update(n for n in (storage.POLICY, SELECTION, *artifact.layout.auxiliary_metadata)
+    names.update(n for n in (storage.POLICY, SELECTION)
                  if (workspace / n).is_file())
     return sorted(names)
 

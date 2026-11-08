@@ -49,6 +49,20 @@ runs through Agate; GPU Wiki provides optimization knowledge.
 
 ## Quick Start
 
+Choose the optimization policy and DSL policy independently:
+
+- **Production with a fixed DSL:** use `--optimization-mode production
+  --specify-dsl --framework Cuda`.
+- **Leaderboard with one Agent free to choose or mix supported DSLs:** use
+  `--optimization-mode leaderboard --no-specify-dsl`. Do not pass a framework;
+  the launch log must report `frameworks=open_dsl`.
+- **One independent campaign per supported DSL:** omit `--framework` while leaving
+  `--specify-dsl` enabled. This is multi-campaign dispatch, not open-DSL selection
+  inside one campaign.
+
+Mode alone does not select the DSL policy. In particular, passing `--framework Cuda`
+to a Leaderboard launch still asks the Agent for a CUDA candidate.
+
 **Recommended: launch through a prompt.** Open this repository in your coding agent and
 give it the operator path, target GPU, framework, and optimization budget:
 
@@ -61,6 +75,14 @@ campaign, and report the verified result and output location.
 ```
 
 Replace the example values with your workload and configured GPU environment.
+For an open-DSL Leaderboard run, replace the framework instruction with:
+
+```text
+Run one leaderboard campaign with --no-specify-dsl so the Agent chooses the
+implementation DSL from measured evidence. Use --framework-baseline always if
+the PyTorch V0 must first be translated into a self-contained GPU Kernel.
+```
+
 See the [setup guide](docs/quickstart.md) for prerequisites and problem preparation.
 
 ## Documentation

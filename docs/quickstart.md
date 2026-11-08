@@ -48,21 +48,39 @@ Exact evaluator Shapes are exposed by default through `shapes.json`. Pass
 `agent_problem.json` instead. In hidden mode, every Agent-visible Agate response is Shape-redacted;
 in exposed mode it is not. Evaluator generators and generated tensor values remain Supervisor-owned.
 
-The default `--optimization-mode leaderboard` exposes the benchmark contract and allows
-the permissive optimization policy. Select `production` explicitly for production review.
-Use a new workspace when changing optimization mode or Shape visibility.
+The default `--optimization-mode leaderboard` exposes the benchmark contract and uses
+the permissive acceptance policy. Select `production` explicitly for production review.
+Optimization mode and DSL selection are independent: Leaderboard does not automatically
+make a launch open-DSL, and Production does not by itself pin CUDA. Use a new workspace
+when changing optimization mode, DSL policy, or Shape visibility.
 
 ## Launch Light
 
-From the AKA checkout:
+From the AKA checkout, use an explicit fixed-DSL Production launch:
 
 ```bash
 aka optimize --repo-root "$PWD" -- \
   --op-dir /path/to/atrex-bench/operator \
-  --platform '<gpu_arch>' --framework Cuda --agent-cli claude \
+  --platform '<gpu_arch>' --specify-dsl --framework Cuda --agent-cli claude \
   --optimization-mode production \
   --workspace "$HOME/aka-opt" --max-iters 20
 ```
+
+For one permissive Leaderboard campaign in which the Agent chooses or mixes supported
+GPU DSLs from measured evidence:
+
+```bash
+aka optimize --repo-root "$PWD" -- \
+  --op-dir /path/to/atrex-bench/operator \
+  --platform '<gpu_arch>' --no-specify-dsl --agent-cli claude \
+  --optimization-mode leaderboard \
+  --framework-baseline always \
+  --workspace "$HOME/aka-opt-leaderboard-open-dsl" --max-iters 20
+```
+
+The startup line for the second command must contain
+`optimization_mode=leaderboard ... frameworks=open_dsl`. If it reports
+`frameworks=Cuda`, the launch is still CUDA-pinned.
 
 Replace the operator and platform with your workload and worker. `--sandbox-hardware`
 can specify a worker alias different from the logical platform. Use `--sandbox-profile prod`
@@ -84,11 +102,28 @@ Provider settings use `ATREX_CLAUDE_SESSION_SETTINGS`, `ATREX_QODER_SESSION_SETT
 `ATREX_SESSION_SETTINGS` as the generic fallback. Keep credentials in the provider's
 supported login/configuration mechanism.
 
-Specify one `--framework` for one campaign. Omitting it dispatches separate campaigns
-for the runtime-detected vendor: NVIDIA uses Triton/CuteDSL/Cuda/TileLang, AMD uses
-Triton/FlyDSL/TileLang, PPU uses Triton/Cuda/TileLang, and unknown hardware uses
-Triton/TileLang. Framework availability still depends on the worker.
-Version and token budgets apply per dispatched campaign.
+The DSL switches have three distinct meanings:
+
+| Intent | Required arguments | Result |
+| --- | --- | --- |
+| Pin one campaign to one DSL | `--specify-dsl --framework Cuda` | One campaign whose submitted candidates use CUDA |
+| Let one Agent choose or mix DSLs | `--no-specify-dsl` | One `open_dsl` campaign; any incidental `--framework` value is discarded |
+| Dispatch one campaign per supported DSL | Keep `--specify-dsl` enabled and omit `--framework` | Multiple independent campaigns |
+
+Auto-dispatch uses the runtime-detected vendor: NVIDIA launches
+Triton/CuteDSL/Cuda/TileLang, AMD launches Triton/FlyDSL/TileLang, PPU launches
+Triton/Cuda/TileLang, and unknown hardware launches Triton/TileLang. Framework
+availability still depends on the worker. Version and token budgets apply per dispatched
+campaign.
+
+`--optimization-mode` controls acceptance policy; it does not override this table.
+Thus `--optimization-mode leaderboard --framework Cuda` is still CUDA-pinned.
+Conversely, `--optimization-mode production --no-specify-dsl` is an open-DSL
+Production campaign whose final candidate must satisfy the open-DSL Production policy.
+
+`--framework-baseline auto` may retain the permissive V0 in a non-CUDA Leaderboard
+campaign. Use `--framework-baseline always` when an open-DSL Leaderboard run must first
+produce a self-contained GPU implementation; its Baseline Agent chooses the DSL.
 
 ## What happens after launch
 

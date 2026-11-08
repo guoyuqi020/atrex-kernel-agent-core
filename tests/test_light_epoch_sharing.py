@@ -2656,6 +2656,90 @@ def test_runtime_install_does_not_mutate_tracked_gitignore(tmp_path):
     ).returncode == 0
 
 
+def test_agent_git_keeps_single_file_auxiliary_metadata_private(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "kernel.py").write_text(
+        "def run(x, y):\n    return x + y\n", encoding="utf-8"
+    )
+    (workspace / "solution.json").write_text(
+        json.dumps(
+            {
+                "name": "vector_add",
+                "spec": {
+                    "languages": ["python", "triton"],
+                    "dependencies": ["torch", "triton"],
+                    "entry_point": "kernel.py::run",
+                },
+                "sources": [{"path": "kernel.py", "role": "candidate"}],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    repository = AgentGit(workspace, tmp_path / "agent.bundle")
+    repository.prepare()
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "solution.json"],
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+    )
+    assert tracked.returncode != 0
+    exclude = (workspace / ".git" / "info" / "exclude").read_text(
+        encoding="utf-8"
+    )
+    assert "solution.json" in exclude
+    assert "!/solution.json" not in exclude
+
+
+def test_agent_git_reincludes_cuda_manifest_candidate_metadata(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".atrex_file_system.json").write_text(
+        '{"name": "cuda_manifest"}\n', encoding="utf-8"
+    )
+    (workspace / "solution.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "vector_add",
+                "version": "1",
+                "source": {"type": "local", "files": ["kernel.cu"]},
+                "entry_point": {
+                    "type": "cuda",
+                    "build": {
+                        "toolchain": "torch_extension",
+                        "sources": ["kernel.cu"],
+                    },
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (workspace / "kernel.cu").write_text(
+        'extern "C" __global__ void kernel() {}\n', encoding="utf-8"
+    )
+
+    repository = AgentGit(workspace, tmp_path / "agent.bundle")
+    repository.prepare()
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "solution.json"],
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+    )
+    assert tracked.returncode == 0
+    exclude = (workspace / ".git" / "info" / "exclude").read_text(
+        encoding="utf-8"
+    )
+    assert "!/solution.json" in exclude
+
+
 @pytest.mark.parametrize("direction_id", [None, "direction_" + "2" * 32])
 def test_compact_experiment_publishes_legacy_handoff(tmp_path, direction_id):
     workspace = tmp_path / "workspace"
