@@ -32,9 +32,7 @@ def optimization_mode_directive(
             "implementations and third-party helper/kernel libraries are allowed when evidence "
             "supports them, unless a task-specific rule explicitly forbids them."
             if specify_dsl
-            else "No DSL is prescribed. Choose the implementation framework from measured evidence; "
-            "compatible mixed implementations and third-party helper/kernel libraries are allowed "
-            "unless a task-specific rule explicitly forbids them."
+            else "You may freely choose any evaluator-supported GPU implementation DSL."
         )
         return (
             "## Optimization mode: leaderboard\n\n"

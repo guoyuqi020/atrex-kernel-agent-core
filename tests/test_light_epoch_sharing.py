@@ -3858,6 +3858,110 @@ def test_candidate_preflight_reuses_supported_historical_experiment(tmp_path):
     assert selected_source == source
 
 
+def test_candidate_handoff_projects_reused_historical_experiment(
+    monkeypatch, tmp_path
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    journals = tmp_path / "scope" / "journals"
+    old = journals / "episodes" / "e00000000" / "journal.json"
+    old.parent.mkdir(parents=True)
+    initialize_journal(
+        old,
+        episode=0,
+        base_commit="a" * 40,
+        branch="old",
+        tool_modules=("experiments",),
+    )
+    experiment_id = "experiment_" + "2" * 32
+    source = b"VALUE = 2\n"
+    record_id, candidate = _passing_full_measurement(
+        MeasurementStore(tmp_path / "scope" / "measurements"),
+        source,
+        "historical-handoff",
+        {"shape_a": 5.251},
+    )
+    old_value = load_journal(old)
+    old_value.update(
+        state="pivot",
+        outcome={"summary": "Historical evidence retained."},
+        finalized_at="2026-01-01T00:00:03Z",
+    )
+    old_value["experiments"] = [{
+        "experiment_id": experiment_id,
+        "revision": 1,
+        "sequence": 1,
+        "name": "Historical full Evaluate",
+        "intent": "Validate the exact candidate.",
+        "gateway_record_ids": [record_id],
+        "interpretation": "The candidate passed the complete workload.",
+        "claim_review_quality": "supported",
+    }]
+    private_write(old, old_value)
+
+    evidence = journals / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    current_path = evidence / "journal.json"
+    initialize_journal(
+        current_path,
+        episode=1,
+        base_commit="b" * 40,
+        branch="work",
+        tool_modules=("experiments",),
+    )
+    current = load_journal(current_path)
+    monkeypatch.setattr(
+        "aka.light.workflow.journal_service.validate_report_evidence",
+        lambda *args, **kwargs: (current, {}, source),
+    )
+    monkeypatch.setattr(
+        "aka.light.workspace.sources.policy_at", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        EpisodeWorktree, "validate_candidate", lambda *_args: ("", [])
+    )
+    service = SupervisorJournalService(
+        workspace=workspace,
+        git_workspace=workspace,
+        campaign_root=journals,
+        evidence_root=evidence,
+        supervisor_git=True,
+    )
+
+    result = service._submit_report(
+        {
+            "status": "candidate_ready",
+            "handoff_reason": "direction_terminal",
+            "summary": "Reuse the still-valid historical measurement.",
+            "selected_experiment_id": experiment_id,
+        },
+        validate_candidate=lambda _source: {"status": "PASS"},
+        agent_kernel_id=candidate,
+        seal_candidate=lambda kernel_id, _source: kernel_id,
+    )
+
+    assert result["status"] == "accepted"
+    private = load_journal(current_path)
+    assert [item["experiment_id"] for item in private["experiments"]] == [
+        experiment_id
+    ]
+    projection = json.loads(
+        (workspace / ".atrex_long_horizon/journal.json").read_text()
+    )
+    assert [item["experiment_id"] for item in projection["experiments"]] == [
+        experiment_id
+    ]
+    assert validate_terminal(
+        workspace / ".atrex_long_horizon/journal.json",
+        expected_episode=1,
+        base_commit="b" * 40,
+        branch="work",
+        state="candidate_ready",
+        candidate_commit=candidate,
+        runtime_journal_loader=lambda: private,
+    ) == ""
+
+
 def test_pooled_search_seals_before_publishing(tmp_path):
     calls = []
 

@@ -90,6 +90,7 @@ ABBA does not replace the standard full Evaluate required by
                         "candidate": candidate_kernel_id or candidate_commit,
                         "baseline": baseline_kernel_id or base_commit,
                     },
+                    journal_workspace=workspace,
                 )
             result = result_from_response(response, "same_allocation_abba")
             if not result or not result.get("gateway_record_id"):

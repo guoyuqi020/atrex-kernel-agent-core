@@ -808,12 +808,14 @@ class Campaign:
     def measure_for_acceptance(self, workspace: Path, argv: list[str], *, execution_timeout: int | None = None,
                                parent=None, reference_snapshot: Path | None = None,
                                terminal_validation: bool = False,
-                               kernel_ids: dict[str, str] | None = None) -> dict:
+                               kernel_ids: dict[str, str] | None = None,
+                               journal_workspace: Path | None = None) -> dict:
         self.start_runtime()
         return self._supervisor_runtime.execute_trusted(workspace, argv, execution_timeout=execution_timeout,
                                                        parent=parent, reference_snapshot=reference_snapshot,
                                                        terminal_validation=terminal_validation,
-                                                       kernel_ids=kernel_ids)
+                                                       kernel_ids=kernel_ids,
+                                                       journal_workspace=journal_workspace)
 
     def recorded_kernel(self, kernel_id: str) -> bytes:
         self.start_runtime()

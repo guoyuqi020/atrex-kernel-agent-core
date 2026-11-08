@@ -4474,6 +4474,29 @@ class SupervisorJournalService:
             source_policy=policy_at(self.git_workspace, committed=True),
             kernel_id=agent_kernel_id,
         )
+        if status == "candidate_ready" and experiments_enabled and not any(
+            isinstance(item, Mapping)
+            and item.get("experiment_id") == selected_id
+            for item in current["experiments"]
+        ):
+            # Evidence preflight deliberately permits a fully supported visible
+            # Experiment from an earlier Episode when its passing full Evaluate
+            # still binds the exact candidate commit.  Finalized Journals and the
+            # compatibility handoff are Episode-local, however, so retain the
+            # selected immutable Experiment in this Episode before publication.
+            # This is a projection of already validated evidence, not a revision
+            # or a second claim-review submission.
+            reusable = [
+                item
+                for item in _visible_experiments(self.path, self.campaign_root)
+                if item.get("experiment_id") == selected_id
+            ]
+            if len(reusable) != 1:
+                raise RuntimeStateError(
+                    "Validated historical Experiment is no longer uniquely visible; "
+                    "the report was not accepted"
+                )
+            current["experiments"].append(deepcopy(reusable[0]))
         if handoff_reason == "cross_trajectory_share":
             if self.origin.get("cross_trajectory_sharing") is not True:
                 raise AgentRequestError(

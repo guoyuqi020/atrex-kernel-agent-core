@@ -936,6 +936,17 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         )
         self.assertFalse(conversion_required(campaign, 99, Path(".")))
 
+    def test_leaderboard_open_dsl_policy_does_not_request_framework_benchmarking(self):
+        directive = optimization_mode_directive(
+            "leaderboard", "Cuda", specify_dsl=False
+        )
+        self.assertIn(
+            "You may freely choose any evaluator-supported GPU implementation DSL.",
+            directive,
+        )
+        self.assertNotIn("measured evidence", directive)
+        self.assertNotIn("Choose the implementation framework", directive)
+
     def test_open_dsl_structure_and_workspace_policy_do_not_pin_framework(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
@@ -2427,6 +2438,131 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
                 parser.parse_args(["--kind", retired])
         with self.assertRaises(SystemExit):
             parser.parse_args(["--kind", "kernel-pareto-frontier"])
+
+    def test_trusted_execution_can_use_a_separate_episode_journal_workspace(self):
+        runtime = SupervisorRuntime.__new__(SupervisorRuntime)
+        runtime.lock = threading.RLock()
+        runtime.closed = False
+        runtime.capabilities = {}
+        runtime.journals = {}
+        runtime.config = SimpleNamespace(request_timeout=30)
+        runtime.request_lock = lambda *_args: ExitStack()
+        runtime.revoke = lambda token: runtime.capabilities.pop(token, None)
+        captured = {}
+
+        def execute(capability, route, request, **kwargs):
+            captured.update(
+                capability=capability,
+                route=route,
+                request=request,
+                kwargs=kwargs,
+            )
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        runtime.execute = execute
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            execution_workspace = root / "staged"
+            journal_workspace = root / "episode"
+            execution_workspace.mkdir()
+            journal_workspace.mkdir()
+            binding = SimpleNamespace(view=SimpleNamespace())
+            runtime.journals[journal_workspace.resolve()] = binding
+
+            response = runtime.execute_trusted(
+                execution_workspace,
+                ["--kind", "run"],
+                journal_workspace=journal_workspace,
+                kernel_ids={"candidate": "a" * 40, "baseline": "b" * 40},
+            )
+
+        self.assertEqual(response["exit_code"], 0)
+        self.assertEqual(captured["capability"].workspace, execution_workspace.resolve())
+        self.assertIs(captured["capability"].journal, binding)
+        self.assertEqual(captured["route"], "/v1/gateway/execute")
+        self.assertEqual(
+            captured["kwargs"]["trusted_kernel_ids"],
+            {"candidate": "a" * 40, "baseline": "b" * 40},
+        )
+        self.assertEqual(runtime.capabilities, {})
+
+    def test_trusted_execution_rejects_an_unregistered_journal_workspace(self):
+        runtime = SupervisorRuntime.__new__(SupervisorRuntime)
+        runtime.lock = threading.RLock()
+        runtime.closed = False
+        runtime.capabilities = {}
+        runtime.journals = {}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            execution_workspace = root / "staged"
+            journal_workspace = root / "episode"
+            execution_workspace.mkdir()
+            journal_workspace.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "not registered with Agent Git"):
+                runtime.execute_trusted(
+                    execution_workspace,
+                    ["--kind", "run"],
+                    journal_workspace=journal_workspace,
+                )
+        self.assertEqual(runtime.capabilities, {})
+
+    def test_recorded_abba_keeps_execution_and_journal_workspaces_separate(self):
+        captured = {}
+
+        def execute(workspace, _argv, **kwargs):
+            captured["execution_workspace"] = workspace
+            captured.update(kwargs)
+            raise RuntimeError("stop after observing trusted request")
+
+        verifier = RecordedABBAValidator(execute=execute, hardware="L20D")
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory).resolve()
+            subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
+            subprocess.run(
+                ["git", "config", "user.name", "AKA Test"], cwd=workspace, check=True
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "aka-test@atrex.local"],
+                cwd=workspace,
+                check=True,
+            )
+            (workspace / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "kernel.py"], cwd=workspace, check=True)
+            subprocess.run(
+                ["git", "-c", "commit.gpgSign=false", "commit", "-qm", "baseline"],
+                cwd=workspace,
+                check=True,
+            )
+            baseline = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=workspace, text=True
+            ).strip()
+            (workspace / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
+            subprocess.run(["git", "add", "kernel.py"], cwd=workspace, check=True)
+            subprocess.run(
+                ["git", "-c", "commit.gpgSign=false", "commit", "-qm", "candidate"],
+                cwd=workspace,
+                check=True,
+            )
+            candidate = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=workspace, text=True
+            ).strip()
+
+            result = verifier.verify(
+                workspace,
+                base_commit=baseline,
+                candidate_commit=candidate,
+                changed_paths=["kernel.py"],
+                candidate_kernel_id=candidate,
+                baseline_kernel_id=baseline,
+            )
+
+            self.assertEqual(result.gate, "ERROR")
+            self.assertEqual(captured["journal_workspace"], workspace)
+            self.assertNotEqual(captured["execution_workspace"], workspace)
+            self.assertEqual(
+                captured["kernel_ids"],
+                {"candidate": candidate, "baseline": baseline},
+            )
 
     def test_command_round_trips_agent_workspace_through_scratch(self):
         parser = build_parser()

@@ -1098,13 +1098,34 @@ class SupervisorRuntime:
     def execute_trusted(self, workspace: Path, argv: list[str], *, execution_timeout: int | None = None,
                         parent=None, reference_snapshot: Path | None = None,
                         terminal_validation: bool = False,
-                        kernel_ids: Mapping[str, str] | None = None) -> dict:
-        """Controller-only execution/reuse; no Session, draft publication or HTTP switch."""
-        capability = Capability(workspace.resolve(strict=True), {}, parent=parent)
+                        kernel_ids: Mapping[str, str] | None = None,
+                        journal_workspace: Path | None = None) -> dict:
+        """Controller-only execution/reuse; no Session, draft publication or HTTP switch.
+
+        ``workspace`` is the exact staged source tree executed by the request.  A
+        terminal controller request may separately name the registered Episode
+        workspace that owns Agent Git and its Journal.  Keeping those authorities
+        separate lets Runtime execute a sealed candidate snapshot while resolving
+        an ABBA baseline commit from the original Episode repository.
+        """
+        execution_workspace = workspace.resolve(strict=True)
+        journal_workspace = (
+            journal_workspace.resolve(strict=True)
+            if journal_workspace is not None
+            else None
+        )
+        capability = Capability(execution_workspace, {}, parent=parent)
         token = secrets.token_urlsafe(32)
         with self.lock:
             if self.closed:
                 raise RuntimeError("Supervisor Runtime is closed")
+            if journal_workspace is not None:
+                binding = self.journals.get(journal_workspace)
+                if binding is None or binding.view is None:
+                    raise RuntimeError(
+                        "Trusted execution Journal workspace is not registered with Agent Git"
+                    )
+                capability.journal = binding
             self.capabilities[token] = capability
         try:
             deadline = (
