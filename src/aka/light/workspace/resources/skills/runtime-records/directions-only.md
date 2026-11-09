@@ -12,6 +12,11 @@ A Direction is a consequential Kernel path or uncertainty, not Runtime/evaluator
 
 Use `update-direction` and `prioritize-direction` for mutations. Routine execution of plan steps does not require a Runtime mutation; use `action=revise` only when the claim or remaining plan changes materially. Omit `supporting_experiment_ids`; Experiment-derived genealogy is unavailable. Claim-bearing Direction requests may cite their own measurement evidence with `gateway_record_ids`, allowing the independent Review to inspect the corresponding Records. For `candidate_ready`, separately cite `gateway_record_ids` containing a passing standard full Evaluate of the exact clean HEAD. Follow [the exact Direction and report schemas](references/journal.md) and [saved result/source semantics](references/records.md). Never invent IDs or measured results.
 
+Lifecycle is `proposed --start--> in_progress`. Only `in_progress` may `complete`, `abandon`,
+`defer`, or `block`; restart `deferred` or `blocked` work with `start`. `completed` and `abandoned`
+are terminal. In this Direction-only mode, closure evidence uses `gateway_record_ids`, including for
+`abandon`; do not use `supporting_experiment_ids`.
+
 Revise a proposed or active local Direction with `action=revise`, its `direction_id`, and the complete
 revised claim and plan. Restart a deferred or blocked Direction first. Completed and abandoned
 Directions are terminal; continue them through a new derived Direction. Runtime keeps the ID,

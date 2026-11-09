@@ -54,5 +54,12 @@ def advance_direction(
         if status not in {"proposed", *PAUSED_STATUSES}:
             raise ValueError(f"Direction cannot start from status {status}")
     elif status != "in_progress":
-        raise ValueError(f"Direction cannot {action} from status {status}")
+        recovery = (
+            f"submit action=start for {direction_id} first, then retry action={action}"
+            if status in {"proposed", *PAUSED_STATUSES}
+            else "the Direction is terminal; propose a derived Direction instead"
+        )
+        raise ValueError(
+            f"Direction cannot {action} from status {status}; {recovery}"
+        )
     statuses[direction_id] = DIRECTION_STATUS[action]

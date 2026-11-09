@@ -85,7 +85,8 @@ python3 tools/sandbox.py --kind update-direction --request-file scratch/directio
 `applicability` states the workload, Shape regime, semantic case or hardware condition where the
 hypothesis should hold. `expected_benefit` states the predicted observable Kernel improvement or
 the consequential design decision that the investigation can unlock; avoid unsupported precision,
-but name the affected metric, bottleneck, or branch in the implementation strategy. `stop_conditions` is optional.
+but name the affected metric, bottleneck, or branch in the implementation strategy. `stop_conditions`
+is an optional array of non-empty strings, not one string.
 `relationship`, `derived_from_direction_ids`, and
 `derived_from_experiment_ids` may describe `refinement`, `correction`, `combination`, `alternative`,
 `reimplementation`, or `contradiction`. Reuse the existing ID for an unchanged hypothesis. Propose a
@@ -135,6 +136,10 @@ Start selected work:
   "analysis": "Highest expected impact; the first probe is bounded and reversible"
 }
 ```
+
+The lifecycle is `proposed --start--> in_progress`. Only `in_progress` may `complete`, `abandon`,
+`defer`, or `block`; restart `deferred` or `blocked` work with `start`. `completed` and `abandoned`
+are terminal and continued work requires a derived Direction.
 
 A trajectory may own multiple local active Directions. The most recently started Direction is the
 focus; queue reordering does not change it. Runtime infers an omitted Experiment `direction_id` only

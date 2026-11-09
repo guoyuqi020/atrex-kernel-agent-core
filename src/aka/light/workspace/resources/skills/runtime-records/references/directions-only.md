@@ -26,7 +26,7 @@ Write mutation requests below `scratch/`. A proposal requires:
 }
 ```
 
-`stop_conditions` is optional. Optional genealogy uses `relationship` plus
+`stop_conditions` is an optional array of non-empty strings, not one string. Optional genealogy uses `relationship` plus
 `derived_from_direction_ids`; Experiment-derived genealogy is unavailable because this mode does
 not expose Experiments. Relationship values are
 `refinement`, `correction`, `combination`, `alternative`, `reimplementation`, or
@@ -63,6 +63,10 @@ remaining plan changes materially.
 
 ## Close or preserve a Direction
 
+Lifecycle is `proposed --start--> in_progress`. Only `in_progress` may `complete`, `abandon`,
+`defer`, or `block`; restart `deferred` or `blocked` work with `start`. `completed` and `abandoned`
+are terminal and continued work requires a derived Direction.
+
 ```json
 {
   "action": "defer",
@@ -74,8 +78,10 @@ remaining plan changes materially.
 ```
 
 `complete`, `abandon`, `block`, and `defer` use the same core fields. Do not provide Experiment
-support fields. `hypothesis_status` is `unresolved`, `supported`, or `refuted`. Unresolved defer,
-block, and abandon actions require `reopen_condition`. Use `defer` for a strategic pause and `block`
+support fields; in this mode their evidence field is `gateway_record_ids`. A `supported` or `refuted`
+closure requires at least one completed Kernel-bound Gateway Record. An unresolved `abandon` may omit
+evidence and is terminal. `hypothesis_status` is `unresolved`, `supported`, or `refuted`. Unresolved
+`defer` and `block` require `reopen_condition`. Use `defer` for a strategic pause and `block`
 only for a concrete technical or external dependency that prevents progress. Continue multiple bounded
 probe/candidate/measurement cycles while useful work remains; do not hand off the first promotable
 checkpoint.

@@ -2,6 +2,8 @@
 
 Both modules are enabled. Start with `PROGRESS.md`; open only the research files needed for the next decision. Reuse matching Directions and check duplicates before proposing. Choose executable work from the Local work queue, explicitly restart paused work, and treat the Shared direction pool as discovery-only. Absorb compatible peer ideas into a local derivative citing every source ID. Genealogy does not inherit source, evidence, status, or priority.
 
+Lifecycle is explicit: `propose` creates `proposed`; call `start` to enter `in_progress`; only an `in_progress` Direction may `complete`, `abandon`, `defer`, or `block`. Restart `deferred` or `blocked` work with `start`. `completed` and `abandoned` are terminal, so continued work needs a derived Direction.
+
 Starting a Direction makes it the focus. Queue reordering does not change focus. An Experiment may omit `direction_id` only when exactly one local Direction is active; otherwise name the intended Direction explicitly. Record decisive conclusions with concrete `intent`, bounded `interpretation`, and optional Record IDs or archived references. Keep measured facts in `records/`; an unmeasured Experiment is not promotion evidence. Inspect and continue imported peer history directly through `refs/atrex/shared/<trajectory>/<epoch>/head` with normal Git commands.
 
 Close a `supported` or `refuted` Direction with matching `supporting_experiment_ids` backed by measured evidence and a `supported` Review under the Direction decision standard. An unresolved `defer`, `block`, or `abandon` may omit supporting Experiments. Follow the Handoff section for report-specific Direction and Experiment state.

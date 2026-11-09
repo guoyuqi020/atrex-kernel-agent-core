@@ -22,6 +22,9 @@ Gateway Records are measurement authority; all analysis is fallible.
 - Revise a proposed or active local Direction using its stable ID and complete replacement claim.
   Restart deferred or blocked work first. Completed and abandoned Directions are terminal; continue
   them through a derived Direction.
+- Direction lifecycle is `proposed --start--> in_progress`. Only `in_progress` may be completed,
+  abandoned, deferred, or blocked. A supported/refuted closure cites evidence using the field selected
+  by the active module contract; an unresolved abandon may close without evidence.
 - Record decisive work as an Experiment with `name`, concrete `intent`, and bounded
   `interpretation`. Records and archived references are independent optional evidence. Keep measured
   facts in Records. A note without a Record is not promotion evidence. Revise only

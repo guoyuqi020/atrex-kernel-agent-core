@@ -1848,10 +1848,10 @@ def test_episode_handoff_requires_terminal_direction_or_enabled_peer_share(tmp_p
     standalone.execute({
         "operation": "direction_update",
         "request": {
-            "action": "complete",
+            "action": "abandon",
             "direction_id": direction_id,
             "analysis": "The planned probes and candidate family are exhausted.",
-            "hypothesis_status": "supported",
+            "hypothesis_status": "unresolved",
         },
     })
     accepted = standalone.execute({
@@ -1859,7 +1859,7 @@ def test_episode_handoff_requires_terminal_direction_or_enabled_peer_share(tmp_p
         "request": {
             "status": "pivot",
             "handoff_reason": "direction_terminal",
-            "summary": "The selected Direction is complete.",
+            "summary": "The selected Direction is exhausted.",
         },
     })
     assert accepted["status"] == "accepted"
@@ -1919,17 +1919,17 @@ def test_episode_handoff_requires_terminal_direction_or_enabled_peer_share(tmp_p
 
     # A later infrastructure blocker is valid after local Direction work already reached a
     # terminal state; there is no active Direction left to close a second time.
-    completed, completed_direction, completed_journal = service_for("completed-then-blocked")
-    completed.execute({
+    terminal, terminal_direction, terminal_journal = service_for("terminal-then-blocked")
+    terminal.execute({
         "operation": "direction_update",
         "request": {
-            "action": "complete",
-            "direction_id": completed_direction,
-            "analysis": "The planned Direction work is complete.",
-            "hypothesis_status": "supported",
+            "action": "abandon",
+            "direction_id": terminal_direction,
+            "analysis": "The planned Direction has no worthwhile next step.",
+            "hypothesis_status": "unresolved",
         },
     })
-    completed_blocker = completed.execute({
+    terminal_blocker = terminal.execute({
         "operation": "episode_report",
         "request": {
             "status": "blocked",
@@ -1938,8 +1938,8 @@ def test_episode_handoff_requires_terminal_direction_or_enabled_peer_share(tmp_p
             "blocker": "The evaluator service is unavailable.",
         },
     })
-    assert completed_blocker["status"] == "accepted"
-    assert load_journal(completed_journal)["outcome"]["handoff_reason"] == "blocked"
+    assert terminal_blocker["status"] == "accepted"
+    assert load_journal(terminal_journal)["outcome"]["handoff_reason"] == "blocked"
 
 
 def test_candidate_handoff_accepts_selected_direction_closed_before_another(monkeypatch, tmp_path):
@@ -2087,6 +2087,109 @@ def test_direction_proposal_schema_requires_applicability_and_expected_benefit()
     assert "probe-led Direction" in schema["properties"]["change_scope"]["description"]
 
 
+def test_direction_schema_explains_field_types_and_mode_specific_closure_evidence():
+    proposal = journal_schema(
+        "direction_update",
+        {"action": "propose"},
+        research_records=True,
+        directions_enabled=True,
+        experiments_enabled=False,
+    )
+    assert proposal["properties"]["change_scope"]["enum"] == [
+        "incremental",
+        "major_redesign",
+    ]
+    assert proposal["properties"]["stop_conditions"]["type"] == "array"
+    assert "Optional array" in proposal["properties"]["stop_conditions"]["description"]
+
+    direction_only = journal_schema(
+        "direction_update",
+        {"action": "abandon"},
+        research_records=True,
+        directions_enabled=True,
+        experiments_enabled=False,
+    )
+    assert "gateway_record_ids" in direction_only["properties"]
+    assert "including abandon" in (
+        direction_only["properties"]["gateway_record_ids"]["description"]
+    )
+    assert "supporting_experiment_ids" not in direction_only["properties"]
+
+    with_experiments = journal_schema(
+        "direction_update",
+        {"action": "abandon"},
+        research_records=True,
+        directions_enabled=True,
+        experiments_enabled=True,
+    )
+    assert "supporting_experiment_ids" in with_experiments["properties"]
+    assert "gateway_record_ids" not in with_experiments["properties"]
+
+
+def test_direction_closure_before_start_returns_exact_recovery(tmp_path):
+    campaign = tmp_path / "scope" / "journals"
+    evidence = campaign / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    journal = evidence / "journal.json"
+    initialize_journal(
+        journal,
+        episode=1,
+        base_commit="a" * 40,
+        branch="work",
+        tool_modules=("directions",),
+    )
+    direction_id = update_direction(
+        journal,
+        campaign,
+        {
+            "action": "propose",
+            "name": "Capability probe",
+            "change_scope": "incremental",
+            "hypothesis": "The probe can resolve the implementation choice.",
+            "applicability": "The current workload.",
+            "expected_benefit": "Avoid an unproductive implementation path.",
+            "plan": ["Run one bounded probe."],
+        },
+    )["direction_id"]
+
+    with pytest.raises(ValueError) as raised:
+        update_direction(
+            journal,
+            campaign,
+            {
+                "action": "abandon",
+                "direction_id": direction_id,
+                "analysis": "The probe is no longer useful.",
+                "hypothesis_status": "unresolved",
+            },
+        )
+    message = str(raised.value)
+    assert f"submit action=start for {direction_id} first" in message
+    assert "then retry action=abandon" in message
+
+    update_direction(
+        journal,
+        campaign,
+        {
+            "action": "start",
+            "direction_id": direction_id,
+            "analysis": "Start the bounded investigation.",
+        },
+    )
+    result = update_direction(
+        journal,
+        campaign,
+        {
+            "action": "abandon",
+            "direction_id": direction_id,
+            "analysis": "The probe is no longer useful.",
+            "hypothesis_status": "unresolved",
+        },
+    )
+    assert result["status"] == "recorded"
+    assert load_journal(journal)["direction_events"][-1]["action"] == "abandon"
+
+
 def test_episode_may_sequentially_start_more_than_three_directions(tmp_path):
     campaign = tmp_path / "scope" / "journals"
     evidence = campaign / "episodes" / "e00000001"
@@ -2107,7 +2210,7 @@ def test_episode_may_sequentially_start_more_than_three_directions(tmp_path):
             {
                 "action": "propose",
                 "name": f"Direction {index}",
-                "change_scope": "local",
+                "change_scope": "incremental",
                 "hypothesis": f"Probe {index} can select a better Kernel path.",
                 "applicability": "The current workload.",
                 "expected_benefit": "Resolve one consequential implementation choice.",
@@ -2128,10 +2231,10 @@ def test_episode_may_sequentially_start_more_than_three_directions(tmp_path):
             journal,
             campaign,
             {
-                "action": "complete",
+                "action": "abandon",
                 "direction_id": direction_id,
-                "analysis": "The bounded probe resolved this choice.",
-                "hypothesis_status": "supported",
+                "analysis": "The bounded probe leaves no worthwhile next step.",
+                "hypothesis_status": "unresolved",
             },
         )
 
@@ -4319,6 +4422,117 @@ def _controller_repository(workspace: Path, text: str) -> Path:
         ["git", "commit", "-q", "-m", "baseline"], cwd=workspace, check=True
     )
     return workspace
+
+
+def test_episode_prompt_uses_reachable_agent_comparison_base(tmp_path):
+    controller = _controller_repository(
+        tmp_path / "controller", "def run():\n    return 1\n"
+    )
+    controller_base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=controller,
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    agent_workspace = tmp_path / "agent-workspace"
+    _install(agent_workspace, "def run():\n    return 1\n")
+    agent_repository = AgentGit(agent_workspace, tmp_path / "agent.bundle")
+    agent_repository.prepare()
+    agent_base = agent_repository.head()
+    assert agent_base is not None and agent_base != controller_base
+    base = SimpleNamespace(
+        workspace=controller,
+        platform="L20D",
+        arch="sm_103a",
+        notes="none",
+        research_records=False,
+        research_modules=(),
+        module_options=SimpleNamespace(goal_episodes=False),
+        specify_dsl=True,
+        framework="Cuda",
+        dsl_context="- DSL: `Cuda`",
+        plugin_directive=lambda _stage: "",
+        reference_knowledge_prompt=lambda: "",
+        tool_runtime=SimpleNamespace(pause_agent_during_requests=True),
+        acceptance_measurement_context=lambda _workspace, _source: {
+            "baseline_kernel_id": agent_base,
+            "measurement_repetitions": 1,
+        },
+    )
+
+    prompt = LongHorizonCampaign(base)._prompt(
+        episode=1,
+        version=1,
+        worktree=CandidateHandle(1, controller_base, "work", controller),
+        conversion_pending=False,
+        agent_workspace=agent_workspace,
+    )
+
+    assert f"Agent-visible comparison base: `{agent_base}`" in prompt
+    assert f"Agent-visible comparison base: `{controller_base}`" not in prompt
+    assert subprocess.run(
+        ["git", "cat-file", "-e", f"{agent_base}^{{commit}}"],
+        cwd=agent_workspace,
+        capture_output=True,
+        check=False,
+    ).returncode == 0
+
+
+def test_unchanged_candidate_ready_is_repairable_pivot_guidance(monkeypatch, tmp_path):
+    controller = _controller_repository(
+        tmp_path / "controller", "def run():\n    return 1\n"
+    )
+    base_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=controller,
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    source = from_git(controller, base_commit)
+    workspace = tmp_path / "agent"
+    workspace.mkdir()
+    journals = tmp_path / "journals"
+    evidence = journals / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    journal = evidence / "journal.json"
+    initialize_journal(
+        journal,
+        episode=1,
+        base_commit=base_commit,
+        branch="work",
+        tool_modules=(),
+    )
+    current = load_journal(journal)
+    monkeypatch.setattr(
+        "aka.light.workflow.journal_service.validate_report_evidence",
+        lambda *args, **kwargs: (current, {}, source),
+    )
+    service = SupervisorJournalService(
+        workspace=workspace,
+        git_workspace=controller,
+        campaign_root=journals,
+        evidence_root=evidence,
+        supervisor_git=True,
+    )
+
+    with pytest.raises(AgentRequestError) as raised:
+        service._submit_report(
+            {
+                "status": "candidate_ready",
+                "handoff_reason": "direction_terminal",
+                "summary": "The incumbent remains best after the tested path.",
+                "gateway_record_ids": ["gateway-" + "1" * 32],
+            },
+            validate_candidate=lambda _source: pytest.fail(
+                "unchanged source must be rejected before correctness validation"
+            ),
+            agent_kernel_id="b" * 40,
+            seal_candidate=lambda _commit, _source: pytest.fail(
+                "unchanged source must be rejected before commit sealing"
+            ),
+        )
+
+    response = raised.value.response
+    assert response["repairable"] is True
+    assert response["error"]["code"] == "candidate_matches_incumbent"
+    assert '"status":"pivot"' in response["error"]["next_action"]
+    assert load_journal(journal)["state"] == "in_progress"
 
 
 def test_pooled_trajectories_restore_one_canonical_agent_v0_and_baseline(tmp_path):

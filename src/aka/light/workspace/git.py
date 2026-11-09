@@ -59,6 +59,7 @@ TIMELINE_PROBE_MARKERS = (
     "ppu_acu_profile::timeline",
     "PPU_TIMELINE_ENABLED",
 )
+UNCHANGED_CANDIDATE = "candidate has no changes relative to incumbent"
 
 
 def accepted_candidate_ref(candidate_commit: str) -> str:
@@ -250,7 +251,7 @@ class EpisodeWorktree:
             else changed_paths(self.path, self.base_commit, resolved)
         )
         if not paths:
-            return "candidate has no changes relative to incumbent", []
+            return UNCHANGED_CANDIDATE, []
         if paths != ["kernel.py"]:
             return "candidate commit may change only kernel.py", paths
         kernel_text = git_blob(self.path, resolved, "kernel.py").decode("utf-8", errors="replace")

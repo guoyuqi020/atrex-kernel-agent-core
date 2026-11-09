@@ -449,7 +449,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("{{HANDOFF_CONTRACT}}", episode)
         self.assertIn("{{RUNTIME_WAIT_POLICY}}", episode)
         self.assertIn("skills/runtime-records/SKILL.md", episode)
-        self.assertIn("Supervisor comparison base: `{{BASE_COMMIT}}`", episode)
+        self.assertIn("Agent-visible comparison base: `{{BASE_COMMIT}}`", episode)
         self.assertIn("measurable candidate identity: clean Git HEAD", episode)
         self.assertNotIn("Promoted campaign version", episode)
         self.assertIn("Hardware: `{{ARCH}}`", episode)
@@ -461,6 +461,8 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("Repeat `probe → candidate → measurement → revert/keep` cycles", episode)
         self.assertNotIn("at most one local Direction `in_progress`", episode)
         self.assertIn("Submit `episode-report` only when", episode)
+        self.assertIn("Use `candidate_ready` only for a changed candidate", episode)
+        self.assertIn("submit `pivot`; never add a nominal edit", episode)
         self.assertIn("`cross_trajectory_share` is available only", episode)
         self.assertNotIn("high-upside Direction", episode)
         self.assertNotIn("selected Direction or optimization path", episode)
@@ -487,6 +489,15 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             "supporting_experiment_ids",
             (prompt_dir / "episode_research.md").read_text(encoding="utf-8"),
         )
+        directions = (prompt_dir / "episode_directions.md").read_text(
+            encoding="utf-8"
+        )
+        research = (prompt_dir / "episode_research.md").read_text(
+            encoding="utf-8"
+        )
+        for fragment in (directions, research):
+            self.assertIn("only an `in_progress` Direction may", fragment)
+        self.assertIn("closure evidence uses `gateway_record_ids`", directions)
 
         baseline = (prompt_dir / "framework_baseline.md").read_text(
             encoding="utf-8"

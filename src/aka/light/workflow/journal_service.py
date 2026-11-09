@@ -4474,6 +4474,33 @@ class SupervisorJournalService:
             source_policy=policy_at(self.git_workspace, committed=True),
             kernel_id=agent_kernel_id,
         )
+        if (
+            status == "candidate_ready"
+            and kernel_source is not None
+            and (self.git_workspace / ".git").exists()
+        ):
+            # A no-change outcome is scientifically valid, but it is a pivot,
+            # not a new candidate.  Reject it before correctness GPU work or
+            # commit sealing, and keep the Episode open so the Agent can submit
+            # the already-supported no-candidate terminal report.
+            from aka.light.workspace.sources import from_git
+
+            incumbent_source = from_git(
+                self.git_workspace, current["base_commit"]
+            )
+            if kernel_source == incumbent_source:
+                raise AgentRequestError(
+                    "candidate_ready source is identical to the incumbent comparison base.",
+                    code="candidate_matches_incumbent",
+                    next_action=(
+                        "Do not make a nominal source edit to manufacture a difference. If the "
+                        "tested optimization path is complete or exhausted and the incumbent "
+                        "remains best, close any local active Directions and submit "
+                        "{\"status\":\"pivot\",\"handoff_reason\":\"direction_terminal\","
+                        "\"summary\":\"<evidence-backed conclusion>\"}. A pivot nominates no "
+                        "candidate and needs no selected_experiment_id or gateway_record_ids."
+                    ),
+                )
         if status == "candidate_ready" and experiments_enabled and not any(
             isinstance(item, Mapping)
             and item.get("experiment_id") == selected_id
@@ -4696,6 +4723,19 @@ class SupervisorJournalService:
                 self.git_workspace,
             ).validate_candidate(candidate_commit)
             if violation:
+                from aka.light.workspace.git import UNCHANGED_CANDIDATE
+
+                if violation == UNCHANGED_CANDIDATE:
+                    raise AgentRequestError(
+                        "candidate_ready source is identical to the incumbent comparison base.",
+                        code="candidate_matches_incumbent",
+                        next_action=(
+                            "Do not report an unchanged source as candidate_ready or make a "
+                            "nominal edit. Submit status=pivot with "
+                            "handoff_reason=direction_terminal after closing local active "
+                            "Directions; omit candidate evidence fields."
+                        ),
+                    )
                 raise RuntimeStateError(
                     "Supervisor rejected the imported Agent Kernel commit: " + violation
                 )

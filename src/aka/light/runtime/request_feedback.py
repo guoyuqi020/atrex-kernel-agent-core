@@ -178,6 +178,10 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
             properties["plan"]["description"] = (
                 "Bounded probes, edits, and measurements that discriminate the hypothesis."
             )
+            properties["stop_conditions"]["description"] = (
+                "Optional array of non-empty conditions that make further work on this "
+                "Direction no longer worthwhile."
+            )
             if action == "propose":
                 properties.update(relationship={"enum": list(RELATIONSHIPS)},
                                   derived_from_direction_ids=_ids("direction_", maximum=32),
@@ -211,9 +215,18 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
                     properties["supporting_experiment_ids"] = _ids(
                         "experiment_", minimum=1, maximum=32
                     )
+                    properties["supporting_experiment_ids"]["description"] = (
+                        "Experiment evidence for this closure. Required for a supported or "
+                        "refuted terminal conclusion; omit for an unresolved closure."
+                    )
                 else:
                     properties["gateway_record_ids"] = _ids(
                         "gateway-", minimum=0, maximum=64
+                    )
+                    properties["gateway_record_ids"]["description"] = (
+                        "Gateway Record evidence for this Direction-only closure, including "
+                        "abandon. A supported or refuted conclusion requires at least one "
+                        "completed Kernel-bound Record; unresolved abandon may omit evidence."
                     )
         return _object(properties, fields)
     return None

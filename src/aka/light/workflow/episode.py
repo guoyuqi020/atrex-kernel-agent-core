@@ -571,15 +571,23 @@ class LongHorizonCampaign:
         from aka.light.acceptance.recorded_verifier import RecordedABBAValidator
         acceptance_request = ""
         selected_verifier = verifier or self.verifier
-        if isinstance(selected_verifier, RecordedABBAValidator):
-            if agent_workspace is None:
-                raise RuntimeError("ABBA prompt requires a registered Agent workspace")
-            context = self.base_campaign.acceptance_measurement_context(
+        comparison_base_commit = worktree.base_commit
+        measurement_context = None
+        if agent_workspace is not None:
+            # Controller and Agent repositories deliberately have different
+            # histories.  Only the Agent-visible commit is useful in the
+            # Prompt: it can be inspected, diffed, checked out, and supplied to
+            # exploratory ABBA from the repository mounted in the Session.
+            measurement_context = self.base_campaign.acceptance_measurement_context(
                 agent_workspace,
                 source_from_git(worktree.path, worktree.base_commit),
             )
+            comparison_base_commit = measurement_context["baseline_kernel_id"]
+        if isinstance(selected_verifier, RecordedABBAValidator):
+            if measurement_context is None:
+                raise RuntimeError("ABBA prompt requires a registered Agent workspace")
             acceptance_request = selected_verifier.agent_instructions(
-                measurement_repetitions=context["measurement_repetitions"]
+                measurement_repetitions=measurement_context["measurement_repetitions"]
             )
         research_records = self.base_campaign.research_records
         research_modules = set(self.base_campaign.research_modules)
@@ -657,7 +665,7 @@ class LongHorizonCampaign:
                     if episode_mode == "goal" else ""
                 ),
                 "VERSION": version,
-                "BASE_COMMIT": worktree.base_commit,
+                "BASE_COMMIT": comparison_base_commit,
                 "WORKSPACE": agent_workspace or worktree.path,
                 "ACCEPTANCE_REQUEST": acceptance_request,
                 "ARCH": self.base_campaign.arch or "<authoritative runtime architecture>",
