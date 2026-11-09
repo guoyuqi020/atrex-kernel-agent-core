@@ -169,11 +169,17 @@ def compact_receipt(agent_result: dict) -> dict:
             summary[f"{stream}_bytes"] = preview["bytes"]
             summary[f"{stream}_preview"] = preview["preview"]
             summary[f"{stream}_truncated"] = preview["truncated"]
+            if "record_path" in receipt:
+                receipt[f"{stream}_location"] = {
+                    "path": receipt["record_path"],
+                    "field": f"result.{stream}",
+                }
     receipt["result"] = summary
     receipt["result_fields"] = sorted(str(key) for key in result)[:128]
     receipt["details"] = (
-        f"Full result: {receipt['record_path']}. Use tools/record.py to read only the fields "
-        "or Shape needed for the next decision."
+        f"Full result: {receipt['record_path']}. Read or query that JSON file directly and "
+        "select only the fields or Shape needed for the next decision. Complete stream locations "
+        "are listed explicitly in stdout_location and stderr_location when present."
         if "record_path" in receipt
         else "No Agent-visible Gateway Record path is available for this response."
     )

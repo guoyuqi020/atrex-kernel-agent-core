@@ -3,21 +3,21 @@
 Runtime projects every visible result as `records/<gateway_record_id>.json`. Read and search those
 flat files normally. Exact Kernel source is ordinary reachable Git history.
 
-Runtime calls print a compact receipt rather than the complete result. Query the full saved Record
-locally without another GPU request:
+Runtime measurement calls print a compact receipt rather than the complete result. Env is the
+exception: it prints its redacted Agate response directly and creates no Record. Query a full saved
+measurement Record locally without another GPU request. Use ordinary read/search tools or a short
+local JSON query; for example:
 
 ```bash
-python3 tools/record.py "$GATEWAY_RECORD_ID" --summary
-python3 tools/record.py "$GATEWAY_RECORD_ID" --field result.correct
-python3 tools/record.py "$GATEWAY_RECORD_ID" --field result.latency_us_geomean
-python3 tools/record.py "$GATEWAY_RECORD_ID" --shape-id 7
-python3 tools/record.py "$GATEWAY_RECORD_ID" --keys result
-python3 tools/record.py "$GATEWAY_RECORD_ID" --text-field result.stdout --offset 0 --max-bytes 4096
+RECORD="records/${GATEWAY_RECORD_ID}.json"
+python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["correct"])' "$RECORD"
+python3 -c 'import json,sys; print(sorted(json.load(open(sys.argv[1]))["result"]))' "$RECORD"
 ```
 
-Ordinary field output is bounded. Long text must be read in bounded ranges. Do not use `cat`, a
-full `json.dumps`, or an equivalent command that copies a complete Record, per-Shape table, source,
-stdout, or stderr into the Session.
+Read large text with bounded line or byte ranges. Do not use `cat`, a full `json.dumps`, or an
+equivalent command that copies a complete Record, per-Shape table, source, stdout, or stderr into
+the Session. A receipt with stream output includes `stdout_location` and/or `stderr_location`, whose
+`path` names this Record and whose `field` is `result.stdout` or `result.stderr`.
 
 | ID | Meaning | Use |
 | --- | --- | --- |
@@ -33,7 +33,8 @@ Each projected file contains the same public result returned by a new measuremen
 ABBA uses `operation: evaluate` with `result.comparison`, `candidate_kernel_commit_id`, and
 `baseline_kernel_commit_id`.
 Other operation names are `profile`, `dev`, `check`, and `disassemble`.
-Parse the Runtime command's whole stdout as one compact receipt; do not look for legacy executor markers.
+Parse a measurement command's whole stdout as one compact receipt. Env stdout is the direct
+redacted Agate capability response and is not a receipt.
 Dev preserves probe text in `result.stdout`/`result.stderr` and its process `exit_code`.
 Its Kernel is the workspace snapshot, not proof the probe measured it.
 

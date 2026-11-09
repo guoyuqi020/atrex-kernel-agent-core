@@ -20,21 +20,25 @@ establish correctness before the Supervisor performs independent final validatio
    diagnostic unless the report contract explicitly says otherwise.
 4. Run the request in the foreground and wait for the same invocation. Do not add shell timeouts,
    background it, edit the candidate while it runs, or submit parallel duplicates.
-5. Inspect the compact receipt, then use `python3 tools/record.py <gateway_record_id>` to read only
-   the saved fields or Shape needed for the decision. Do not dump a complete Record or long stream
-   into the Session. A completed job can still contain a correctness failure.
+5. For a measurement, inspect the compact receipt, then read or query
+   `records/<gateway_record_id>.json` directly for
+   only the saved fields or Shape needed for the decision. Do not dump a complete Record or long
+   stream into the Session. `stdout_location` and `stderr_location` identify the exact Record field
+   for each complete stream when present. A completed job can still contain a correctness failure.
 
 Dev and Command are fresh, stateless remote jobs. Use Dev only for a self-contained single-file
 probe that reads no candidate or other workspace file, and declare that probe explicitly. Use
 Command whenever custom code reads the candidate, helpers, prior artifacts, or other workspace
 state. Neither creates a persistent GPU workspace. Typed operations select managed evaluator inputs
 automatically, so use explicit command overrides only when the reference documents them.
+Env is read-only discovery rather than a measurement. It prints the complete redacted Agate
+capability response directly and does not create a Gateway Record.
 
 ## Results and failures
 
 - Gateway Records are immutable measurement evidence. Reuse exact matches by reading their
-  `records/<gateway_record_id>.json` projections through `tools/record.py`. A Git commit without a
-  passing Record is not performance or correctness evidence.
+  `records/<gateway_record_id>.json` projections directly. A Git commit without a passing Record is
+  not performance or correctness evidence.
 - Follow `error.next_action` and preserved upstream diagnostics. Candidate compile, import,
   correctness, or source-policy errors require repair; they are not infrastructure failures.
 - Runtime owns infrastructure retries. Do not build another retry loop. Retry an unchanged request

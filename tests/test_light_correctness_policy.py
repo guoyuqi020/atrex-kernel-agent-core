@@ -339,9 +339,70 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertTrue(receipt["result"]["stdout_truncated"])
         self.assertIn("begin", receipt["result"]["stdout_preview"])
         self.assertIn("end", receipt["result"]["stdout_preview"])
+        self.assertEqual(receipt["stdout_location"], {
+            "path": f"records/{record_id}.json",
+            "field": "result.stdout",
+        })
+        self.assertEqual(receipt["stderr_location"], {
+            "path": f"records/{record_id}.json",
+            "field": "result.stderr",
+        })
         self.assertIn("latency_us_by_shape", receipt["result_fields"])
+        self.assertIn("Read or query that JSON file directly", receipt["details"])
+        self.assertNotIn("tools/record.py", receipt["details"])
         self.assertEqual(agent_result["result"]["stdout"], stdout)
         self.assertEqual(len(agent_result["result"]["latency_us_by_shape"]), 100)
+
+    def test_env_gateway_response_preserves_redacted_executor_stdout(self):
+        from aka.light.runtime.server import agent_gateway_response
+
+        stdout = (
+            '[sandbox] ENV_JSON={"gpu":"L20N","compute_capability":"8.9",'
+            '"frameworks":{"cuda":{"available":true}}}\n'
+        )
+        response, execution_exit_code = agent_gateway_response({
+            "exit_code": 0,
+            "stdout": stdout,
+            "stderr": "",
+            "agent_result": {
+                "operation": "env",
+                "status": "completed",
+                "result": {
+                    "gpu": "L20N",
+                    "compute_capability": "8.9",
+                    "frameworks": {"cuda": {"available": True}},
+                },
+            },
+        })
+
+        self.assertEqual(response, {
+            "exit_code": 0,
+            "stdout": stdout,
+            "stderr": "",
+        })
+        self.assertIsNone(execution_exit_code)
+
+    def test_measurement_gateway_response_remains_compact(self):
+        from aka.light.runtime.server import agent_gateway_response
+
+        record_id = "gateway-" + "2" * 32
+        response, execution_exit_code = agent_gateway_response({
+            "exit_code": 0,
+            "stdout": "private compatibility stream\n",
+            "stderr": "",
+            "agent_result": {
+                "operation": "evaluate",
+                "status": "completed",
+                "gateway_record_id": record_id,
+                "kernel_commit_id": "a" * 40,
+                "result": {"correct": True, "latency_us_geomean": 4.0},
+            },
+        })
+
+        self.assertEqual(execution_exit_code, 0)
+        self.assertEqual(response["record_path"], f"records/{record_id}.json")
+        self.assertNotIn("stdout", response)
+        self.assertEqual(response["result"]["latency_us_geomean"], 4.0)
 
     def test_new_abba_result_names_candidate_and_baseline_symmetrically(self):
         result = canonical_result(

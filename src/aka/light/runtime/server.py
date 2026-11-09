@@ -228,6 +228,25 @@ def managed_gateway_argv(
     return [*argv, "--env-gpu", hardware.strip(), "--env-capabilities"]
 
 
+def agent_gateway_response(result: dict) -> tuple[dict, int | None]:
+    """Select the HTTP response contract for one completed Gateway call.
+
+    Measurements have a durable Gateway Record, so their terminal response is
+    a compact receipt plus the executor exit classification header. Env is a
+    read-only Agate capability query with no Gateway Record; return its already
+    redacted executor streams unchanged so capability values are not discarded
+    by the measurement-summary whitelist.
+    """
+    agent_result = result.get("agent_result")
+    if not isinstance(agent_result, dict):
+        return result, None
+    if agent_result.get("operation") == "env":
+        response = dict(result)
+        response.pop("agent_result", None)
+        return response, None
+    return compact_receipt(agent_result), result["exit_code"]
+
+
 def materialized_baseline_argv(argv: list[str], baseline_path: str) -> list[str]:
     """Replace the Agent's commit selector with Runtime's private source path."""
     result: list[str] = []
@@ -561,11 +580,7 @@ class _Handler(BaseHTTPRequestHandler):
                         result = owner.execute(capability, self.path, request)
             execution_exit_code = None
             if self.path == "/v1/gateway/execute" and isinstance(result.get("agent_result"), dict):
-                # Never expose the private compatibility streams alongside the
-                # canonical result. The full Agent-visible result is projected
-                # under records/; terminal feedback is a bounded receipt.
-                execution_exit_code = result["exit_code"]
-                result = compact_receipt(result["agent_result"])
+                result, execution_exit_code = agent_gateway_response(result)
             self.reply(200, result, execution_exit_code=execution_exit_code)
         except TaskRunning as error:
             self.reply(200, task_conflict_response(error))

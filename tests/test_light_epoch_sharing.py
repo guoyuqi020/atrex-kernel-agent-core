@@ -2848,12 +2848,14 @@ def test_runtime_install_does_not_mutate_tracked_gitignore(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "kernel.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (workspace / "tools").mkdir()
+    (workspace / "tools/record.py").write_text("# retired wrapper\n", encoding="utf-8")
     from aka.light.workspace.agent_git import AgentGit, initialize_gitignore
     from aka.light.workspace.assets import link_runtime
 
     initialize_gitignore(workspace)
     link_runtime(workspace, research_records=False, research_modules=())
-    assert (workspace / "tools/record.py").is_file()
+    assert not (workspace / "tools/record.py").exists()
     ignores = (workspace / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "/.atrex_long_horizon/" in ignores
     assert "/verification_artifacts/.atrex_long_horizon_verify/" in ignores
@@ -2873,7 +2875,7 @@ def test_runtime_install_does_not_mutate_tracked_gitignore(tmp_path):
     ).returncode == 0
 
 
-def test_local_record_reader_returns_only_requested_bounded_fields(tmp_path):
+def test_projected_record_is_directly_readable_without_wrapper(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     from aka.light.workspace.assets import link_runtime
@@ -2898,61 +2900,11 @@ def test_local_record_reader_returns_only_requested_bounded_fields(tmp_path):
         }),
         encoding="utf-8",
     )
-    tool = workspace / "tools/record.py"
-
-    summary = subprocess.run(
-        ["python3", tool, record_id, "--summary"],
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    summary_result = json.loads(summary.stdout)
-    assert summary_result["result"]["stdout_bytes"] == 70000
-    assert "stdout" not in summary_result["result"]
-
-    field = subprocess.run(
-        ["python3", tool, record_id, "--field", "result.correct"],
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert json.loads(field.stdout) is True
-
-    shape = subprocess.run(
-        ["python3", tool, record_id, "--shape-id", "7"],
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert json.loads(shape.stdout)["latency_us"] == {"candidate": 5.25}
-
-    text = subprocess.run(
-        [
-            "python3", tool, record_id, "--text-field", "result.stdout",
-            "--offset", "100", "--max-bytes", "128",
-        ],
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    text_result = json.loads(text.stdout)
-    assert text_result["offset"] == 100
-    assert text_result["next_offset"] == 228
-    assert text_result["total_bytes"] == 70000
-    assert len(text_result["text"]) == 128
-
-    oversized = subprocess.run(
-        ["python3", tool, record_id, "--field", "result.stdout"],
-        cwd=workspace,
-        capture_output=True,
-        text=True,
-    )
-    assert oversized.returncode == 2
-    assert "bounded --text-field" in json.loads(oversized.stderr)["error"]
+    assert not (workspace / "tools/record.py").exists()
+    record = json.loads((records / f"{record_id}.json").read_text(encoding="utf-8"))
+    assert record["result"]["correct"] is True
+    assert record["result"]["latency_us_by_shape"]["7"] == 5.25
+    assert record["result"]["stdout"][100:228] == "x" * 128
 
 
 def test_agent_git_keeps_single_file_auxiliary_metadata_private(tmp_path):

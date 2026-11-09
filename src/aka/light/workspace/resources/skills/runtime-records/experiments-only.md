@@ -7,8 +7,8 @@ allowed-tools: "Bash Read"
 # Runtime Experiment records
 
 Experiment recording is enabled; Direction commands are disabled. Start with root `PROGRESS.md` and `experiments/index.json`, then open only relevant `experiments/<experiment_id>/experiment.json` and `records/*.json`. These Runtime projections are read-only.
-Query Gateway evidence with `python3 tools/record.py <gateway_record_id>` and narrow selectors; do
-not print complete Records or long streams into the Session.
+Read or query relevant `records/<gateway_record_id>.json` files directly, selecting only needed
+fields or bounded text; do not print complete Records or long streams into the Session.
 
 Record each decisive measurement or research conclusion with `name`, concrete `intent`, and bounded `interpretation`; omit `direction_id`. `gateway_record_ids` and archived `references` are independent optional lists. Keep execution facts in Records and source facts in Git rather than copying them into analysis. Continue bounded edit/measurement/revert-or-keep cycles while useful work remains.
 

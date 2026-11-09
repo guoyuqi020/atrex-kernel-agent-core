@@ -158,7 +158,18 @@ def link_runtime(workspace: Path, atrex_bench_root: Path | None = None, *, is_pp
     for name in ("tools", "skills", "reference", "reference-projects", "gpu-wiki"):
         _remove_legacy_link(workspace / name)
     publish(workspace, "tools/sandbox.py", resource("tools/sandbox.py").read_bytes())
-    publish(workspace, "tools/record.py", resource("tools/record.py").read_bytes())
+    # Gateway Records are ordinary projected JSON files.  Remove the retired
+    # wrapper when upgrading an existing workspace so there is only one access
+    # contract: normal read-only file operations under records/.
+    with open_private_directory(workspace / "tools") as tools:
+        try:
+            os.unlink("record.py", dir_fd=tools)
+        except FileNotFoundError:
+            pass
+        except IsADirectoryError as error:
+            raise ValueError(
+                "Reserved runtime tool path tools/record.py must not be a directory"
+            ) from error
     publish(workspace, "tools/plugin.py", resource("tools/plugin.py").read_bytes())
     if plugin_registry is None:
         from aka.light.runtime.catalog import PluginRegistry

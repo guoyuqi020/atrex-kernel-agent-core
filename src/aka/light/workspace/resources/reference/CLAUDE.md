@@ -46,12 +46,16 @@ operations and request schemas. Do not infer a different workflow from unrelated
 - Keep Runtime calls in the foreground and wait for the same invocation. Do not add shell timeouts,
   background a call, or edit the candidate while it is pending. The Session Prompt states whether
   waiting pauses Agent active time. A lost client does not prove that no job ran.
-- Runtime returns a compact receipt and projects the complete immutable measurement as
-  `records/<gateway_record_id>.json`. Use `python3 tools/record.py <gateway_record_id>` and its
-  `--field`, `--shape-id`, `--keys`, or bounded `--text-field` selectors. Read only the fields needed
-  for the next decision; do not print an entire Record, stdout, table, or source into the Session.
+- Runtime measurement calls return a compact receipt and project the complete immutable measurement as
+  `records/<gateway_record_id>.json`. Read or query that JSON file directly with ordinary file
+  operations. Select only the fields, Shape, or bounded text needed for the next decision; do not
+  print an entire Record, stdout, table, or source into the Session.
+  When stdout or stderr exists, the receipt's `stdout_location` or `stderr_location` gives both the
+  Record path and exact JSON field containing the complete stream.
   Completion does not imply correctness. Reuse matching Records, follow `error.next_action`, and
   do not add independent retry loops or resubmit an unknown outcome.
+- Env is not a measurement and creates no Gateway Record. It prints the complete redacted Agate
+  capability response directly to stdout; inspect that response in place.
 - Root `PROGRESS.md` is a compact read-only index of the incumbent, measured frontier, and enabled
   research state that Runtime regenerates after accepted state changes. Direction and Experiment files contain fallible hypotheses and interpretations;
   Gateway Records remain measurement authority. Historical Conversation files are evidence, not

@@ -44,7 +44,6 @@ for name in ("__init__", "analyze_reports", "disasm", "envelope", "extract_stall
 
 OWNED = {
     "tools/sandbox.py": "runtime/client/sandbox.py",
-    "tools/record.py": "runtime/client/record.py",
     "tools/plugin.py": "runtime/client/plugin.py",
     "tools/session_shell_guard.sh": "agent/session_shell_guard.sh",
     "tools/memory_manager.py": "workflow/memory.py",
