@@ -1,14 +1,13 @@
 """Additional GPU operations, separate from measurement storage and acceptance.
 
 The gateway argument is the running executor module's public API. Passing that
-instance keeps job tracking/cancellation shared with the CLI entry point, which
-may be loaded as __main__ rather than supervisor.gateway.
+instance keeps job tracking and SDK cancellation shared with the module entry
+point, which may be loaded as __main__ rather than supervisor.gateway.
 """
 from __future__ import annotations
 
 import json
 import subprocess
-import tempfile
 from pathlib import Path
 from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT
 from aka.light.evaluation.policy import validate_abba_repeats
@@ -35,28 +34,12 @@ def diagnostic(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
     if args.dry_run:
         print(json.dumps({"kind": args.kind, "candidate_bytes": len(request["candidate"].encode())}))
         return 0
-    executable = gateway.find_agate()
-    from aka.light.evaluation.source_transport import DIAGNOSTIC, run as run_tree
-    if DIAGNOSTIC in request:
-        process = run_tree(gateway, args, request, args.kind, queue_wait_grace)
-    elif args.url and executable is None:
-        process = gateway.run_direct_job(
-            url=args.url, kind="compile" if args.kind == "check" else "disassemble",
-            payload=request, timeout=args.timeout, queue_wait_grace=queue_wait_grace,
-        )
-    else:
-        if executable is None:
-            raise ValueError("Install the Agate client on the Supervisor or configure --sandbox-url")
-        with tempfile.TemporaryDirectory(prefix="aka-diagnostic-") as directory:
-            command = gateway.build_typed_agate_command(executable, args, workspace, args.kind, request,
-                                                   queue_wait_grace, request_sidecar_dir=Path(directory))
-            process = gateway.run_agate_with_cancel_retry(
-                agate=command, executable=executable, url=args.url,
-                gateway_profile=args.gateway_profile,
-                command_timeout=gateway.gateway_job_timeout(args.timeout, queue_wait_grace),
-                wait_budget=args.timeout + queue_wait_grace,
-                request_identity={"kind": args.kind, "request": request},
-            )
+    # Inline and source-tree diagnostics share the same typed SDK lifecycle.
+    # Do not rediscover or invoke the ``agate`` executable: doing so would give
+    # one source layout different serialization, retry and authentication
+    # semantics from the others.
+    from aka.light.evaluation.source_transport import run as run_tree
+    process = run_tree(gateway, args, request, args.kind, queue_wait_grace)
     source_error = candidate_source_rejection(process)
     if source_error is not None:
         print(SOURCE_ERROR_PREFIX + json.dumps(source_error))

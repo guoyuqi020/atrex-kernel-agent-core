@@ -6,7 +6,6 @@ reservation and idempotency key on recovery.
 """
 from __future__ import annotations
 import hashlib
-import http.client
 import io
 import json
 import os
@@ -30,14 +29,6 @@ PROFILES = {
 TERMINAL_JOB_STATES = {"succeeded", "failed", "cancelled", "canceled"}
 SHORT_GET_TIMEOUT_SECONDS = 30
 SHORT_POLL_INTERVAL_SECONDS = 2.0
-
-
-class SourceUploadError(RuntimeError):
-    """Archive preparation failed before the GPU job submission began."""
-
-    def __init__(self, status=None):
-        self.status = status
-        super().__init__("Source archive upload failed" + (f" (HTTP {status})" if status else " (transport)"))
 
 
 def attach(request, workspace, *, side="candidate", source=None):
@@ -125,29 +116,6 @@ def uploaded_request(request, wire_key, *, json_call, upload, kind="eval"):
     if path is not None:
         private_write(path, {"logical": logical, "wire": wire})
     return wire
-
-
-def upload_bytes(url, data):
-    # Match Agate's presigned PUT contract. urllib adds an unsigned Content-Type
-    # to byte bodies, which makes OSS reject the signature. Never send Gateway
-    # authorization or follow redirects with the storage credential.
-    parts = urllib.parse.urlsplit(url)
-    if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
-        raise ValueError("Invalid source archive upload URL")
-    connection = (http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection)(
-        parts.hostname, parts.port, timeout=120)
-    try:
-        target = parts.path + ("?" + parts.query if parts.query else "")
-        connection.request("PUT", target, body=data, headers={"Content-Length": str(len(data))})
-        response = connection.getresponse()
-        response.read(4096)
-        if not 200 <= response.status < 300:
-            raise SourceUploadError(response.status)
-    except (OSError, http.client.HTTPException):
-        # Exception strings may include the temporary credential-bearing URL.
-        raise SourceUploadError() from None
-    finally:
-        connection.close()
 
 
 def _agate_configuration(environment=None):

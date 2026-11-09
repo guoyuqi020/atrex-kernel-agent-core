@@ -2009,87 +2009,23 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertTrue(all(1 <= item[2] <= 30 for item in client.polls))
         self.assertEqual(sleep.call_count, 2)
 
-    def test_direct_gateway_short_polls_same_job_until_valid_terminal(self):
-        from aka.light.evaluation import gateway
+    def test_light_has_no_agate_cli_or_raw_gateway_transport(self):
+        from aka.light.evaluation import agate_native, gateway
 
-        calls = []
-
-        def gateway_json(_url, method, path, _payload, timeout):
-            calls.append((method, path, timeout))
-            if method == "POST":
-                return {"job_id": "ev_direct", "status": "queued"}
-            get_count = sum(1 for item in calls if item[0] == "GET")
-            if get_count == 1:
-                raise TimeoutError("GET headers timed out")
-            if get_count == 2:
-                return {"job_id": "ev_direct", "status": "running"}
-            return {"job_id": "ev_direct", "status": "succeeded", "result": {}}
-
-        with (
-            patch("aka.light.evaluation.gateway._gateway_json", side_effect=gateway_json),
-            patch("aka.light.evaluation.gateway.time.sleep") as sleep,
-            patch.dict(os.environ, {}, clear=True),
+        for legacy_name in (
+            "find_agate",
+            "build_typed_agate_command",
+            "run_agate_with_cancel_retry",
+            "run_direct_job",
+            "_run_direct_gateway",
+            "_gateway_json",
+            "_resume_interrupted_agate_wait",
         ):
-            process = gateway.run_direct_job(
-                url="https://gateway.invalid",
-                kind="dev",
-                payload={"spec": {"target_hardware": ["L20D"]}},
-                timeout=60,
-                queue_wait_grace=0,
-            )
+            with self.subTest(legacy_name=legacy_name):
+                self.assertFalse(hasattr(gateway, legacy_name))
+        self.assertFalse(hasattr(agate_native, "cli_arguments"))
+        self.assertTrue(hasattr(gateway, "_run_sdk_dev"))
 
-        self.assertEqual(process.returncode, 0)
-        self.assertEqual(sum(1 for item in calls if item[0] == "POST"), 1)
-        get_calls = [item for item in calls if item[0] == "GET"]
-        self.assertEqual(len(get_calls), 3)
-        self.assertTrue(all(item[1] == "/v1/jobs/ev_direct" for item in get_calls))
-        self.assertTrue(all(item[2] <= 30 for item in get_calls))
-        self.assertEqual(sleep.call_count, 2)
-
-    def test_cli_collection_short_polls_without_server_side_wait(self):
-        from aka.light.evaluation import gateway
-
-        initial = subprocess.CompletedProcess(
-            ["agate", "eval"], 0,
-            json.dumps({"job_id": "ev_cli", "status": "queued"}), "",
-        )
-        running = subprocess.CompletedProcess(
-            ["agate", "get"], 0,
-            json.dumps({"job_id": "ev_cli", "status": "running"}), "",
-        )
-        succeeded = subprocess.CompletedProcess(
-            ["agate", "get"], 0,
-            json.dumps({"job_id": "ev_cli", "status": "succeeded", "result": {}}), "",
-        )
-        with (
-            patch(
-                "aka.light.evaluation.gateway.subprocess.run",
-                side_effect=[
-                    subprocess.TimeoutExpired(["agate", "get"], 30),
-                    running,
-                    succeeded,
-                ],
-            ) as run,
-            patch("aka.light.evaluation.gateway.time.sleep") as sleep,
-        ):
-            process = gateway._resume_interrupted_agate_wait(
-                executable="agate",
-                url="https://gateway.invalid",
-                gateway_profile=None,
-                command_timeout=60,
-                wait_budget=120,
-                elapsed=0,
-                initial=initial,
-            )
-
-        self.assertEqual(json.loads(process.stdout)["status"], "succeeded")
-        self.assertEqual(run.call_count, 3)
-        for call in run.call_args_list:
-            command = call.args[0]
-            self.assertNotIn("--wait", command)
-            self.assertNotIn("--wait-timeout", command)
-            self.assertEqual(command[-1], "ev_cli")
-        self.assertEqual(sleep.call_count, 2)
 
     def test_only_terminal_eval_selects_unbounded_deadline_retries(self):
         with patch.dict(os.environ, {}, clear=False):

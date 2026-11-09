@@ -88,11 +88,11 @@ class SubmissionRejected(RuntimeError):
         self.status = status
         self.retryable = status in {408, 429, 503} or request_is_infrastructure(process)
         super().__init__(f"Gateway rejected submission with HTTP {status}" if status is not None
-                         else "Agate CLI rejected submission before dispatch")
+                         else "Agate SDK rejected submission before dispatch")
 
 
 def submission_rejection(process: subprocess.CompletedProcess) -> SubmissionRejected | None:
-    """Recognize pre-dispatch CLI errors; arbitrary stderr is not proof of safety."""
+    """Recognize pre-dispatch transport errors; arbitrary stderr is not proof of safety."""
     if process.returncode == 0:
         return None
     response = job_from_process(process)
@@ -109,7 +109,7 @@ def submission_rejection(process: subprocess.CompletedProcess) -> SubmissionReje
     if (process.returncode == 2 and re.match(r"usage: agate\b", process.stderr or "")
             and re.search(r"(?m)^agate(?: [\w-]+)*: error: ", process.stderr or "")):
         return SubmissionRejected(process)
-    # Also accept structured CLI HTTP-error envelopes, but never infer a
+    # Also accept structured transport HTTP-error envelopes, but never infer a
     # pre-dispatch rejection from error_class=infra or exit code alone.
     if response and response.get("error"):
         status = response.get("http_status", response.get("status_code"))
@@ -334,7 +334,7 @@ def payload_identity(payload: dict) -> dict:
         environment = value.pop("env_vars")
         encoded = json.dumps(environment, sort_keys=True, separators=(",", ":"),
                              ensure_ascii=False).encode()
-        # The empty-key fallback preserves standalone/cooperative CLI behavior;
+        # The empty-key fallback preserves standalone/cooperative invocation behavior;
         # only Supervisor-supplied keys make this fingerprint an authenticity check.
         key = bytes.fromhex(os.environ["ATREX_AKA_IDENTITY_KEY"]) if os.environ.get(
             "ATREX_AKA_IDENTITY_KEY"
@@ -418,7 +418,7 @@ def execute_job(
     accepted Job produces a structured collection timeout immediately after the
     current bounded wait; its ID remains private so a later identical Runtime
     request can probe the same Job.  A definitively missing Job may still use the
-    bounded fresh-submission recovery path.  A prior CLI submission without a
+    bounded fresh-submission recovery path.  A prior transport submission without a
     confirmed ID also gets one bounded fresh submission on the later invocation.
 
     Explicit infrastructure terminal failures are retried only while
@@ -509,7 +509,7 @@ def execute_job(
             rejection = submission_rejection(subprocess.CompletedProcess(
                 [], data["returncode"], data["stdout"], data["stderr"]))
         if rejection is None and not idempotent_submission:
-            # A previous CLI invocation returned without a confirmed Job ID.
+            # A previous transport invocation returned without a confirmed Job ID.
             # There is no ID to collect, so a later identical Runtime call gets
             # one bounded fresh submission instead of remaining permanently
             # stuck on an unrecoverable checkpoint.  Count this as the call's
@@ -522,13 +522,13 @@ def execute_job(
             wait_retries += 1
             state = save("retry_pending")
             print(
-                "[sandbox] Prior CLI submission has no confirmed job ID; "
+                "[sandbox] Prior Gateway submission has no confirmed job ID; "
                 "resubmitting the saved request once",
                 file=sys.stderr,
                 flush=True,
             )
         # A definitive rejection follows the normal rejection path.  A bare
-        # pre-POST marker or unparseable CLI response takes the bounded fresh
+        # pre-POST marker or unparseable transport response takes the bounded fresh
         # submission path above.
 
     while True:

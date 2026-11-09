@@ -35,14 +35,8 @@ def check_projected_proc() -> None:
         _install_maps_shim(Path(directory), force_rebuild=True)
 
 
-def _agate_version(*, executable: str = "agate") -> str:
-    """Return the installed public Agate SDK version.
-
-    ``executable`` remains as a compatibility keyword for callers of the first
-    version-contract implementation; Gateway execution no longer depends on or
-    invokes the CLI binary.
-    """
-    del executable
+def _agate_version() -> str:
+    """Return the installed public Agate SDK version."""
     try:
         from atrex_gateway_client import __version__
     except ModuleNotFoundError as exc:
@@ -79,11 +73,10 @@ def check_minimum_agate_version(
     *,
     actual_version: str | None = None,
     minimum_version: str = MINIMUM_AGATE_VERSION,
-    agate_executable: str = "agate",
 ) -> str:
     """Return the installed SDK version after enforcing Light's minimum."""
     actual_version = (
-        _agate_version(executable=agate_executable)
+        _agate_version()
         if actual_version is None
         else actual_version.strip()
     )
@@ -105,7 +98,6 @@ def check_required_versions(
     required_atrex_bench_version: str,
     *,
     environment: Mapping[str, str] | None = None,
-    agate_executable: str = "agate",
 ) -> dict[str, str]:
     """Enforce the SDK minimum and exact deployment/evaluator pins."""
     required_agate_version = required_agate_version.strip()
@@ -116,9 +108,7 @@ def check_required_versions(
         raise ValueError("required Atrex-Bench version must not be empty")
 
     check_minimum_agate_version(actual_version=required_agate_version)
-    actual_agate_version = check_minimum_agate_version(
-        agate_executable=agate_executable
-    )
+    actual_agate_version = check_minimum_agate_version()
     if actual_agate_version != required_agate_version:
         raise RuntimeError(
             "Agate version mismatch: "

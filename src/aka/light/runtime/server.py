@@ -32,7 +32,6 @@ from aka.light.evaluation.gateway import (
     EPISODE_EVALUATIONS_PATH,
     build_parser,
     configured_queue_wait_grace,
-    find_agate,
     requested_sync_paths,
     validate_evaluation_options,
 )

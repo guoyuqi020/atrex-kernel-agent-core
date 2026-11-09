@@ -8,7 +8,6 @@ import re
 import statistics
 import subprocess
 import sys
-import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -406,7 +405,7 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
     from .agate_native import apply_request
     request = apply_request(request, args, "run")
     request["abba"] = {"baseline": None, "repeats": args.comparison_repeats // 2}
-    from .source_transport import attach, ARCHIVES
+    from .source_transport import attach
     attach(request, workspace, side="baseline", source=baseline.snapshot)
     if not request["abba"]["baseline"] or not request["candidate"]:
         raise ValueError("Native ABBA requires two non-empty candidate sources")
@@ -418,16 +417,12 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
         print(json.dumps({"kind": "same_allocation_abba", "transport": "agate_native_eval_abba",
                           "shape_count": len(shapes), "comparison_repeats": args.comparison_repeats}))
         return 0
-    executable = gateway.find_agate()
-    url = args.url
-    if not executable and not url:
-        raise ValueError("Native ABBA requires a resolvable Agate Gateway URL; no Dev fallback was submitted")
     schedule = verification_schedule(args.comparison_repeats)
     # Recorded acceptance retries create a fresh Gateway Record after an
     # incomplete result.  Its per-record JOB_ROOT_ENV changes, so checkpoints
     # stored there cannot suppress already-completed Shape submissions.  The
     # Runtime supplies a Campaign-stable private root for recorded ABBA; retain
-    # JOB_ROOT_ENV as the standalone/cooperative CLI fallback.
+    # JOB_ROOT_ENV as the standalone/cooperative invocation fallback.
     checkpoint_root = (
         os.environ.get(BATCH_ROOT_ENV)
         or os.environ.get(ABBA_BATCH_ROOT_ENV)
@@ -463,68 +458,17 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
             retry_identity = (
                 {"abba_wall_clock_retry": attempt} if attempt else None
             )
-            if ARCHIVES in batch:
-                from .source_transport import run as run_tree
-                return run_tree(
-                    gateway,
-                    args,
-                    batch,
-                    "run",
-                    queue_wait_grace,
-                    identity_extra=retry_identity,
-                )
-            if executable:
-                # Use native eval CLI flags, retaining configured profile credentials.
-                # This never uploads/runs a Dev harness. --abba-repeats counts blocks.
-                with tempfile.TemporaryDirectory(prefix="aka-native-abba-") as directory:
-                    sidecars = Path(directory)
-                    reference = sidecars / "reference"
-                    reference.mkdir()
-                    for field, filename in (
-                        ("reference_py", "reference.py"),
-                        ("input_py", "input.py"),
-                        ("shapes", "shapes.json"),
-                        ("metadata", "metadata.json"),
-                        ("roofline", "roofline.json"),
-                    ):
-                        if field in batch["reference"]:
-                            content = batch["reference"][field]
-                            (reference / filename).write_text(
-                                content if isinstance(content, str) else json.dumps(content),
-                                encoding="utf-8",
-                            )
-                    command = gateway.build_typed_agate_command(
-                        executable,
-                        args,
-                        workspace,
-                        "run",
-                        batch,
-                        queue_wait_grace,
-                        reference_dir=reference,
-                        request_sidecar_dir=sidecars,
-                    )
-                    request_identity = {"kind": "eval", "request": batch}
-                    if retry_identity:
-                        request_identity.update(retry_identity)
-                    return gateway.run_agate_with_cancel_retry(
-                        agate=command,
-                        executable=executable,
-                        url=url,
-                        gateway_profile=args.gateway_profile,
-                        command_timeout=args.timeout,
-                        wait_budget=args.timeout + queue_wait_grace,
-                        request_identity=request_identity,
-                        max_device_retries=10,
-                        device_retry_delay=60,
-                    )
-            return gateway.run_direct_job(
-                url=url,
-                kind="eval",
-                payload=batch,
-                timeout=args.timeout,
-                queue_wait_grace=queue_wait_grace,
-                max_device_retries=10,
-                device_retry_delay=60,
+            # Native ABBA is an Eval request regardless of whether either side
+            # needs an uploaded source archive.  The SDK transport accepts both
+            # inline and archive-backed sources, so there is no CLI/direct-HTTP
+            # fallback to select here.
+            from .source_transport import run as run_tree
+            return run_tree(
+                gateway,
+                args,
+                batch,
+                "run",
+                queue_wait_grace,
                 identity_extra=retry_identity,
             )
 
