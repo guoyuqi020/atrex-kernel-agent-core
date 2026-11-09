@@ -70,9 +70,14 @@ from aka.light.evaluation.native_abba import (
     _clock_configuration_error,
     _clock_configuration_process,
 )
+from aka.light.evaluation.operations import (
+    comparison_allocation_timeout,
+    comparison_run_timeout,
+)
 from aka.light.evaluation.public_result import (
     bound_diagnostic_response,
     canonical_result,
+    compact_receipt,
 )
 from aka.light.evaluation.projection import (
     evaluation as project_evaluation,
@@ -303,6 +308,40 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
 
         self.assertEqual(result["kernel_commit_id"], "a" * 40)
         self.assertNotIn("candidate_kernel_commit_id", result)
+
+    def test_compact_receipt_keeps_summary_and_moves_bulk_to_record(self):
+        record_id = "gateway-" + "1" * 32
+        stdout = "begin\n" + "x" * 6000 + "\nend\n"
+        agent_result = {
+            "operation": "dev",
+            "status": "completed",
+            "gateway_record_id": record_id,
+            "kernel_commit_id": "a" * 40,
+            "result": {
+                "correct": True,
+                "latency_us_geomean": 4.5,
+                "latency_us_by_shape": {str(index): index + 0.5 for index in range(100)},
+                "stdout": stdout,
+                "stderr": "warning\n",
+                "exit_code": 0,
+            },
+        }
+
+        receipt = compact_receipt(agent_result)
+
+        self.assertEqual(receipt["gateway_record_id"], record_id)
+        self.assertEqual(receipt["record_path"], f"records/{record_id}.json")
+        self.assertTrue(receipt["result"]["correct"])
+        self.assertEqual(receipt["result"]["latency_us_geomean"], 4.5)
+        self.assertNotIn("latency_us_by_shape", receipt["result"])
+        self.assertNotIn("stdout", receipt["result"])
+        self.assertEqual(receipt["result"]["stdout_bytes"], len(stdout.encode()))
+        self.assertTrue(receipt["result"]["stdout_truncated"])
+        self.assertIn("begin", receipt["result"]["stdout_preview"])
+        self.assertIn("end", receipt["result"]["stdout_preview"])
+        self.assertIn("latency_us_by_shape", receipt["result_fields"])
+        self.assertEqual(agent_result["result"]["stdout"], stdout)
+        self.assertEqual(len(agent_result["result"]["latency_us_by_shape"]), 100)
 
     def test_new_abba_result_names_candidate_and_baseline_symmetrically(self):
         result = canonical_result(
@@ -2331,6 +2370,37 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         help_text = " ".join(parser.format_help().split())
         self.assertIn("Evaluate always uses 5 total correctness cases", help_text)
         self.assertNotIn("Additional correctness seeds (Atrex-Bench default: 5", help_text)
+
+    def test_abba_implicit_run_timeout_fits_dynamic_schedule(self):
+        arguments = SimpleNamespace(
+            timeout=1230,
+            comparison_repeats=8,
+            evaluation_step_timeout=300,
+            comparison_run_timeout=None,
+        )
+        self.assertEqual(comparison_run_timeout(arguments), 75)
+        self.assertEqual(comparison_allocation_timeout(arguments), 1230)
+
+        arguments.comparison_run_timeout = 240
+        self.assertEqual(comparison_run_timeout(arguments), 240)
+        self.assertEqual(comparison_allocation_timeout(arguments), 3870)
+
+        arguments.comparison_run_timeout = 700
+        with self.assertRaisesRegex(
+            ValueError,
+            r"700 seconds.*8.*11230-second ABBA allocation.*10800-second.*"
+            r"did not clamp.*no Job was submitted",
+        ):
+            comparison_allocation_timeout(arguments)
+
+        help_text = " ".join(build_parser().format_help().split())
+        self.assertIn(
+            "An explicit positive value is used unchanged and the ABBA allocation expands to "
+            "fit it.",
+            help_text,
+        )
+        self.assertIn("Runtime never clamps the supplied value", help_text)
+        self.assertNotIn("Default: 60, matching Performance timeout", help_text)
 
     def test_managed_env_uses_campaign_hardware_only(self):
         parser = build_parser()

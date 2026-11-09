@@ -9,7 +9,11 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT
+from aka.contracts.evaluation import (
+    ABBA_SCHEDULING_OVERHEAD,
+    DEFAULT_EVALUATION_STEP_TIMEOUT,
+    MAX_TYPED_GATEWAY_JOB_TIMEOUT,
+)
 from aka.light.evaluation.policy import validate_abba_repeats
 
 from aka.light.evaluation.projection import (
@@ -67,24 +71,67 @@ def validate_comparison(args) -> None:
 
 
 def comparison_run_timeout(args) -> int:
-    available = (args.timeout - 30) // (2 * args.comparison_repeats)
-    # The Agent-visible comparison override is intentionally narrower than the
-    # Supervisor's general evaluation-step setting.  Recorded acceptance emits
-    # this exact option, so silently ignoring it would make the prompt/request
-    # identity disagree with the job actually executed.
+    available = (
+        args.timeout - ABBA_SCHEDULING_OVERHEAD
+    ) // (2 * args.comparison_repeats)
+    # Recorded acceptance emits the explicit Agent-visible override. Preserve
+    # it exactly so the prompt/request identity matches the job actually run.
     seconds = getattr(args, "comparison_run_timeout", None)
-    if seconds is None:
-        seconds = getattr(
+    if seconds is not None:
+        if type(seconds) is not int or seconds <= 0:
+            raise ValueError("--comparison-run-timeout must be a positive integer")
+        return seconds
+    # The Campaign step timeout is an upper bound, not a promise that it fits
+    # every ABBA schedule. Derive a safe implicit value when the Agent leaves
+    # the option unset. An explicit value is authoritative and is never
+    # clamped to this pre-existing allocation.
+    seconds = min(
+        getattr(
             args,
             "evaluation_step_timeout",
             DEFAULT_EVALUATION_STEP_TIMEOUT,
-        )
-    if seconds <= 0 or seconds > available:
+        ),
+        available,
+    )
+    if seconds <= 0:
         raise ValueError(
-            "--comparison-run-timeout must be positive and fit the full ABBA allocation "
-            f"schedule (maximum {available} seconds for this request)"
+            "The configured ABBA allocation leaves no positive per-run budget; "
+            "increase the Campaign evaluation allocation"
         )
     return seconds
+
+
+def comparison_allocation_timeout(args, per_run_timeout: int | None = None) -> int:
+    """Return an allocation that honors an explicit Agent per-run timeout."""
+    seconds = (
+        comparison_run_timeout(args)
+        if per_run_timeout is None
+        else per_run_timeout
+    )
+    schedule_timeout = (
+        2 * args.comparison_repeats * seconds + ABBA_SCHEDULING_OVERHEAD
+    )
+    allocation_timeout = max(args.timeout, schedule_timeout)
+    if allocation_timeout > MAX_TYPED_GATEWAY_JOB_TIMEOUT:
+        explicit = getattr(args, "comparison_run_timeout", None)
+        if explicit is not None and schedule_timeout > MAX_TYPED_GATEWAY_JOB_TIMEOUT:
+            raise ValueError(
+                f"--comparison-run-timeout {explicit} seconds with "
+                f"--comparison-repeats {args.comparison_repeats} requires a "
+                f"{schedule_timeout}-second ABBA allocation "
+                f"(2 * {args.comparison_repeats} * {explicit} + "
+                f"{ABBA_SCHEDULING_OVERHEAD} seconds scheduling overhead), exceeding "
+                f"Agate's {MAX_TYPED_GATEWAY_JOB_TIMEOUT}-second typed-job limit. "
+                "Runtime did not clamp the supplied value and no Job was submitted; "
+                "reduce --comparison-run-timeout or --comparison-repeats."
+            )
+        raise ValueError(
+            f"The configured {allocation_timeout}-second ABBA allocation exceeds "
+            f"Agate's {MAX_TYPED_GATEWAY_JOB_TIMEOUT}-second typed-job limit. "
+            "Runtime did not clamp the allocation and no Job was submitted; reduce the "
+            "Campaign evaluation timeout."
+        )
+    return allocation_timeout
 
 
 def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:

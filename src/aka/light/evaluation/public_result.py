@@ -25,6 +25,161 @@ PUBLIC_IDENTITIES = (
     "baseline_kernel_commit_id",
 )
 IDENTITIES = (*PRIVATE_IDENTITIES, *PUBLIC_IDENTITIES)
+RECEIPT_TEXT_PREVIEW_BYTES = 2048
+_RECEIPT_RESULT_FIELDS = (
+    "correct",
+    "passed",
+    "exit_code",
+    "mode",
+    "input_scope",
+    "latency_us_geomean",
+    "latency_us_arith_mean",
+    "performance_score",
+    "speedup",
+    "speedup_vs_ref_geomean",
+    "improvement_pct",
+    "measured_shape_count",
+    "outcome",
+    "reason",
+)
+_RECEIPT_ERROR_FIELDS = (
+    "code",
+    "reason",
+    "error_class",
+    "message",
+    "timeout_s",
+    "stage",
+    "http_status",
+    "outcome",
+    "candidate_repairable",
+)
+
+
+def _receipt_text(value: str, *, limit: int = RECEIPT_TEXT_PREVIEW_BYTES) -> dict:
+    raw = value.encode("utf-8")
+    if len(raw) <= limit:
+        preview = value
+        truncated = False
+    else:
+        marker = b"\n... [receipt preview omitted middle bytes] ...\n"
+        remaining = max(0, limit - len(marker))
+        left = remaining // 2
+        right = remaining - left
+        preview = (
+            raw[:left] + marker + (raw[-right:] if right else b"")
+        ).decode("utf-8", errors="replace")
+        truncated = True
+    return {"bytes": len(raw), "preview": preview, "truncated": truncated}
+
+
+def _receipt_string(value: str) -> str:
+    preview = _receipt_text(value)
+    return preview["preview"]
+
+
+def _receipt_error(value: object) -> dict | None:
+    if isinstance(value, str):
+        return {"message": _receipt_string(value)}
+    if not isinstance(value, dict):
+        return None
+    summary = {}
+    for key in _RECEIPT_ERROR_FIELDS:
+        item = value.get(key)
+        if isinstance(item, str):
+            summary[key] = _receipt_string(item)
+        elif type(item) is bool or item is None:
+            if key in value:
+                summary[key] = item
+        elif type(item) in {int, float} and math.isfinite(item):
+            summary[key] = item
+    return summary or {"message": "Full error details are available in the saved Gateway Record."}
+
+
+def _receipt_metrics(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    summary = {}
+    for key in _RECEIPT_RESULT_FIELDS:
+        item = value.get(key)
+        if isinstance(item, str):
+            summary[key] = _receipt_string(item)
+        elif type(item) is bool or item is None:
+            if key in value:
+                summary[key] = item
+        elif type(item) in {int, float} and math.isfinite(item):
+            summary[key] = item
+    correctness = value.get("correctness")
+    if isinstance(correctness, dict):
+        summary["correctness"] = {
+            key: item
+            for key, item in correctness.items()
+            if key in {"status", "rel_err", "max_abs_err", "max_rel_err"}
+            and (
+                isinstance(item, str)
+                or type(item) is bool
+                or item is None
+                or (type(item) in {int, float} and math.isfinite(item))
+            )
+        }
+    return summary
+
+
+def compact_receipt(agent_result: dict) -> dict:
+    """Return bounded terminal feedback while the full result stays in records/."""
+    result = agent_result.get("result")
+    result = result if isinstance(result, dict) else {}
+    receipt = {
+        key: deepcopy(agent_result[key])
+        for key in (
+            "operation",
+            "status",
+            "gateway_record_id",
+            "kernel_commit_id",
+            "candidate_kernel_commit_id",
+            "baseline_kernel_commit_id",
+        )
+        if key in agent_result
+    }
+    record_id = receipt.get("gateway_record_id")
+    if isinstance(record_id, str):
+        receipt["record_path"] = f"records/{record_id}.json"
+    summary = _receipt_metrics(result)
+    for side in ("baseline", "candidate"):
+        metrics = _receipt_metrics(result.get(side))
+        if metrics:
+            summary[side] = metrics
+    error = _receipt_error(result.get("error"))
+    if error is not None:
+        summary["error"] = error
+    errors = result.get("errors")
+    if isinstance(errors, list) and errors:
+        summary["error_count"] = len(errors)
+        if "error" not in summary:
+            summary["error"] = _receipt_error(errors[0]) or {
+                "message": "Full error details are available in the saved Gateway Record."
+            }
+    for key in ("next_action", "scientific_next_check"):
+        value = result.get(key)
+        if isinstance(value, str):
+            summary[key] = _receipt_string(value)
+    for stream in ("stdout", "stderr"):
+        value = result.get(stream)
+        if isinstance(value, str):
+            preview = _receipt_text(value)
+            summary[f"{stream}_bytes"] = preview["bytes"]
+            summary[f"{stream}_preview"] = preview["preview"]
+            summary[f"{stream}_truncated"] = preview["truncated"]
+    receipt["result"] = summary
+    receipt["result_fields"] = sorted(str(key) for key in result)[:128]
+    receipt["details"] = (
+        f"Full result: {receipt['record_path']}. Use tools/record.py to read only the fields "
+        "or Shape needed for the next decision."
+        if "record_path" in receipt
+        else "No Agent-visible Gateway Record path is available for this response."
+    )
+    return receipt
+
+
 def bound_diagnostic_response(response: dict) -> dict:
     """Preserve complete redacted diagnostics at the Agent boundary.
 

@@ -11,8 +11,9 @@ Custom execution examples:
   python3 tools/sandbox.py --kind command -- python3 scratch/probe.py
 Additional typed operations: check, disassemble, env; Wiki: wiki-query, wiki-search,
 wiki-hardware. Use --kind OPERATION --help for the operation's request options.
-Read saved results from records/<gateway_record_id>.json and inspect exact Kernel source with local
-Git commits and refs. ABBA accepts --baseline-commit FULL_GIT_COMMIT; Runtime exports it internally.
+Successful terminal calls print a compact receipt. Read saved results with
+``python3 tools/record.py GATEWAY_ID`` and inspect exact Kernel source with local Git commits and
+refs. ABBA accepts --baseline-commit FULL_GIT_COMMIT; Runtime exports it internally.
 Root PROGRESS.md includes enabled Direction state and each Shape's fastest measured Kernel;
 complete Experiments are normal files under experiments/ when that module is enabled.
 Possible Runtime mutations include update-direction, prioritize-direction, record-experiment,

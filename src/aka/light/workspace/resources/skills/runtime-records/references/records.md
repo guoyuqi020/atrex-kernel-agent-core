@@ -3,6 +3,22 @@
 Runtime projects every visible result as `records/<gateway_record_id>.json`. Read and search those
 flat files normally. Exact Kernel source is ordinary reachable Git history.
 
+Runtime calls print a compact receipt rather than the complete result. Query the full saved Record
+locally without another GPU request:
+
+```bash
+python3 tools/record.py "$GATEWAY_RECORD_ID" --summary
+python3 tools/record.py "$GATEWAY_RECORD_ID" --field result.correct
+python3 tools/record.py "$GATEWAY_RECORD_ID" --field result.latency_us_geomean
+python3 tools/record.py "$GATEWAY_RECORD_ID" --shape-id 7
+python3 tools/record.py "$GATEWAY_RECORD_ID" --keys result
+python3 tools/record.py "$GATEWAY_RECORD_ID" --text-field result.stdout --offset 0 --max-bytes 4096
+```
+
+Ordinary field output is bounded. Long text must be read in bounded ranges. Do not use `cat`, a
+full `json.dumps`, or an equivalent command that copies a complete Record, per-Shape table, source,
+stdout, or stderr into the Session.
+
 | ID | Meaning | Use |
 | --- | --- | --- |
 | `gateway-…` | One saved measurement operation | Measured evidence, result reader, direct report citation when the Experiment module is disabled |
@@ -17,7 +33,7 @@ Each projected file contains the same public result returned by a new measuremen
 ABBA uses `operation: evaluate` with `result.comparison`, `candidate_kernel_commit_id`, and
 `baseline_kernel_commit_id`.
 Other operation names are `profile`, `dev`, `check`, and `disassemble`.
-Parse the whole stdout as JSON; do not look for legacy executor markers.
+Parse the Runtime command's whole stdout as one compact receipt; do not look for legacy executor markers.
 Dev preserves probe text in `result.stdout`/`result.stderr` and its process `exit_code`.
 Its Kernel is the workspace snapshot, not proof the probe measured it.
 

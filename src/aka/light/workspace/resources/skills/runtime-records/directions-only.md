@@ -7,6 +7,8 @@ allowed-tools: "Bash Read"
 # Runtime Direction records
 
 Direction recording is enabled; Experiment commands are disabled. Start with root `PROGRESS.md`, then open only relevant `directions/<status>/*.json` and `records/*.json`. These Runtime projections are read-only.
+Query Gateway evidence with `python3 tools/record.py <gateway_record_id>` and narrow selectors; do
+not print complete Records or long streams into the Session.
 
 A Direction is a consequential Kernel path or uncertainty, not Runtime/evaluator maintenance. Check for duplicates and rank by expected benefit and applicability. Multiple local Directions may be `in_progress`; the most recently started or prioritized one is the focus. Choose executable work from the Local work queue; restart paused work explicitly. The Shared direction pool is discovery-only: absorb compatible peer ideas into one local derivative and cite every source ID in `derived_from_direction_ids`. Continue bounded probe/edit/measurement/revert-or-keep cycles while useful work remains.
 

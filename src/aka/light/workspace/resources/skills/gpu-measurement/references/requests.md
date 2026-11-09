@@ -19,7 +19,7 @@ not replace a passing ordinary full Evaluate for the exact selected source.
 | Can a self-contained single-file probe that reads no candidate or other workspace file resolve one question? | `dev --input scratch/probe.py --no-sync -- python3 scratch/probe.py` | Only the explicitly declared probe is uploaded; returns its output and exit status. |
 | Does custom code read the candidate, helpers, prior artifacts, or any other workspace state? | `command -- python3 scratch/experiment.py` | Bounded engineering workspace projection uploaded; `scratch/` synchronized back. Runtime control state, Skills and bulk `records/` history are excluded. |
 | What is available on the assigned GPU target? | `env` | Runtime selects the Campaign hardware and returns its GPU/environment/capability facts; this is not a fact about the Agent host or a Kernel measurement. |
-| Has this exact candidate or observation already been measured? | `records/*.json`, local Git, root `PROGRESS.md` | Saved facts and exact committed source; `PROGRESS.md` includes per-Shape historical winners. No new GPU allocation. |
+| Has this exact candidate or observation already been measured? | `tools/record.py`, local Git, root `PROGRESS.md` | Saved facts and exact committed source; `PROGRESS.md` includes per-Shape historical winners. No new GPU allocation. |
 
 Read `python3 tools/sandbox.py --kind OPERATION --help` before using unfamiliar controls.
 The Runtime discovers safe native options from its installed Agate client at startup and
@@ -44,7 +44,8 @@ The session Prompt states whether Runtime request suspension is enabled. When en
 pause the Agent/subagents and do not consume the Agent active-time budget; when disabled, they
 remain active time. Every request remains subject to its own deadline. A quiet CLI is not a failure.
 
-Save JSON stdout and stderr separately if needed:
+The command prints one compact receipt; the complete result is already saved under the receipt's
+`record_path`. Save the receipt separately only when needed:
 
 ```bash
 python3 tools/sandbox.py --kind run --no-sync > scratch/evaluate.json 2> scratch/evaluate.stderr
@@ -87,10 +88,14 @@ Managed `env` takes no target, capability, or refresh override. Runtime supplies
 hardware identity and requests its capability view; use the returned architecture/features rather
 than querying a different product or guessing from a marketing name.
 
-For ABBA, optional `--comparison-run-timeout SECONDS` controls each run and must fit the
-configured allocation's complete schedule. Without that option, each run uses the smaller of
-the 60-second Performance timeout and its equal share of the configured allocation. Acceptance can
-reuse only an exact matching request, including baseline commit/source, repeats and run timeout.
+For ABBA, optional `--comparison-run-timeout SECONDS` controls each run. Runtime uses an explicit
+positive value unchanged and expands the ABBA allocation to fit the complete schedule. Without
+that option, Runtime derives the smaller of the Campaign evaluation-step timeout and the maximum
+that fits the existing allocation. If the resulting allocation exceeds Agate's typed-job limit,
+Runtime returns the supplied per-run timeout, repeat count, required allocation, and service limit;
+it does not clamp the value or submit a Job.
+Acceptance can reuse only an exact matching request, including baseline commit/source, repeats and
+run timeout.
 The injected acceptance block supplies the exact Agent-controlled command for the current
 configuration and committed incumbent ID. Use that block instead of this generic example when
 seeking acceptance reuse.
@@ -190,9 +195,10 @@ subsystem-specific counters when the limiting unit remains unclear.
 
 ## Saved results and source
 
-Reuse recorded facts across Episodes by reading `records/*.json`; inspect their exact Kernel commits
-with ordinary Git commands. Runtime projects a Record only when every referenced commit is reachable
-from local or imported shared refs and its committed source matches the private measurement snapshot.
+Reuse recorded facts across Episodes with `python3 tools/record.py <gateway_record_id>` and narrow
+selectors; inspect exact Kernel commits with ordinary Git commands. Runtime projects a Record only
+when every referenced commit is reachable from local or imported shared refs and its committed
+source matches the private measurement snapshot.
 
 Each measurement response and projected Record contains `operation`, `status`,
 `result`, `gateway_record_id`, and `kernel_commit_id` when a single Kernel is bound. ABBA uses
@@ -208,6 +214,8 @@ ABBA keeps the per-side aggregate metrics, not raw schedules or repetition array
 A completed evaluator can have `result.correct: false`; completion does not mean the Kernel passed.
 Search `records/*.json` by commit ID to find its measurements. Use `git show`, `git diff`, `git log`
 or a local branch to inspect source; imported peer history is under `refs/atrex/shared/`.
+Dev and Command receipts show bounded stdout/stderr previews and byte counts. Their complete redacted
+streams remain in the saved Record and can be read in bounded ranges with `--text-field`.
 Dev probes also produce Record IDs even when their output is not an evaluation.
 A duplicate-task error means the result already exists, not that the Kernel failed.
 

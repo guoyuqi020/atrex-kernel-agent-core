@@ -12,6 +12,8 @@ report validation; the Agent owns hypotheses and interpretations.
 Start with `PROGRESS.md`. Open `frontier.json` only for the complete frontier, then only relevant
 Direction, Experiment, and `records/<gateway_record_id>.json` files. Projections are read-only.
 Gateway Records are measurement authority; all analysis is fallible.
+Use `python3 tools/record.py <gateway_record_id>` for compact local queries; do not print an entire
+Record or long stdout/stderr into the Session.
 
 ## Research loop
 

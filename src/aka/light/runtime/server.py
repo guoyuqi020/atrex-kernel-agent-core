@@ -26,6 +26,7 @@ from pathlib import Path
 from aka.contracts.evaluation import DEFAULT_EVALUATION_STEP_TIMEOUT, derived_evaluation_timeout
 from aka.light.evaluation.policy import SHAPE_BATCH_SIZE
 from aka.light.evaluation.shapes import shape_request_timeout
+from aka.light.evaluation.public_result import compact_receipt
 
 from aka.light.evaluation.gateway import (
     COMMAND_WORKSPACE_MANIFEST,
@@ -444,6 +445,8 @@ class _Handler(BaseHTTPRequestHandler):
             result = augment_error(
                 result, route=self.path, request=getattr(self, "decoded_request", None),
                 research_records=owner.journal_factory.research_records,
+                directions_enabled=owner.journal_factory.directions_enabled,
+                experiments_enabled=owner.journal_factory.experiments_enabled,
                 supervisor_git=binding.service.supervisor_git if binding else True,
                 parser=build_parser() if self.path == "/v1/gateway/execute" and status == 400 else None,
                 catalog=owner.plugins.catalog() if self.path == "/v1/plugins/execute" and status == 400 else (),
@@ -559,9 +562,10 @@ class _Handler(BaseHTTPRequestHandler):
             execution_exit_code = None
             if self.path == "/v1/gateway/execute" and isinstance(result.get("agent_result"), dict):
                 # Never expose the private compatibility streams alongside the
-                # canonical result. Agent-visible history is projected under records/.
+                # canonical result. The full Agent-visible result is projected
+                # under records/; terminal feedback is a bounded receipt.
                 execution_exit_code = result["exit_code"]
-                result = result["agent_result"]
+                result = compact_receipt(result["agent_result"])
             self.reply(200, result, execution_exit_code=execution_exit_code)
         except TaskRunning as error:
             self.reply(200, task_conflict_response(error))

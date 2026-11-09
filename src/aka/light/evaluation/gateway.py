@@ -91,8 +91,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 from aka.contracts.evaluation import (  # noqa: E402
     DEFAULT_ABBA_REPEATS,
-    DEFAULT_ABBA_RUN_TIMEOUT,
     DEFAULT_EVALUATION_STEP_TIMEOUT,
+    MAX_TYPED_GATEWAY_JOB_TIMEOUT,
     derived_evaluation_timeout,
     typed_gateway_job_timeout,
 )
@@ -2013,8 +2013,12 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
     parser.add_argument(
             "--comparison-run-timeout", type=int, default=None,
             help=(
-                "Seconds per ABBA run; must fit the allocation timeout. "
-                f"Default: {DEFAULT_ABBA_RUN_TIMEOUT}, matching Performance timeout."
+                "Seconds per ABBA run. An explicit positive value is used unchanged and the "
+                "ABBA allocation expands to fit it. When omitted, Runtime uses the smaller of "
+                "the Campaign evaluation-step timeout and the maximum that fits the existing "
+                f"allocation. A required allocation above Agate's "
+                f"{MAX_TYPED_GATEWAY_JOB_TIMEOUT}-second typed-job limit is rejected with the "
+                "calculation; Runtime never clamps the supplied value."
             ),
         )
     parser.add_argument(

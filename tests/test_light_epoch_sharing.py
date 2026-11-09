@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from io import BytesIO
 from pathlib import Path
 from threading import Event, Lock
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ from aka.light.agent.runtime.runtime import build_agent_runtime
 from aka.light.agent.sandbox import sandbox_executable
 from aka.light.experiment.store import MeasurementStore
 from aka.light.research import ResearchStore
-from aka.light.runtime.server import _journal_evidence_hint
+from aka.light.runtime.server import _Handler, _journal_evidence_hint
 from aka.light.runtime.paths import supervisor_campaign_root
 from aka.light.runtime.request_errors import AgentRequestError
 from aka.light.runtime.request_feedback import augment_error, journal_schema
@@ -37,6 +38,7 @@ from aka.light.workflow.journal_service import (
     update_direction,
     validate_report_evidence,
 )
+from aka.light.workflow.journal import JournalFactory
 from aka.light.workflow.models import EpisodeHandoff, SupervisorState
 from aka.light.workflow.bootstrap import Campaign
 from aka.light.workflow.claim_review import validate_review
@@ -2126,6 +2128,57 @@ def test_direction_schema_explains_field_types_and_mode_specific_closure_evidenc
     assert "gateway_record_ids" not in with_experiments["properties"]
 
 
+def test_http_error_feedback_uses_exact_research_module_selection(monkeypatch):
+    captured = {}
+
+    def project(result, **options):
+        captured.update(options)
+        return augment_error(result, **options)
+
+    owner = SimpleNamespace(
+        journal_factory=JournalFactory(tool_modules=("directions",)),
+        root=Path("/private/runtime"),
+        audit_root=Path("/private/audit"),
+        config=SimpleNamespace(
+            private_reference_dir=None,
+            url="http://runtime.invalid",
+            atrex_bench_root=None,
+        ),
+        environment={},
+        plugins=SimpleNamespace(catalog=lambda: ()),
+    )
+    handler = SimpleNamespace(
+        server=SimpleNamespace(owner=owner),
+        capability=None,
+        path="/v1/journal/execute",
+        decoded_request={
+            "operation": "direction_update",
+            "request": {"action": "complete"},
+        },
+        close_connection=False,
+        wfile=BytesIO(),
+        send_response=lambda _status: None,
+        send_header=lambda _name, _value: None,
+        end_headers=lambda: None,
+    )
+    response = {
+        "ok": False,
+        "repairable": True,
+        "error": {"code": "invalid_fields", "message": "invalid fields"},
+    }
+    monkeypatch.setattr("aka.light.runtime.server.augment_error", project)
+
+    _Handler.reply(handler, 400, response)
+
+    assert captured["research_records"] is True
+    assert captured["directions_enabled"] is True
+    assert captured["experiments_enabled"] is False
+    payload = json.loads(handler.wfile.getvalue())
+    properties = payload["request_schema"]["properties"]
+    assert "gateway_record_ids" in properties
+    assert "supporting_experiment_ids" not in properties
+
+
 def test_direction_closure_before_start_returns_exact_recovery(tmp_path):
     campaign = tmp_path / "scope" / "journals"
     evidence = campaign / "episodes" / "e00000001"
@@ -2799,6 +2852,8 @@ def test_runtime_install_does_not_mutate_tracked_gitignore(tmp_path):
     from aka.light.workspace.assets import link_runtime
 
     initialize_gitignore(workspace)
+    link_runtime(workspace, research_records=False, research_modules=())
+    assert (workspace / "tools/record.py").is_file()
     ignores = (workspace / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "/.atrex_long_horizon/" in ignores
     assert "/verification_artifacts/.atrex_long_horizon_verify/" in ignores
@@ -2816,6 +2871,88 @@ def test_runtime_install_does_not_mutate_tracked_gitignore(tmp_path):
         ["git", "diff", "--quiet", "--", ".gitignore"],
         cwd=workspace,
     ).returncode == 0
+
+
+def test_local_record_reader_returns_only_requested_bounded_fields(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    from aka.light.workspace.assets import link_runtime
+
+    link_runtime(workspace, research_records=False, research_modules=())
+    record_id = "gateway-" + "1" * 32
+    records = workspace / "records"
+    records.mkdir()
+    (records / f"{record_id}.json").write_text(
+        json.dumps({
+            "operation": "dev",
+            "status": "completed",
+            "gateway_record_id": record_id,
+            "kernel_commit_id": "a" * 40,
+            "result": {
+                "correct": True,
+                "latency_us_geomean": 4.5,
+                "latency_us_by_shape": {"7": 5.25},
+                "stdout": "x" * 70000,
+                "stderr": "",
+            },
+        }),
+        encoding="utf-8",
+    )
+    tool = workspace / "tools/record.py"
+
+    summary = subprocess.run(
+        ["python3", tool, record_id, "--summary"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    summary_result = json.loads(summary.stdout)
+    assert summary_result["result"]["stdout_bytes"] == 70000
+    assert "stdout" not in summary_result["result"]
+
+    field = subprocess.run(
+        ["python3", tool, record_id, "--field", "result.correct"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(field.stdout) is True
+
+    shape = subprocess.run(
+        ["python3", tool, record_id, "--shape-id", "7"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(shape.stdout)["latency_us"] == {"candidate": 5.25}
+
+    text = subprocess.run(
+        [
+            "python3", tool, record_id, "--text-field", "result.stdout",
+            "--offset", "100", "--max-bytes", "128",
+        ],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    text_result = json.loads(text.stdout)
+    assert text_result["offset"] == 100
+    assert text_result["next_offset"] == 228
+    assert text_result["total_bytes"] == 70000
+    assert len(text_result["text"]) == 128
+
+    oversized = subprocess.run(
+        ["python3", tool, record_id, "--field", "result.stdout"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    assert oversized.returncode == 2
+    assert "bounded --text-field" in json.loads(oversized.stderr)["error"]
 
 
 def test_agent_git_keeps_single_file_auxiliary_metadata_private(tmp_path):

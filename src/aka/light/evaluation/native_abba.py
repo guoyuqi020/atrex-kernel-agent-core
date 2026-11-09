@@ -1,6 +1,7 @@
 """Native Agate Eval ABBA: exact A/B/B/A evidence, no Dev driver fallback."""
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -381,7 +382,11 @@ def parse_native_abba(job: dict, repeats: int, shapes: list[str]) -> dict:
 
 
 def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
-    from aka.light.evaluation.operations import validate_comparison, comparison_run_timeout
+    from aka.light.evaluation.operations import (
+        comparison_allocation_timeout,
+        comparison_run_timeout,
+        validate_comparison,
+    )
     from aka.light.acceptance.verifier import merge_abba_batch_payloads
     from aka.light.evaluation.projection import abba, emit_gateway_error
     from aka.light.execution.gateway_jobs import eval_retry_kind, payload_identity
@@ -398,8 +403,12 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
     limitation = gateway._typed_workspace_limitation(workspace, command, "run")
     if limitation:
         raise ValueError(f"Native ABBA cannot represent this workspace: {limitation}; no Dev fallback was submitted")
+    per_run_timeout = comparison_run_timeout(args)
+    allocation_timeout = comparison_allocation_timeout(args, per_run_timeout)
+    execution_args = copy.copy(args)
+    execution_args.timeout = allocation_timeout
     request = gateway.build_typed_request(
-        workspace, args.hardware, args.timeout, args.env, command, "run", evaluation_mode="full",
+        workspace, args.hardware, allocation_timeout, args.env, command, "run", evaluation_mode="full",
         requirements=args.requirement or (), deps_mode=args.deps_mode,
     )
     from .agate_native import apply_request
@@ -409,7 +418,7 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
     attach(request, workspace, side="baseline", source=baseline.snapshot)
     if not request["abba"]["baseline"] or not request["candidate"]:
         raise ValueError("Native ABBA requires two non-empty candidate sources")
-    request["runner_overrides"]["perf_timeout_s"] = comparison_run_timeout(args)
+    request["runner_overrides"]["perf_timeout_s"] = per_run_timeout
     shapes = sorted(request["reference"]["shapes"], key=gateway.shape_id_sort_key)
     if not shapes:
         raise ValueError("Native ABBA requires at least one Shape")
@@ -465,7 +474,7 @@ def compare(gateway, args, workspace: Path, queue_wait_grace: int) -> int:
             from .source_transport import run as run_tree
             return run_tree(
                 gateway,
-                args,
+                execution_args,
                 batch,
                 "run",
                 queue_wait_grace,
