@@ -6,6 +6,7 @@ from aka.light.workflow.journal_service import (
     load_journal,
     journal_lock,
 )
+from aka.light.experiment.store import private_write
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,19 @@ class JournalFactory:
                 initialize_journal(path, episode=episode, base_commit=base_commit,
                                    branch=branch, memory_version=memory_version,
                                    tool_modules=self.tool_modules)
+
+    def bind_base_kernel(self, path, agent_commit_id):
+        """Bind a private controller base to its Agent-visible Git identity."""
+        with journal_lock(path):
+            value = load_journal(path)
+            existing = value.get("base_kernel_id")
+            if existing not in {None, agent_commit_id}:
+                raise RuntimeError(
+                    "Private Runtime Journal already maps its base to a different Agent commit"
+                )
+            if existing is None:
+                value["base_kernel_id"] = agent_commit_id
+                private_write(path, value)
 
     def open(self, **options):
         return SupervisorJournalService(**options)

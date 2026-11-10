@@ -943,6 +943,9 @@ class SupervisorRuntime:
                         raise RuntimeError(
                             "No Agent-visible Git commit matches the Episode incumbent"
                         )
+                self.journal_factory.bind_base_kernel(
+                    path, registered_baseline_kernel_commit_id
+                )
                 self.measurements.kernel(
                     incumbent_source, registered_baseline_kernel_commit_id
                 )
@@ -982,6 +985,10 @@ class SupervisorRuntime:
                         )
                     except (OSError, ValueError, subprocess.SubprocessError):
                         continue
+            else:
+                # Legacy single-repository mode uses the same public/private
+                # identity, but keeps the mapping explicit for projections.
+                self.journal_factory.bind_base_kernel(path, base_commit)
             binding = JournalBinding(self.journal_factory.open(
                 workspace=agent_workspace, git_workspace=workspace,
                 campaign_root=self.journals_root, evidence_root=evidence,
@@ -1420,6 +1427,18 @@ class SupervisorRuntime:
                         repetitions=self.measurement_repetitions,
                         kernel_ids=kernel_ids,
                     )
+                archive_kernel = None
+                if capability.journal is not None and capability.journal.view is not None:
+                    agent_git = capability.journal.view.agent_git
+                    supervisor_git_workspace = capability.journal.service.git_workspace
+
+                    def archive_kernel(side: str, agent_commit_id: str, source: bytes) -> str:
+                        del side  # Both ABBA sides use the same one-way identity mapping.
+                        return agent_git.archive_into(
+                            supervisor_git_workspace,
+                            agent_commit_id,
+                            source,
+                        )
                 effects = MeasurementEffects(
                     mode=self.config.optimization_mode, repetitions=self.measurement_repetitions,
                     private_reference_dir=self.config.private_reference_dir,
@@ -1431,6 +1450,7 @@ class SupervisorRuntime:
                     publish_outputs=lambda staged, args: self.publish_legacy_outputs(capability.workspace, staged, args),
                     deadline=capability.deadline, request_id=capability.request_id,
                     kernel_ids=kernel_ids,
+                    archive_kernel=archive_kernel,
                 )
                 result = self.experiments.execute(
                     staged,

@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import subprocess
 from pathlib import Path
 
 from aka.light.agent.home import open_private_directory
@@ -190,11 +191,55 @@ class EpisodeWorkspace:
             except FileNotFoundError:
                 continue
             publish(self.root, name, content)
+        # Establish Agent history before projecting controller-authored memory,
+        # so every Git identity in that projection can be translated into the
+        # local/peer Agent namespace.
+        self.agent_git.prepare()
         with open_private_directory(self.root / "memory"):
             pass
         for path in (self.worktree / "memory").glob("v*.json"):
             if path.stem[1:].isascii() and path.stem[1:].isdigit():
-                publish(self.root, f"memory/{path.name}", _read(path))
+                content = _read(path)
+                try:
+                    value = json.loads(content)
+                except (UnicodeError, json.JSONDecodeError):
+                    value = None
+                if isinstance(value, dict):
+                    from aka.light.workspace.agent_git import GIT_COMMIT_ID
+                    from aka.light.workspace.sources import from_git
+
+                    def project_commit_ids(item, key=""):
+                        if isinstance(item, dict):
+                            return {
+                                name: project_commit_ids(child, name)
+                                for name, child in item.items()
+                            }
+                        if isinstance(item, list):
+                            return [project_commit_ids(child, key) for child in item]
+                        if (
+                            isinstance(item, str)
+                            and "commit" in key
+                            and GIT_COMMIT_ID.fullmatch(item) is not None
+                        ):
+                            if self.agent_git.commit_reachable(item):
+                                return item
+                            try:
+                                source_at_commit = from_git(self.worktree, item)
+                            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                                return None
+                            return self.agent_git.find_kernel_commit(source_at_commit)
+                        return item
+
+                    content = (
+                        json.dumps(
+                            project_commit_ids(value),
+                            indent=2,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        )
+                        + "\n"
+                    ).encode()
+                publish(self.root, f"memory/{path.name}", content)
         for name in DIAGNOSTIC_TREES:
             with open_private_directory(self.root / name):
                 pass
@@ -205,7 +250,6 @@ class EpisodeWorkspace:
         # Do not install the evaluator or copy .git / control checkpoints.
         plugin_snapshot = self.plugin_registry.snapshot()
         # Refresh only reserved assets; custom Skills/tools survive Session resumes.
-        self.agent_git.prepare()
         self.prepare_session()
         durable_write_json(self.state_path, dict(state, kernel_digest=digest,
                                                controller_kernel_digest=digest,
@@ -267,7 +311,9 @@ class EpisodeWorkspace:
             "Use this trajectory-private Git repository for checkpoints and rollback. Remotes, "
             "credentials, hooks, submodules and LFS are disabled. Commit the complete candidate and "
             "keep the worktree clean before a Kernel-bound Runtime request or `candidate_ready` report; "
-            "HEAD is `kernel_commit_id`. `pivot` and `blocked` do not nominate the worktree. "
+            "Runtime never commits Agent work on your behalf. HEAD is `kernel_commit_id`; all Kernel "
+            "commit IDs shown here come from local or imported peer Git, never Supervisor Git. "
+            "`pivot` and `blocked` do not nominate the worktree. "
             + git_lifetime + "Imported peers are under "
             "`refs/atrex/shared/` and their measurement indexes under "
             "`refs/notes/atrex-measurements`.\n\n"

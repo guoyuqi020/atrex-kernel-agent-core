@@ -1016,7 +1016,7 @@ class EpisodeSearchDriver:
         except FileNotFoundError:
             version = main_adapter.latest_version(workspace) + 1
             record = copy.deepcopy(kernel["record"])
-            record.update(version=f"v{version}", git_commit_hash=kernel["commit"],
+            record.update(version=f"v{version}", git_commit_hash=kernel["kernel_id"],
                           long_horizon={"status": "search_broadcast", "search_epoch": epoch,
                                         "trajectory": kernel["trajectory"], "episode": kernel["episode"]})
             _, next_files = unpack(source)
@@ -1331,18 +1331,24 @@ class EpisodeSearchDriver:
             record = json.loads(git_blob(child.workspace, commit, record_path.relative_to(child.workspace).as_posix()))
             if record.get("quality_gate", {}).get("result") != "PASS":
                 raise RuntimeError("Accepted Episode lacks a passing sealed version record")
-            if (attempt.get("candidate_commit") and from_git(child.workspace, commit)
-                    != from_git(child.workspace, attempt["candidate_commit"])):
-                raise RuntimeError("Promoted search Kernel differs from the accepted Episode candidate")
+            agent_kernel_id = attempt.get(
+                "candidate_kernel_commit_id", attempt.get("candidate_kernel_id")
+            )
+            if isinstance(agent_kernel_id, str):
+                measured_source = MeasurementStore(
+                    supervisor_campaign_root(child.workspace) / "measurements"
+                ).read_kernel(agent_kernel_id)
+                if from_git(child.workspace, commit) != measured_source:
+                    raise RuntimeError(
+                        "Promoted search Kernel differs from the accepted Agent commit"
+                    )
             retained = self._kernel(
                 child.workspace,
                 commit,
                 record,
                 trajectory,
                 episode,
-                kernel_id=attempt.get(
-                    "candidate_kernel_commit_id", attempt.get("candidate_kernel_id")
-                ),
+                kernel_id=agent_kernel_id,
             )
         return {"epoch": epoch, "trajectory": trajectory, "episode": episode,
                 "status": attempt["status"], "retained_kernel": retained,

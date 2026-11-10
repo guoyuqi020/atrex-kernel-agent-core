@@ -45,6 +45,7 @@ BLOCKED = frozenset({
     "--backend", "--harness", "--atrex-bench-version", "--set", "--operator",
     "--deps-mode", "--replay-policy",
     "--num-correctness-cases", "--bench-iters", "--mode", "--lock-clocks",
+    "--shape-shards",
     # These select a different evaluator/source contract rather than tuning the
     # current operator request. They need first-class Runtime workflows.
     "--collective", "--numel", "--dtype", "--warmup-iters", "--subset",

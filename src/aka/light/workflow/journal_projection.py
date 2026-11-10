@@ -665,8 +665,8 @@ def validate_terminal(
         return f"published Episode handoff state is missing or invalid: {exc}"
     if value.get("episode") != expected_episode:
         return "published Episode handoff identity does not match the active Episode"
-    if value.get("base_commit") != base_commit or value.get("episode_branch") != branch:
-        return "published Episode handoff base commit or branch does not match"
+    if value.get("episode_branch") != branch:
+        return "published Episode handoff branch does not match"
     if value.get("state") != state:
         return "published Episode handoff status does not match"
     verified_runtime_projection = False
@@ -695,12 +695,21 @@ def validate_terminal(
         }
         if any(private.get(key) != item for key, item in expected.items()):
             return "private Runtime Episode identity or status does not match the handoff"
+        public_base_commit = private.get("base_kernel_id") or base_commit
+        if value.get("base_commit") != public_base_commit:
+            return (
+                "published Episode handoff base commit does not match the private "
+                "Agent baseline identity"
+            )
         if not private.get("finalized_at") or private.get("state") not in TERMINAL_STATUSES:
             return "private Runtime Episode state is not finalized"
         if private["finalized_at"] != value.get("finalized_at"):
             return "published handoff finalization does not match private Runtime Episode state"
-        if private.get("candidate_commit") != value.get("candidate_commit"):
-            return "published handoff candidate_commit does not match private Runtime Episode state"
+        if private.get("candidate_kernel_id") != value.get("candidate_commit"):
+            return (
+                "published handoff candidate_commit does not match the private "
+                "Agent Kernel identity"
+            )
         if private.get("candidate_kernel_id") != value.get("candidate_kernel_commit_id"):
             return (
                 "published handoff candidate_kernel_commit_id does not match "
@@ -769,6 +778,8 @@ def validate_terminal(
         if projected_ids - private_ids:
             return "published Episode handoff contains unknown Runtime Experiments"
         verified_runtime_projection = True
+    elif value.get("base_commit") != base_commit:
+        return "published Episode handoff base commit does not match"
     experiments = value.get("experiments")
     if not isinstance(experiments, list) or (
         not experiments and not (

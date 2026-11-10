@@ -1859,8 +1859,8 @@ def build_parser(parser_class=argparse.ArgumentParser) -> argparse.ArgumentParse
         type=int,
         default=os.environ.get("ATREX_EVAL_GPU_CLOCK_MHZ") or None,
         help=(
-            "Locked Eval graphics clock in MHz. L20N defaults to the verified "
-            "2370 MHz realizable application-clock bin. This is Runtime-owned in managed Sessions."
+            "Deprecated compatibility option. Light sends only lock_clocks=true; "
+            "Agate selects the graphics-clock frequency."
         ),
     )
     parser.add_argument(
@@ -3278,7 +3278,6 @@ def _run_typed_gateway(
         return None
 
     expected_shape_ids = _request_shape_ids(request)
-    native_shape_shards = request.get("options", {}).get("shape_shards")
     performance_timeout = int(
         request.get("runner_overrides", {}).get("perf_timeout_s", PERFORMANCE_TIMEOUT)
     )
@@ -3292,7 +3291,7 @@ def _run_typed_gateway(
                 performance_timeout=performance_timeout,
             ),
         )
-        if kind == "run" and native_shape_shards is None
+        if kind == "run"
         else [expected_shape_ids]
     )
     batched = len(shape_batches) > 1

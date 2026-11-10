@@ -44,6 +44,7 @@ from aka.light.workflow.constants import (
     PROMPTS_DIR,
     REPO_ROOT,
     SOL_SEED,
+    TEST_RESULT_PREFIX,
     WORKSPACE_INIT,
 )
 from aka.light.execution.recovery import (
@@ -1508,17 +1509,117 @@ class Campaign:
 
     @staticmethod
     def _print_v0_evaluator_output(test: subprocess.CompletedProcess[str]) -> None:
-        if test.stdout:
-            print(
-                test.stdout, end="" if test.stdout.endswith("\n") else "\n", flush=True
+        """Log one bounded evaluator summary without duplicating its full Record."""
+        from aka.light.evaluation.projection import (
+            GATEWAY_ERROR_PREFIX,
+            SOURCE_ERROR_PREFIX,
+        )
+
+        def bounded_text(value: object, limit: int = 1000) -> str:
+            raw = " ".join(str(value or "").split()).encode("utf-8")
+            if len(raw) <= limit:
+                return raw.decode("utf-8", errors="replace")
+            marker = b" ... [omitted] ... "
+            remaining = max(0, limit - len(marker))
+            left = remaining // 2
+            right = remaining - left
+            return (raw[:left] + marker + raw[-right:]).decode(
+                "utf-8", errors="replace"
             )
-        if test.stderr:
-            print(
-                test.stderr,
-                end="" if test.stderr.endswith("\n") else "\n",
-                file=sys.stderr,
-                flush=True,
-            )
+
+        def structured_payload(prefixes: tuple[str, ...]) -> tuple[str, dict] | None:
+            for line in reversed((test.stdout or "").splitlines()):
+                for prefix in prefixes:
+                    if not line.startswith(prefix):
+                        continue
+                    try:
+                        payload = json.loads(line[len(prefix):])
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    if isinstance(payload, dict):
+                        return prefix, payload
+            return None
+
+        structured = structured_payload(
+            (TEST_RESULT_PREFIX, GATEWAY_ERROR_PREFIX, SOURCE_ERROR_PREFIX)
+        )
+        summary: dict[str, object] = {"exit_code": test.returncode}
+        if structured is not None:
+            prefix, payload = structured
+            if prefix == TEST_RESULT_PREFIX:
+                all_pass = payload.get("all_pass")
+                summary["status"] = (
+                    "passed" if test.returncode == 0 and all_pass is True else "failed"
+                )
+                correctness = payload.get("correctness")
+                if isinstance(correctness, dict) and isinstance(
+                    correctness.get("status"), str
+                ):
+                    summary["correctness"] = correctness["status"]
+                elif isinstance(all_pass, bool):
+                    summary["correctness"] = "PASS" if all_pass else "FAIL"
+                for key in (
+                    "latency_us_geomean",
+                    "latency_us_arith_mean",
+                    "performance_score",
+                ):
+                    value = payload.get(key)
+                    if (
+                        type(value) in {int, float}
+                        and math.isfinite(value)
+                    ):
+                        summary[key] = value
+                measured = payload.get("measured_shape_count")
+                if type(measured) is not int:
+                    latencies = payload.get("latency_us_by_shape")
+                    measured = len(latencies) if isinstance(latencies, dict) else None
+                if type(measured) is int:
+                    summary["measured_shape_count"] = measured
+                for key in ("gateway_record_id", "eval_id"):
+                    if isinstance(payload.get(key), str):
+                        summary[key] = bounded_text(payload[key], 256)
+                failures = payload.get("failures")
+                if isinstance(failures, list) and failures:
+                    summary["failure_count"] = len(failures)
+                    summary["error_summary"] = [
+                        bounded_text(item) for item in failures[:2]
+                    ]
+                diagnostics = payload.get("actionable_diagnostics")
+                if isinstance(diagnostics, list) and diagnostics:
+                    summary["actionable_diagnostic_count"] = len(diagnostics)
+                    messages = [
+                        bounded_text(item.get("message"))
+                        for item in diagnostics[:2]
+                        if isinstance(item, dict) and item.get("message")
+                    ]
+                    if messages:
+                        summary["actionable_diagnostics"] = messages
+            else:
+                error = payload.get("error")
+                error = error if isinstance(error, dict) else payload
+                summary.update({
+                    "status": str(payload.get("status") or "failed"),
+                    "operation": str(payload.get("operation") or "evaluate"),
+                })
+                for key in ("gateway_record_id", "error_class", "reason"):
+                    value = payload.get(key) if key == "gateway_record_id" else error.get(key)
+                    if isinstance(value, str):
+                        summary[key] = bounded_text(value, 256)
+                message = error.get("message")
+                if message is not None:
+                    summary["error_summary"] = bounded_text(message)
+        else:
+            summary["status"] = "failed" if test.returncode else "completed"
+            detail = test.stderr or test.stdout
+            if detail:
+                summary["error_summary"] = bounded_text(detail)
+
+        print(
+            "[orchestrator] evaluator summary: "
+            + json.dumps(summary, ensure_ascii=False, sort_keys=True),
+            file=sys.stderr if test.returncode else sys.stdout,
+            flush=True,
+        )
 
     @property
     def generate_memory(self) -> bool:
@@ -1846,7 +1947,7 @@ class Campaign:
             raise RuntimeError(f"framework baseline v{n} {outcome}: {problem}")
 
         commit = self._commit_framework_baseline(n, result or {})
-        self._seed_episode_session_from_framework_baseline()
+        agent_commit = self._seed_episode_session_from_framework_baseline()
         try:
             mark_framework_baseline_accepted(
                 self.workspace,
@@ -1865,7 +1966,7 @@ class Campaign:
             state="candidate_ready",
             accepted=True,
             canonical_memory=(f"memory/v{n}.json" if self.generate_memory else ""),
-            candidate_commit=commit,
+            candidate_commit=agent_commit,
             outcome={
                 "summary": f"accepted self-contained {self.framework} framework baseline",
                 "next_directions": [],
@@ -1876,7 +1977,8 @@ class Campaign:
         )
         print(
             f"[orchestrator] framework baseline v{n} accepted: {self.framework} "
-            f"@ {commit[:8]} ({latency} us geomean)",
+            f"@ {(agent_commit[:8] if agent_commit else 'agent-git-unavailable')} "
+            f"({latency} us geomean)",
             flush=True,
         )
 
@@ -2546,13 +2648,14 @@ class Campaign:
             },
         )
 
-    def _seed_episode_session_from_framework_baseline(self) -> None:
-        """Make Episode 1 resume the latest accepted Framework Baseline Session."""
+    def _seed_episode_session_from_framework_baseline(self) -> str:
+        """Seed Episode 1 and return only the Agent-visible baseline commit."""
         from aka.light.workflow.store import CampaignStore
 
         store = CampaignStore(self.workspace)
         state = store.load_state()
         runtime = getattr(self, "_supervisor_runtime", None)
+        candidate = None
         if runtime is not None:
             try:
                 candidate = runtime.read_episode_journal(
@@ -2564,16 +2667,16 @@ class Campaign:
                 state.incumbent_kernel_commit_id = candidate
                 store.save_state(state)
         if self.agent_cli != "claude":
-            return
+            return candidate if isinstance(candidate, str) else ""
         marker_path = self.workspace / FRAMEWORK_BASELINE_FILE
         session_path = self.workspace / _FRAMEWORK_BASELINE_SESSION_PATH
         try:
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
             session = json.loads(session_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
-            return
+            return candidate if isinstance(candidate, str) else ""
         if marker.get("version") != f"v{FRAMEWORK_BASELINE_VERSION}":
-            return
+            return candidate if isinstance(candidate, str) else ""
         session_id = session.get("session_id")
         session_backend = session.get("session_backend")
         if (
@@ -2581,15 +2684,16 @@ class Campaign:
             or not session_id
             or session_backend != self.agent_cli
         ):
-            return
+            return candidate if isinstance(candidate, str) else ""
 
         # Never replace an Episode Session. This path only seeds a trajectory
         # before Episode 1; later resumes keep the latest Episode-owned ID.
         if state.episodes or state.session_id:
-            return
+            return candidate if isinstance(candidate, str) else ""
         state.session_id = session_id
         state.session_backend = session_backend
         store.save_state(state)
+        return candidate if isinstance(candidate, str) else ""
 
     def _restore_framework_baseline_candidate(self, v0_identity: str) -> None:
         """Restore an ignored snapshot only when the worktree fell back to the V0 wrapper."""
@@ -3137,7 +3241,22 @@ class Campaign:
         optimization["action_description"] = (
             f"first self-contained {self.framework} implementation of the whole operator"
         )
-        memory["git_commit_hash"] = kernel_commit
+        # Canonical memory is projected to the Agent. Never place the private
+        # Controller/Supervisor commit in it; use the accepted Agent HEAD only.
+        agent_kernel_commit = None
+        runtime = getattr(self, "_supervisor_runtime", None)
+        if runtime is not None:
+            try:
+                agent_kernel_commit = runtime.read_episode_journal(
+                    _FRAMEWORK_BASELINE_EPISODE
+                ).get("candidate_kernel_id")
+            except (OSError, RuntimeError, ValueError):
+                agent_kernel_commit = None
+        memory["git_commit_hash"] = (
+            agent_kernel_commit
+            if isinstance(agent_kernel_commit, str) and agent_kernel_commit
+            else None
+        )
         memory[FRAMEWORK_BASELINE_CATEGORY] = {
             "framework": self.framework,
             "validated_stages": ["combined-base-performance+five-cases" if self.atrex_bench_root

@@ -52,7 +52,11 @@ from aka.light.workflow.search_driver import (
 )
 from aka.light.workflow.session import LongSessionRunner
 from aka.light.workflow.store import CampaignStore
-from aka.light.workspace.agent_git import AgentGit, DirtyKernelWorktree
+from aka.light.workspace.agent_git import (
+    AgentGit,
+    DirtyKernelWorktree,
+    supervisor_archive_ref,
+)
 from aka.light.workspace.auxiliary import AuxiliaryWorkspace
 from aka.light.workspace.episode import EpisodeWorkspace
 from aka.light.workspace.files import publish_if_changed
@@ -3587,7 +3591,9 @@ def _runtime_projection(
 ) -> tuple[Path, dict[str, object], str]:
     private_path = tmp_path / "private.json"
     public_path = tmp_path / "journal.json"
-    candidate = "b" * 40
+    supervisor_candidate = "b" * 40
+    agent_candidate = "c" * 40
+    agent_base = "d" * 40
     private = initialize_journal(
         private_path,
         episode=1,
@@ -3596,14 +3602,15 @@ def _runtime_projection(
         tool_modules=tool_modules,
     )
     private.update(
+        base_kernel_id=agent_base,
         state="candidate_ready",
         outcome={
             "summary": "Measured candidate is ready.",
             "next_directions": [],
             "gateway_record_ids": ["gateway-" + "1" * 32],
         },
-        candidate_commit=candidate,
-        candidate_kernel_id="c" * 40,
+        candidate_commit=supervisor_candidate,
+        candidate_kernel_id=agent_candidate,
         finalized_at="2026-10-31T00:00:00+00:00",
     )
     private_write(private_path, private)
@@ -3613,9 +3620,12 @@ def _runtime_projection(
         runtime_journal_projection=True,
     )
     public["candidate_kernel_commit_id"] = public.pop("candidate_kernel_id")
+    public["candidate_commit"] = agent_candidate
+    public["base_commit"] = agent_base
+    public.pop("base_kernel_id")
     public.pop("runtime_managed")
     public_path.write_text(json.dumps(public), encoding="utf-8")
-    return public_path, private, candidate
+    return public_path, private, agent_candidate
 
 
 def test_direction_only_runtime_projection_accepts_candidate_without_experiment(tmp_path):
@@ -3633,6 +3643,52 @@ def test_direction_only_runtime_projection_accepts_candidate_without_experiment(
         candidate_commit=candidate,
         runtime_journal_loader=lambda: private,
     ) == ""
+    public = json.loads(public_path.read_text(encoding="utf-8"))
+    assert public["candidate_commit"] == "c" * 40
+    assert public["base_commit"] == "d" * 40
+    assert private["base_commit"] not in public_path.read_text(encoding="utf-8")
+    assert private["candidate_commit"] not in public_path.read_text(encoding="utf-8")
+
+
+def test_runtime_report_projection_uses_only_agent_git_identities(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    evidence = tmp_path / "journals" / "episodes" / "e00000001"
+    evidence.mkdir(parents=True)
+    private = initialize_journal(
+        evidence / "journal.json",
+        episode=1,
+        base_commit="a" * 40,
+        branch="episode-1",
+        tool_modules=(),
+    )
+    private.update(
+        base_kernel_id="d" * 40,
+        state="pivot",
+        outcome={
+            "summary": "Incumbent remains best.",
+            "next_directions": [],
+            "gateway_record_ids": [],
+        },
+        finalized_at="2026-11-10T00:00:00+00:00",
+    )
+    private_write(evidence / "journal.json", private)
+    service = SupervisorJournalService(
+        workspace=workspace,
+        git_workspace=workspace,
+        campaign_root=tmp_path / "journals",
+        evidence_root=evidence,
+        supervisor_git=True,
+    )
+
+    service._publish_legacy_report(private)
+    service._check_legacy_journal()
+
+    public_path = workspace / ".atrex_long_horizon" / "journal.json"
+    public = json.loads(public_path.read_text(encoding="utf-8"))
+    assert public["base_commit"] == "d" * 40
+    assert "base_kernel_id" not in public
+    assert "a" * 40 not in public_path.read_text(encoding="utf-8")
 
 
 def test_experiment_runtime_projection_still_requires_candidate_experiment(tmp_path):
@@ -3663,6 +3719,26 @@ def test_imported_measurement_is_readable_but_not_a_local_task_cache(tmp_path):
     assert destination.read_kernel(kernel_id) == source.read_kernel(kernel_id)
     assert destination.kernel_records(kernel_id)[0]["gateway_record_id"] == record_id
     assert not (destination.root / "tasks").exists()
+
+
+def test_measurement_store_keeps_private_git_mapping_out_of_public_identity(tmp_path):
+    store = MeasurementStore(tmp_path / "measurements")
+    source = b"def kernel():\n    return 1\n"
+    agent_commit = "1" * 40
+    supervisor_commit = "2" * 40
+
+    identity = store.kernel(
+        source,
+        agent_commit,
+        supervisor_commit_id=supervisor_commit,
+    )
+
+    assert identity == {
+        "kernel_id": agent_commit,
+        "kernel_artifact_digest": "sha256:" + hashlib.sha256(source).hexdigest(),
+    }
+    assert store.supervisor_kernel_commit(agent_commit) == supervisor_commit
+    assert "supervisor" not in json.dumps(identity)
 
 
 def test_same_source_under_distinct_git_commits_has_distinct_task_identity(tmp_path):
@@ -5049,15 +5125,28 @@ def test_agent_git_persists_work_and_installs_runtime_source_refs(tmp_path):
     (workspace / "impl").mkdir()
     (workspace / "impl" / "helper.py").write_text("VALUE = 2\n", encoding="utf-8")
     persisted = repo.persist()
+    assert persisted == first
+    assert "impl/helper.py" in subprocess.run(
+        ["git", "status", "--short", "--untracked-files=all"], cwd=workspace,
+        text=True, capture_output=True, check=True,
+    ).stdout
+    subprocess.run(["git", "add", "impl/helper.py"], cwd=workspace, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "Agent: preserve helper"],
+        cwd=workspace,
+        check=True,
+    )
+    persisted = repo.persist()
     assert persisted != first
     runtime_commit = repo.install_runtime_ref(
-        "refs/tags/atrex/incumbent", source, message="Runtime: incumbent kernel-test"
+        "refs/tags/atrex/incumbent", source,
+        message="Runtime: incumbent kernel-test", commit_id=first,
     )
     assert subprocess.run(
         ["git", "rev-parse", "refs/tags/atrex/incumbent"], cwd=workspace,
         text=True, capture_output=True, check=True,
     ).stdout.strip() == runtime_commit
-    with pytest.raises(ValueError, match="private source snapshot"):
+    with pytest.raises(ValueError, match="existing local or imported peer"):
         repo.install_runtime_ref(
             "refs/tags/atrex/historical-private",
             source,
@@ -5070,10 +5159,10 @@ def test_agent_git_persists_work_and_installs_runtime_source_refs(tmp_path):
     assert restored_source == source
     resumed = AgentGit(restored, bundle)
     resumed.prepare()
-    assert subprocess.run(
+    assert "Runtime: preserve Episode WIP checkpoint" not in subprocess.run(
         ["git", "log", "--all", "--format=%s"], cwd=restored,
         text=True, capture_output=True, check=True,
-    ).stdout.count("Runtime: preserve Episode WIP checkpoint") == 1
+    ).stdout
     assert (restored / "impl" / "helper.py").read_text() == "VALUE = 2\n"
 
 
@@ -5160,7 +5249,7 @@ def test_agent_git_head_is_kernel_id_only_for_clean_exact_source(tmp_path):
     assert repository.kernel_commit(snapshot(workspace)) == second
 
 
-def test_supervisor_seals_exact_agent_commit_without_recommit(tmp_path):
+def test_supervisor_archives_agent_commit_under_distinct_private_identity(tmp_path):
     controller = _controller_repository(
         tmp_path / "controller", "def run():\n    return 1\n"
     )
@@ -5189,19 +5278,29 @@ def test_supervisor_seals_exact_agent_commit_without_recommit(tmp_path):
 
     try:
         sealed = agent_git.seal_into(worktree.path, agent_commit, candidate_source)
-        assert sealed == agent_commit
+        assert sealed != agent_commit
+        assert agent_git.archive_into(
+            worktree.path, agent_commit, candidate_source
+        ) == sealed
         assert subprocess.run(
-            ["git", "rev-parse", f"refs/atrex/accepted/{agent_commit}"],
+            ["git", "rev-parse", supervisor_archive_ref(agent_commit)],
             cwd=worktree.path,
             text=True,
             capture_output=True,
             check=True,
-        ).stdout.strip() == agent_commit
+        ).stdout.strip() == sealed
+        assert subprocess.run(
+            ["git", "rev-parse", f"refs/atrex/accepted/{sealed}"],
+            cwd=worktree.path,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip() == sealed
         assert subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=worktree.path,
             text=True, capture_output=True, check=True,
         ).stdout.strip() == base_commit
-        violation, paths = worktree.validate_candidate(agent_commit)
+        violation, paths = worktree.validate_candidate(sealed)
         assert violation == ""
         assert paths == ["kernel.py"]
         assert snapshot(worktree.path) == candidate_source
@@ -5209,7 +5308,7 @@ def test_supervisor_seals_exact_agent_commit_without_recommit(tmp_path):
         promotion = promote_candidate(
             controller,
             base_commit=base_commit,
-            candidate_commit=agent_commit,
+            candidate_commit=sealed,
             episode=1,
             evidence={
                 "episode": 1,
@@ -5226,14 +5325,49 @@ def test_supervisor_seals_exact_agent_commit_without_recommit(tmp_path):
 
         assert from_git(controller, promotion) == candidate_source
         assert subprocess.run(
-            ["git", "rev-parse", f"refs/atrex/accepted/{agent_commit}"],
+            ["git", "rev-parse", supervisor_archive_ref(agent_commit)],
             cwd=controller,
             text=True,
             capture_output=True,
             check=True,
-        ).stdout.strip() == agent_commit
+        ).stdout.strip() == sealed
     finally:
         worktree.remove(controller)
+
+
+def test_agent_workspace_projects_memory_commits_into_agent_git(tmp_path):
+    controller = _controller_repository(
+        tmp_path / "controller", "def run():\n    return 1\n"
+    )
+    controller_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=controller,
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    (controller / "memory").mkdir()
+    (controller / "memory" / "v1.json").write_text(
+        json.dumps({
+            "version": "v1",
+            "git_commit_hash": controller_commit,
+            "long_horizon": {"candidate_commit": controller_commit},
+        }),
+        encoding="utf-8",
+    )
+    agent_root = tmp_path / "runtime" / "agent-workspace"
+    view = EpisodeWorkspace(
+        controller,
+        tmp_path / "evidence",
+        adaptive_root=tmp_path / "runtime" / "adaptive-state",
+        episode=1,
+        persistent_root=agent_root,
+    )
+
+    view.prepare()
+
+    agent_commit = view.agent_git.head()
+    projected = json.loads((agent_root / "memory" / "v1.json").read_text())
+    assert agent_commit and agent_commit != controller_commit
+    assert projected["git_commit_hash"] == agent_commit
+    assert projected["long_horizon"]["candidate_commit"] == agent_commit
 
 
 def test_agent_workspace_is_stable_across_episode_controller_worktrees(tmp_path):
@@ -5527,6 +5661,12 @@ def test_agent_git_restores_unmerged_branches_and_active_checkout(tmp_path):
     (workspace / "impl" / "ksplit.py").write_text(
         "KSPLIT = 4\n", encoding="utf-8"
     )
+    subprocess.run(["git", "add", "impl/ksplit.py"], cwd=workspace, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "Agent: try KSPLIT=4"],
+        cwd=workspace,
+        check=True,
+    )
     repo.persist()
 
     restored = tmp_path / "restored"
@@ -5559,6 +5699,12 @@ def test_epoch_git_exchange_filters_paths_and_preserves_peer_ref(tmp_path):
     (source_workspace / "impl" / "peer.py").write_text("KSPLIT = 2\n", encoding="utf-8")
     (source_workspace / "scratch").mkdir()
     (source_workspace / "scratch" / "secret.txt").write_text("private\n", encoding="utf-8")
+    subprocess.run(["git", "add", "impl/peer.py"], cwd=source_workspace, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "Agent: peer candidate"],
+        cwd=source_workspace,
+        check=True,
+    )
     source.persist()
 
     export = tmp_path / "peer.bundle"

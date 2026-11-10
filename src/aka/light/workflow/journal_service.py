@@ -390,6 +390,9 @@ def initialize_journal(
         "episode": episode,
         "memory_version": memory_version,
         "base_commit": base_commit,
+        # Public identity for the same source in Agent-owned Git. The
+        # controller commit above remains private archival state.
+        "base_kernel_id": None,
         "episode_branch": branch,
         "state": "in_progress",
         "direction_events": [],
@@ -420,6 +423,14 @@ def load_journal(path: Path) -> dict[str, Any]:
         raise RuntimeStateError("The private Runtime Episode state has invalid collections.")
     if type(value.get("research_records", True)) is not bool:
         raise RuntimeStateError("The private Runtime Episode state has an invalid research policy.")
+    base_kernel_id = value.get("base_kernel_id")
+    if base_kernel_id is not None and (
+        not isinstance(base_kernel_id, str)
+        or KERNEL_RECORD_ID_RE.fullmatch(base_kernel_id) is None
+    ):
+        raise RuntimeStateError(
+            "The private Runtime Episode state has an invalid Agent baseline identity."
+        )
     modules = _tool_modules(value)
     if bool(modules) != value.get("research_records", True):
         raise RuntimeStateError(
@@ -4264,9 +4275,13 @@ class SupervisorJournalService:
             raise ValueError("Legacy .atrex_long_horizon/journal.json must contain a JSON object")
         current = load_journal(self.path)
         if legacy.get("runtime_journal_projection") is True:
-            if any(
-                legacy.get(key) != current[key]
-                for key in ("episode", "base_commit", "episode_branch")
+            expected_public_base = (
+                current.get("base_kernel_id") or current["base_commit"]
+            )
+            if (
+                legacy.get("episode") != current["episode"]
+                or legacy.get("base_commit") != expected_public_base
+                or legacy.get("episode_branch") != current["episode_branch"]
             ):
                 raise ValueError(
                     "Legacy .atrex_long_horizon/journal.json projection belongs to a different Episode"
@@ -4311,10 +4326,22 @@ class SupervisorJournalService:
     def _publish_legacy_report(self, current: dict[str, Any]) -> None:
         """Adapt the private report to existing Long Horizon consumers, without Git writes."""
         projection = dict(current, schema_version=1, runtime_journal_projection=True)
+        public_candidate_commit = current.get("candidate_kernel_id")
+        if not public_candidate_commit and not self.supervisor_git:
+            # Legacy Agent-owned Journals already store their public Git ID in
+            # candidate_commit and have no separate Supervisor archive.
+            public_candidate_commit = current.get("candidate_commit")
         if "candidate_kernel_id" in projection:
             projection["candidate_kernel_commit_id"] = projection.pop(
                 "candidate_kernel_id"
             )
+        # ``current.candidate_commit`` is a Supervisor-private archival commit.
+        # The public projection and handoff use only the Agent's own Git ID.
+        projection["candidate_commit"] = public_candidate_commit
+        projection["base_commit"] = (
+            current.get("base_kernel_id") or current.get("base_commit")
+        )
+        projection.pop("base_kernel_id", None)
         projection.pop("runtime_managed", None)
         projection.pop("submitted_report", None)
         experiments = []
@@ -4371,8 +4398,8 @@ class SupervisorJournalService:
             (json.dumps(projection, ensure_ascii=False, allow_nan=False) + "\n").encode(),
         )
         handoff = {"status": current["state"]}
-        if current.get("candidate_commit"):
-            handoff["candidate_commit"] = current["candidate_commit"]
+        if public_candidate_commit:
+            handoff["candidate_commit"] = public_candidate_commit
         # Handoff is the final publication: a failed journal write must not
         # signal completion. Retrying the same report republishes these files.
         publish(
@@ -4712,10 +4739,6 @@ class SupervisorJournalService:
                     "Supervisor Agent-commit sealing is unavailable; report was not accepted"
                 )
             candidate_commit = seal_candidate(agent_kernel_id, kernel_source)
-            if candidate_commit != agent_kernel_id:
-                raise RuntimeStateError(
-                    "Supervisor changed the Agent Kernel commit identity while sealing"
-                )
             from aka.light.workspace.git import EpisodeWorktree
 
             violation, _ = EpisodeWorktree(
@@ -4737,7 +4760,7 @@ class SupervisorJournalService:
                         ),
                     )
                 raise RuntimeStateError(
-                    "Supervisor rejected the imported Agent Kernel commit: " + violation
+                    "Supervisor rejected its private Kernel archive: " + violation
                 )
         current["state"] = status
         current["outcome"] = {
@@ -4768,7 +4791,7 @@ class SupervisorJournalService:
             "status": "accepted",
             "kernel_commit_id": agent_kernel_id,
             "message": (
-                "Report accepted; Supervisor sealed the exact Agent commit for verification"
+                "Report accepted; Supervisor archived the exact Agent source for verification"
                 if candidate_commit and self.supervisor_git else
                 "Report accepted; Agent commit queued for existing Supervisor verification"
                 if candidate_commit

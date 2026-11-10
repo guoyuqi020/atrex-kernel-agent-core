@@ -64,6 +64,7 @@ from aka.light.evaluation.policy import (
     CORRECTNESS_CASES,
     SHAPE_BATCH_SIZE,
     measurement_defaults,
+    runner_overrides,
     resolved_gpu_clock_mhz,
 )
 from aka.light.evaluation.native_abba import (
@@ -352,6 +353,58 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertNotIn("tools/record.py", receipt["details"])
         self.assertEqual(agent_result["result"]["stdout"], stdout)
         self.assertEqual(len(agent_result["result"]["latency_us_by_shape"]), 100)
+
+    def test_compact_receipt_surfaces_bounded_actionable_compiler_tail(self):
+        record_id = "gateway-" + "3" * 32
+        compiler_tail = "kernel.cu:91: error: no matching function for call"
+        long_message = "template instantiation note\n" * 400 + compiler_tail
+        diagnostics = [
+            {
+                "stage": "compile",
+                "shape_id": str(index),
+                "message": long_message if index == 0 else f"diagnostic {index}",
+            }
+            for index in range(6)
+        ]
+        agent_result = {
+            "operation": "evaluate",
+            "status": "failed",
+            "gateway_record_id": record_id,
+            "result": {
+                "correct": False,
+                "actionable_diagnostics": diagnostics,
+            },
+        }
+
+        receipt = compact_receipt(agent_result)
+
+        self.assertEqual(len(receipt["actionable_diagnostics"]), 4)
+        first = receipt["actionable_diagnostics"][0]
+        self.assertEqual(first["stage"], "compile")
+        self.assertEqual(first["shape_id"], "0")
+        self.assertIn(compiler_tail, first["message"])
+        self.assertTrue(first["message_truncated"])
+        self.assertEqual(first["message_bytes"], len(long_message.encode()))
+        self.assertEqual(receipt["actionable_diagnostics_count"], 6)
+        self.assertTrue(receipt["actionable_diagnostics_truncated"])
+        self.assertEqual(receipt["actionable_diagnostics_location"], {
+            "path": f"records/{record_id}.json",
+            "field": "result.actionable_diagnostics",
+        })
+        self.assertEqual(
+            agent_result["result"]["actionable_diagnostics"][0]["message"],
+            long_message,
+        )
+
+    def test_compact_receipt_omits_actionable_diagnostics_when_absent(self):
+        receipt = compact_receipt({
+            "operation": "evaluate",
+            "status": "completed",
+            "result": {"correct": True},
+        })
+
+        self.assertNotIn("actionable_diagnostics", receipt)
+        self.assertNotIn("actionable_diagnostics_location", receipt)
 
     def test_env_gateway_response_preserves_redacted_executor_stdout(self):
         from aka.light.runtime.server import agent_gateway_response
@@ -1651,7 +1704,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             3,
         )
 
-    def test_eval_outer_batches_select_ten_shapes_and_leave_ray_data_automatic(self):
+    def test_eval_outer_batches_use_native_shape_ids_and_one_ray_shard(self):
         self.assertEqual(SHAPE_BATCH_SIZE, 10)
         self.assertEqual(CampaignRuntimeSettings().shape_batch_size, 10)
         request = {
@@ -1675,45 +1728,49 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         requests = [shape_batch_request(request, ids) for ids in batches]
 
         self.assertEqual([len(ids) for ids in batches], [10, 10, 1])
+        full = [str(index) for index in range(21)]
         self.assertEqual(
             [list(item["reference"]["shapes"]) for item in requests],
-            batches,
+            [full, full, full],
         )
         self.assertEqual(
             [list(item["reference"]["metadata"]["cases"]) for item in requests],
-            batches,
+            [full, full, full],
         )
         self.assertEqual(
             [list(item["reference"]["roofline"]["shapes"]) for item in requests],
-            batches,
+            [full, full, full],
         )
         self.assertEqual(
             [item["reference"]["metadata"]["num_shapes"] for item in requests],
-            [10, 10, 1],
+            [21, 21, 21],
         )
+        self.assertEqual([item["options"]["shape_ids"] for item in requests], batches)
         self.assertTrue(all("shape_ids" not in item["runner_overrides"]
                             for item in requests))
-        self.assertTrue(all("shape_shards" not in item["options"] for item in requests))
+        self.assertTrue(all(item["options"]["shape_shards"] == 1 for item in requests))
         self.assertTrue(all(item["lock_clocks"] is True for item in requests))
         self.assertEqual(len(request["reference"]["shapes"]), 21)
         self.assertEqual(len(request["runner_overrides"]["shape_ids"]), 21)
 
-    def test_l20n_eval_defaults_to_verified_locked_clock(self):
+    def test_eval_delegates_locked_clock_frequency_to_agate(self):
         defaults = measurement_defaults("L20N")
 
         self.assertIs(defaults["lock_clocks"], True)
-        self.assertEqual(defaults["runner_overrides"]["gpu_clock_mhz"], 2370)
+        self.assertNotIn("gpu_clock_mhz", defaults["runner_overrides"])
         self.assertIs(
             defaults["runner_overrides"]["clock_lock_fail_on_deviation"],
             False,
         )
-        self.assertEqual(resolved_gpu_clock_mhz("NVIDIA L20N"), 2370)
-        self.assertEqual(
-            resolved_gpu_clock_mhz("NVIDIA RTX PRO 5000 Blackwell"), 2370
+        self.assertIsNone(resolved_gpu_clock_mhz("NVIDIA L20N"))
+        self.assertIsNone(
+            resolved_gpu_clock_mhz("NVIDIA RTX PRO 5000 Blackwell")
         )
-        self.assertEqual(resolved_gpu_clock_mhz("l20n", 2400), 2400)
-        with self.assertRaisesRegex(ValueError, "positive integer"):
-            resolved_gpu_clock_mhz("L20N", 0)
+        self.assertIsNone(resolved_gpu_clock_mhz("l20n", 2400))
+        self.assertNotIn(
+            "gpu_clock_mhz",
+            runner_overrides(gpu_clock_mhz=2400),
+        )
 
     def test_eval_timeout_rejects_one_shape_above_gateway_limit(self):
         with self.assertRaisesRegex(ValueError, "One Shape exceeds"):
@@ -3086,7 +3143,7 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertNotIn("rtol", request["options"])
         self.assertNotIn("correctness_max_rel_l2", request["options"])
         self.assertIs(request["lock_clocks"], True)
-        self.assertEqual(request["runner_overrides"]["gpu_clock_mhz"], 2370)
+        self.assertNotIn("gpu_clock_mhz", request["runner_overrides"])
 
     def test_v0_and_candidates_share_60_second_performance_timeout(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -3414,6 +3471,106 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("elementwise tolerance failed", problem)
         self.assertIn('\"max_elementwise_rel_diff\": 0.125', problem)
         self.assertNotEqual(problem, "combined validation command failed (exit=1)")
+
+    def test_orchestrator_evaluator_log_uses_compact_success_summary(self):
+        result = {
+            "all_pass": True,
+            "latency_us_geomean": 4.5,
+            "latency_us_arith_mean": 5.0,
+            "performance_score": 2.0,
+            "latency_us_by_shape": {str(index): index + 0.5 for index in range(10)},
+            "performance_by_shape": {
+                str(index): {"timing_stats": {"runs": [index] * 1000}}
+                for index in range(10)
+            },
+            "correctness": {"status": "PASS"},
+            "gateway_record_id": "gateway-" + "4" * 32,
+            "eval_id": "eval-123",
+        }
+        completed = subprocess.CompletedProcess(
+            ["python", "test_kernel.py"],
+            0,
+            "[test_kernel] RESULT_JSON=" + json.dumps(result) + "\n",
+            "large compatibility warning\n" * 1000,
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+            Campaign._print_v0_evaluator_output(completed)
+
+        rendered = stdout.getvalue()
+        self.assertIn('"status": "passed"', rendered)
+        self.assertIn('"correctness": "PASS"', rendered)
+        self.assertIn('"latency_us_geomean": 4.5', rendered)
+        self.assertIn('"measured_shape_count": 10', rendered)
+        self.assertIn('"gateway_record_id": "gateway-', rendered)
+        self.assertNotIn("performance_by_shape", rendered)
+        self.assertNotIn("timing_stats", rendered)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertLess(len(rendered), 1000)
+
+    def test_orchestrator_evaluator_log_uses_bounded_failure_summary(self):
+        root_cause = "kernel.cu:91: error: no matching function for call"
+        result = {
+            "all_pass": False,
+            "failures": ["shape 0 compile failed"],
+            "actionable_diagnostics": [{
+                "stage": "compile",
+                "shape_id": "0",
+                "message": "template note\n" * 1000 + root_cause,
+            }],
+        }
+        completed = subprocess.CompletedProcess(
+            ["python", "test_kernel.py"],
+            1,
+            "[test_kernel] RESULT_JSON=" + json.dumps(result) + "\n",
+            "",
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+            Campaign._print_v0_evaluator_output(completed)
+
+        rendered = stderr.getvalue()
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn('"status": "failed"', rendered)
+        self.assertIn('"failure_count": 1', rendered)
+        self.assertIn(root_cause, rendered)
+        self.assertNotIn("RESULT_JSON", rendered)
+        self.assertLess(len(rendered), 3000)
+
+    def test_orchestrator_evaluator_log_summarizes_gateway_error(self):
+        error = {
+            "operation": "evaluate",
+            "status": "failed",
+            "gateway_record_id": "gateway-" + "5" * 32,
+            "error": {
+                "error_class": "timeout",
+                "reason": "job_deadline_exceeded",
+                "message": "job deadline exceeded after 600 seconds",
+                "details": {"large": "x" * 100_000},
+            },
+        }
+        completed = subprocess.CompletedProcess(
+            ["python", "test_kernel.py"],
+            75,
+            "[sandbox] GATEWAY_ERROR_JSON=" + json.dumps(error) + "\n",
+            "",
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with patch("sys.stdout", stdout), patch("sys.stderr", stderr):
+            Campaign._print_v0_evaluator_output(completed)
+
+        rendered = stderr.getvalue()
+        self.assertIn('"error_class": "timeout"', rendered)
+        self.assertIn('"reason": "job_deadline_exceeded"', rendered)
+        self.assertIn("job deadline exceeded after 600 seconds", rendered)
+        self.assertNotIn('"details"', rendered)
+        self.assertLess(len(rendered), 2000)
 
     def test_agent_visible_compiler_diagnostic_preserves_complete_tail(self):
         repeated = "template instantiation note from torch headers\n" * 40_000

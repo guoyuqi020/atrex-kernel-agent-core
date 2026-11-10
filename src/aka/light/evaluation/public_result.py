@@ -26,6 +26,8 @@ PUBLIC_IDENTITIES = (
 )
 IDENTITIES = (*PRIVATE_IDENTITIES, *PUBLIC_IDENTITIES)
 RECEIPT_TEXT_PREVIEW_BYTES = 2048
+RECEIPT_ACTIONABLE_DIAGNOSTIC_LIMIT = 4
+RECEIPT_DIAGNOSTIC_SHAPE_LIMIT = 16
 _RECEIPT_RESULT_FIELDS = (
     "correct",
     "passed",
@@ -124,6 +126,32 @@ def _receipt_metrics(value: object) -> dict:
     return summary
 
 
+def _receipt_actionable_diagnostic(value: object) -> dict | None:
+    """Return one bounded diagnostic while preserving the actionable tail."""
+    if not isinstance(value, dict):
+        return None
+    summary = {}
+    for key in ("stage", "shape_id"):
+        item = value.get(key)
+        if isinstance(item, str):
+            summary[key] = _receipt_text(item, limit=256)["preview"]
+    shape_ids = value.get("shape_ids")
+    if isinstance(shape_ids, list):
+        summary["shape_ids"] = [
+            _receipt_text(str(item), limit=256)["preview"]
+            for item in shape_ids[:RECEIPT_DIAGNOSTIC_SHAPE_LIMIT]
+        ]
+        if len(shape_ids) > RECEIPT_DIAGNOSTIC_SHAPE_LIMIT:
+            summary["shape_ids_truncated"] = True
+    message = value.get("message")
+    if isinstance(message, str):
+        preview = _receipt_text(message)
+        summary["message"] = preview["preview"]
+        summary["message_bytes"] = preview["bytes"]
+        summary["message_truncated"] = preview["truncated"]
+    return summary or None
+
+
 def compact_receipt(agent_result: dict) -> dict:
     """Return bounded terminal feedback while the full result stays in records/."""
     result = agent_result.get("result")
@@ -174,12 +202,34 @@ def compact_receipt(agent_result: dict) -> dict:
                     "path": receipt["record_path"],
                     "field": f"result.{stream}",
                 }
+    diagnostics = result.get("actionable_diagnostics")
+    if isinstance(diagnostics, list):
+        bounded_diagnostics = []
+        diagnostic_count = 0
+        for diagnostic in diagnostics:
+            projected = _receipt_actionable_diagnostic(diagnostic)
+            if projected is None:
+                continue
+            diagnostic_count += 1
+            if len(bounded_diagnostics) < RECEIPT_ACTIONABLE_DIAGNOSTIC_LIMIT:
+                bounded_diagnostics.append(projected)
+        if bounded_diagnostics:
+            receipt["actionable_diagnostics"] = bounded_diagnostics
+            receipt["actionable_diagnostics_count"] = diagnostic_count
+            receipt["actionable_diagnostics_truncated"] = (
+                diagnostic_count > len(bounded_diagnostics)
+            )
+            if "record_path" in receipt:
+                receipt["actionable_diagnostics_location"] = {
+                    "path": receipt["record_path"],
+                    "field": "result.actionable_diagnostics",
+                }
     receipt["result"] = summary
     receipt["result_fields"] = sorted(str(key) for key in result)[:128]
     receipt["details"] = (
         f"Full result: {receipt['record_path']}. Read or query that JSON file directly and "
-        "select only the fields or Shape needed for the next decision. Complete stream locations "
-        "are listed explicitly in stdout_location and stderr_location when present."
+        "select only the fields or Shape needed for the next decision. Complete stream and "
+        "actionable diagnostic locations are listed explicitly when present."
         if "record_path" in receipt
         else "No Agent-visible Gateway Record path is available for this response."
     )

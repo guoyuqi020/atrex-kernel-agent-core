@@ -66,7 +66,7 @@ def accepted_candidate_ref(candidate_commit: str) -> str:
     return f"refs/atrex/accepted/{candidate_commit}"
 
 
-def _is_sealed_agent_commit(workspace: Path, candidate_commit: str) -> bool:
+def _is_private_kernel_snapshot(workspace: Path, candidate_commit: str) -> bool:
     return git_text(
         workspace,
         "rev-parse",
@@ -197,15 +197,15 @@ class EpisodeWorktree:
         )
         if not resolved:
             return "candidate_commit does not resolve", []
-        sealed_agent_commit = _is_sealed_agent_commit(self.path, resolved)
-        if not sealed_agent_commit and resolved != git_head(self.path):
+        private_snapshot = _is_private_kernel_snapshot(self.path, resolved)
+        if not private_snapshot and resolved != git_head(self.path):
             return "candidate_commit must equal episode HEAD", []
         branch = git_text(
             self.path, "symbolic-ref", "--quiet", "--short", "HEAD", check=False
         )
         if branch != self.branch:
             return "episode worktree left its isolated branch", []
-        if not sealed_agent_commit:
+        if not private_snapshot:
             ancestor = _git(
                 self.path,
                 "merge-base",
@@ -225,7 +225,7 @@ class EpisodeWorktree:
                     return "candidate changed its source contract", []
                 paths = (
                     source_changed_paths(self.path, self.base_commit, resolved)
-                    if sealed_agent_commit
+                    if private_snapshot
                     else changed_paths(self.path, self.base_commit, resolved)
                 )
                 if not allowed_changes(paths, policy):
@@ -247,7 +247,7 @@ class EpisodeWorktree:
             return "worktree kernel.py must match candidate_commit", []
         paths = (
             source_changed_paths(self.path, self.base_commit, resolved)
-            if sealed_agent_commit
+            if private_snapshot
             else changed_paths(self.path, self.base_commit, resolved)
         )
         if not paths:
@@ -304,10 +304,10 @@ class EpisodeWorktree:
 
     def archive(self, destination: Path, candidate_commit: str = "HEAD") -> Path:
         destination.mkdir(parents=True, exist_ok=True)
-        sealed_agent_commit = _is_sealed_agent_commit(self.path, candidate_commit)
+        private_snapshot = _is_private_kernel_snapshot(self.path, candidate_commit)
         source_paths = (
             source_changed_paths(self.path, self.base_commit, candidate_commit)
-            if sealed_agent_commit
+            if private_snapshot
             else changed_paths(self.path, self.base_commit, candidate_commit)
         )
         committed_patch = _git(
@@ -344,7 +344,7 @@ class EpisodeWorktree:
                 "branch": self.branch,
                 "head": git_head(self.path),
                 "candidate_commit": candidate_commit,
-                "sealed_agent_commit": sealed_agent_commit,
+                "private_supervisor_snapshot": private_snapshot,
                 "dirty_paths": working_changes(self.path),
             },
         )
@@ -379,11 +379,11 @@ def promote_candidate(
     from aka.light.workspace.sources import Artifact, from_git
 
     base_source = from_git(incumbent_workspace, base_commit)
-    sealed_agent_commit = _is_sealed_agent_commit(
+    private_snapshot = _is_private_kernel_snapshot(
         incumbent_workspace, candidate_commit
     )
     try:
-        if sealed_agent_commit:
+        if private_snapshot:
             candidate_source = from_git(incumbent_workspace, candidate_commit)
             staged_source_paths = source_changed_paths(
                 incumbent_workspace, base_commit, candidate_commit
@@ -460,7 +460,7 @@ def promote_candidate(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        if sealed_agent_commit:
+        if private_snapshot:
             Artifact(base_source).install(incumbent_workspace)
         raise
     # A read failure after commit must not reset a successful promotion.

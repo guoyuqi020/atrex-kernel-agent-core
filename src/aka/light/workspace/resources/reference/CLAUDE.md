@@ -24,7 +24,9 @@ operations and request schemas. Do not infer a different workflow from unrelated
   unchanged. Edit `solution.json` only when `WORKSPACE.md` declares it candidate metadata.
 - Use the trajectory's local Git repository for checkpoints, branches, comparison, and rollback.
   Before every Kernel-bound Runtime request, commit the complete candidate and leave the worktree
-  clean. The full HEAD is `kernel_commit_id`; a commit is source identity, not measurement evidence.
+  clean. Runtime never commits Agent work on your behalf. The full HEAD is `kernel_commit_id`; every
+  Kernel commit ID shown by Runtime is from this repository or imported peer Git, never Supervisor Git.
+  A commit is source identity, not measurement evidence.
 - In exposed mode, `shapes.json` is the authoritative public evaluator workload. In hidden mode,
   exact Shape parameters are private and Runtime result Shape IDs are opaque. Never infer or search
   for private cases. Shape-subset measurements are diagnostic, not promotion evidence.

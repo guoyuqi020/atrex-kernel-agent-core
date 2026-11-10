@@ -1,10 +1,10 @@
 """Shape selection for Light's native Eval requests.
 
-Light's outer shards are independent Agate Eval jobs.  Each job receives a
-reference view containing only that shard's Shapes, so those Shapes are the
-job's complete workload rather than a ``runner_overrides.shape_ids`` subset.
-That boundary keeps the request eligible for Agate's automatic Ray Data
-execution while preserving the original opaque Shape IDs for result merging.
+Light's outer batches are independent Agate Eval jobs.  Every job retains the
+complete evaluator reference and selects its batch through Agate's native
+``options.shape_ids`` contract.  The current compatibility policy forces one
+Ray Data shard per job while preserving the original opaque Shape IDs for
+result merging.
 """
 
 from __future__ import annotations
@@ -25,8 +25,13 @@ def request_shape_ids(request: dict[str, Any]) -> list[str]:
     """Return the effective Shape selection in canonical reference order."""
     shapes = request["reference"]["shapes"]
     all_shape_ids = sorted((str(shape_id) for shape_id in shapes), key=_sort_key)
+    options = request.get("options")
+    selection = options.get("shape_ids") if isinstance(options, dict) else None
     overrides = request.get("runner_overrides")
-    selection = overrides.get("shape_ids") if isinstance(overrides, dict) else None
+    if selection is None and isinstance(overrides, dict):
+        # Compatibility with saved requests created before Light adopted the
+        # native Agate Shape selector.
+        selection = overrides.get("shape_ids")
     if selection is None:
         return all_shape_ids
     if (
@@ -34,13 +39,13 @@ def request_shape_ids(request: dict[str, Any]) -> list[str]:
         or not selection
         or any(not isinstance(shape_id, str) or not shape_id for shape_id in selection)
     ):
-        raise ValueError("runner_overrides.shape_ids must be a non-empty list of strings")
+        raise ValueError("shape_ids selection must be a non-empty list of strings")
     if len(set(selection)) != len(selection):
-        raise ValueError("runner_overrides.shape_ids contains duplicate IDs")
+        raise ValueError("shape_ids selection contains duplicate IDs")
     unknown = set(selection).difference(all_shape_ids)
     if unknown:
         raise ValueError(
-            "runner_overrides.shape_ids contains unknown IDs: "
+            "shape_ids selection contains unknown IDs: "
             + ", ".join(sorted(unknown, key=_sort_key))
         )
     selected = set(selection)
@@ -114,13 +119,12 @@ def shape_batch_request(
     *,
     timeout_s: int | None = None,
 ) -> dict[str, Any]:
-    """Build one independent Ray-eligible Eval job for a Shape shard.
+    """Build one independent native Shape-selected Eval job.
 
-    The caller's request remains immutable.  The returned request owns a
-    reference view in which ``shape_ids`` are the complete Shape set, removes
-    any Shape selector, and disables single-device clock locking.  Omitting
-    ``options.shape_shards`` deliberately selects Agate's automatic Ray Data
-    worker budget unless the caller explicitly supplied a hard worker cap.
+    The caller's request remains immutable.  The returned request retains the
+    complete reference bundle, selects only ``shape_ids`` through Agate's
+    native option, and forces one Ray Data shard until heterogeneous multi-
+    worker environments can be merged reliably.
     """
     available = set(request_shape_ids(request))
     if not shape_ids:
@@ -133,44 +137,19 @@ def shape_batch_request(
             "Shape batch contains IDs outside the request selection: "
             + ", ".join(sorted(unknown, key=_sort_key))
         )
-    selected = set(shape_ids)
-    reference = dict(request["reference"])
-    reference["shapes"] = {
-        str(shape_id): value
-        for shape_id, value in request["reference"]["shapes"].items()
-        if str(shape_id) in selected
-    }
-    for field, indexes in (("metadata", ("shapes", "cases")),
-                           ("roofline", ("shapes",))):
-        source = request["reference"].get(field)
-        if not isinstance(source, dict):
-            continue
-        projected = dict(source)
-        for index in indexes:
-            values = source.get(index)
-            if isinstance(values, dict):
-                projected[index] = {
-                    str(shape_id): value
-                    for shape_id, value in values.items()
-                    if str(shape_id) in selected
-                }
-        if field == "metadata" and "num_shapes" in projected:
-            projected["num_shapes"] = len(shape_ids)
-        reference[field] = projected
-
     batched = dict(request)
-    batched["reference"] = reference
     overrides = dict(request.get("runner_overrides") or {})
     overrides.pop("shape_ids", None)
     batched["runner_overrides"] = overrides
-    # Every outer Eval batch, including Ray Data batches, owns a deterministic
-    # locked-clock measurement. The precise bin remains in runner_overrides and
-    # is therefore identical for ordinary Eval and native ABBA.
+    options = dict(request.get("options") or {})
+    options["shape_ids"] = list(shape_ids)
+    options["shape_shards"] = 1
+    batched["options"] = options
+    # Every outer Eval batch, including native ABBA batches, requests Agate-
+    # managed locked-clock measurement.
     batched["lock_clocks"] = True
     if timeout_s is not None:
         if type(timeout_s) is not int or timeout_s <= 0:
             raise ValueError("Shape batch timeout must be a positive integer")
-        options = dict(request.get("options") or {})
         options["timeout_s"] = timeout_s
-        batched["options"] = options
     return batched

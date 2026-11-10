@@ -526,7 +526,6 @@ class LongHorizonCampaign:
             "accepted": previous.get("accepted"),
             "violation": previous.get("violation"),
             "candidate_commit": previous.get("candidate_commit"),
-            "promotion_commit": previous.get("promotion_commit"),
             "verification": verification,
             "next_directions": previous.get("next_directions"),
         }
@@ -1177,12 +1176,17 @@ class LongHorizonCampaign:
         if handoff.status != "candidate_ready":
             return "", [], None, False
 
-        candidate_commit = handoff.candidate_commit
         diagnosis = self._completion_check(
             worktree, worktree.path / RUNTIME_DIR / "journal.json", handoff,
         )
         if diagnosis:
             return diagnosis, [], None, False
+        private_journal = self.base_campaign._supervisor_runtime.read_episode_journal(
+            worktree.episode
+        )
+        candidate_commit = private_journal.get("candidate_commit")
+        if not isinstance(candidate_commit, str) or not candidate_commit:
+            return "private Runtime Episode state has no Supervisor candidate archive", [], None, False
         violation, paths = self.base_campaign.candidate_workspace.validate_candidate(worktree, candidate_commit)
         if (
             not violation
@@ -1211,9 +1215,6 @@ class LongHorizonCampaign:
                 "verifying"
             )
             store.save_active(active)
-            private_journal = self.base_campaign._supervisor_runtime.read_episode_journal(
-                worktree.episode
-            )
             candidate_kernel_id = private_journal.get("candidate_kernel_id")
             baseline_kernel_id = (
                 self.base_campaign._supervisor_runtime.baseline_kernel_commit(
@@ -1288,17 +1289,43 @@ class LongHorizonCampaign:
         episode = worktree.episode
         base_commit = worktree.base_commit
         episode_mode = self._episode_mode(state, active)
-        journal_path = worktree.path / RUNTIME_DIR / "journal.json"
         state.episodes = max(state.episodes, episode)
         if not tokens_accounted:
             state.tokens += max(0, int(tokens))
 
+        private_journal = self.base_campaign._supervisor_runtime.read_episode_journal(
+            episode
+        )
+        agent_kernel_commit = (
+            private_journal.get("candidate_kernel_id")
+            if status == "candidate_ready"
+            else candidate_commit or None
+        )
+        supervisor_candidate_commit = (
+            private_journal.get("candidate_commit")
+            if status == "candidate_ready"
+            else ""
+        )
+        if status == "candidate_ready" and (
+            not isinstance(agent_kernel_commit, str)
+            or not agent_kernel_commit
+            or not isinstance(supervisor_candidate_commit, str)
+            or not supervisor_candidate_commit
+        ):
+            raise RuntimeError(
+                "Finalized candidate is missing its Agent-to-Supervisor Git mapping"
+            )
+
         episode_dir = store.episode_dir(episode)
         self.base_campaign.candidate_workspace.archive(
-            worktree, episode_dir / "archive", candidate_commit or "HEAD"
+            worktree,
+            episode_dir / "archive",
+            supervisor_candidate_commit or "HEAD",
         )
         self._copy_runtime_artifacts(worktree, episode_dir)
-        journal = load_journal(journal_path)
+        # Consume the already-sanitized public projection for memory, evidence,
+        # and continuation. The private Journal is used only for the archive map.
+        journal = load_journal(worktree.path / RUNTIME_DIR / "journal.json")
         outcome = (
             journal.get("outcome")
             if isinstance(journal.get("outcome"), dict)
@@ -1314,8 +1341,8 @@ class LongHorizonCampaign:
             "base_commit": base_commit,
             "episode_branch": worktree.branch,
             "episode_head": git_head(worktree.path),
-            "candidate_commit": candidate_commit or None,
-            "candidate_kernel_commit_id": journal.get("candidate_kernel_id"),
+            "candidate_commit": agent_kernel_commit,
+            "candidate_kernel_commit_id": agent_kernel_commit,
             "changed_paths": paths,
             "session_id": session_id or None,
             "resume_count": max(0, int(resume_count)),
@@ -1378,7 +1405,7 @@ class LongHorizonCampaign:
             evidence = {**attempt, "journal": journal}
             memory = self._memory_record(
                 version=memory_version,
-                candidate_commit=candidate_commit,
+                candidate_commit=agent_kernel_commit or "",
                 journal=journal,
                 episode_workspace=worktree.path,
                 verification=verification,
@@ -1387,7 +1414,7 @@ class LongHorizonCampaign:
             promotion_commit = self.base_campaign.candidate_workspace.promote(
                 self.workspace,
                 base_commit=base_commit,
-                candidate_commit=candidate_commit,
+                candidate_commit=supervisor_candidate_commit,
                 episode=episode,
                 evidence=evidence,
                 memory_version=memory_version,
@@ -1395,7 +1422,7 @@ class LongHorizonCampaign:
                 generate_memory=self.base_campaign.generate_memory,
             )
             attempt["promotion_commit"] = promotion_commit
-            promoted_kernel_id = journal.get("candidate_kernel_id")
+            promoted_kernel_id = agent_kernel_commit
             if not isinstance(promoted_kernel_id, str) or not promoted_kernel_id:
                 raise RuntimeError(
                     "Promoted Episode has no sealed Agent Kernel commit identity"
@@ -1416,7 +1443,7 @@ class LongHorizonCampaign:
                 status=status,
                 violation=violation,
                 journal=journal,
-                candidate_commit=candidate_commit,
+                candidate_commit=agent_kernel_commit or "",
                 verification=verification,
                 episode_workspace=worktree.path,
                 episode_mode=episode_mode,

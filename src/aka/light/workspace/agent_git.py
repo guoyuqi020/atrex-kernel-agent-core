@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,13 @@ _RESUME_BRANCH_PREFIX = "refs/atrex/resume-branch/"
 GIT_COMMIT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
+def supervisor_archive_ref(agent_commit_id: str) -> str:
+    """Private Supervisor ref mapping one Agent identity to its audit snapshot."""
+    if GIT_COMMIT_ID.fullmatch(agent_commit_id) is None:
+        raise ValueError("Agent Kernel identity is not a Git commit ID")
+    return f"refs/atrex/private-kernels/by-agent/{agent_commit_id}"
+
+
 class DirtyKernelWorktree(ValueError):
     """The Agent repository has no exact committed identity for its current Kernel."""
 
@@ -101,6 +109,7 @@ class AgentGit:
     def __init__(self, workspace: Path, bundle: Path):
         self.workspace = workspace
         self.bundle = bundle
+        self.checkout_state = bundle.with_name(bundle.name + ".checkout.json")
 
     def _configure(self) -> None:
         settings = {
@@ -192,13 +201,22 @@ class AgentGit:
             branches.append(branch)
 
         active = ""
+        try:
+            checkout = json.loads(self.checkout_state.read_text(encoding="utf-8"))
+            candidate = checkout.get("branch") if isinstance(checkout, dict) else None
+            if isinstance(candidate, str):
+                active = candidate
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            pass
+        # Read the retired in-Git marker only for migration. New persistence
+        # never writes controller state into the Agent repository.
         markers = _run(
             self.workspace,
             "for-each-ref",
             "--format=%(refname)",
             _RESUME_BRANCH_PREFIX,
         ).stdout.splitlines()
-        if len(markers) == 1:
+        if not active and len(markers) == 1:
             active = markers[0].removeprefix(_RESUME_BRANCH_PREFIX)
         if active not in branches:
             active = "work" if "work" in branches else (sorted(branches)[0] if branches else "")
@@ -222,23 +240,19 @@ class AgentGit:
         )
 
     def _record_active_branch(self) -> None:
-        """Store the symbolic checkout in a bundled private ref."""
-        markers = _run(
-            self.workspace,
-            "for-each-ref",
-            "--format=%(refname)",
-            _RESUME_BRANCH_PREFIX,
-        ).stdout.splitlines()
-        for marker in markers:
-            _run(self.workspace, "update-ref", "-d", marker)
+        """Store checkout recovery outside Agent Git."""
         branch = _run(
             self.workspace, "symbolic-ref", "--quiet", "--short", "HEAD", check=False
         ).stdout.strip()
-        head = self.head()
-        if branch and head:
-            marker = _RESUME_BRANCH_PREFIX + branch
-            _run(self.workspace, "check-ref-format", marker)
-            _run(self.workspace, "update-ref", marker, head)
+        self.checkout_state.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.checkout_state.with_name(
+            self.checkout_state.name + "." + uuid.uuid4().hex + ".tmp"
+        )
+        temporary.write_text(
+            json.dumps({"branch": branch}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, self.checkout_state)
 
     def prepare(self) -> None:
         initialized = (self.workspace / ".git").is_dir()
@@ -259,10 +273,10 @@ class AgentGit:
         # Runtime upgrades belong in Git's private exclude file so resuming an
         # older trajectory never mutates Agent-visible source history.
         self._ensure_private_excludes()
-        self.checkpoint("Runtime: materialize trusted trajectory source")
-        head = self.head()
-        if head:
-            _run(self.workspace, "tag", "-f", "atrex/episode-start", head)
+        # Bootstrap is the only Runtime-authored Agent commit. Once a repository
+        # has a HEAD, the Agent exclusively owns its branches and commits.
+        if self.head() is None:
+            self.checkpoint("Runtime: initialize trajectory baseline")
 
     def install_runtime_ref(
         self,
@@ -270,68 +284,29 @@ class AgentGit:
         source: bytes,
         *,
         message: str,
-        commit_id: str | None = None,
+        commit_id: str,
     ) -> str:
-        """Create one source-only commit without changing the Agent checkout."""
-        from aka.light.workspace.sources import Artifact
+        """Expose an existing Agent/peer commit without changing its identity."""
+
+        del message  # Retained in the call contract as an operator-readable label.
 
         if not ref.startswith("refs/") or ".." in ref or any(char.isspace() for char in ref):
             raise ValueError("Runtime Git ref is invalid")
-        if commit_id is not None:
-            if GIT_COMMIT_ID.fullmatch(commit_id) is None:
-                raise ValueError("Runtime Kernel identity is not a Git commit ID")
-            present = _run(
-                self.workspace, "cat-file", "-e", f"{commit_id}^{{commit}}", check=False
-            )
-            if present.returncode != 0:
-                raise ValueError(
-                    "Runtime cannot expose a private source snapshot as a different Git commit"
-                )
-            from aka.light.workspace.sources import from_git
-
-            if from_git(self.workspace, commit_id) != source:
-                raise ValueError("Runtime Kernel commit does not match its saved source")
-            _run(self.workspace, "update-ref", ref, commit_id)
-            return commit_id
-        existing = _run(
-            self.workspace,
-            "rev-parse",
-            "--verify",
-            f"{ref}^{{commit}}",
-            check=False,
+        if GIT_COMMIT_ID.fullmatch(commit_id) is None:
+            raise ValueError("Runtime Kernel identity is not a Git commit ID")
+        present = _run(
+            self.workspace, "cat-file", "-e", f"{commit_id}^{{commit}}", check=False
         )
-        if existing.returncode == 0:
-            existing_commit = existing.stdout.strip()
-            from aka.light.workspace.sources import from_git
+        if present.returncode != 0:
+            raise ValueError(
+                "Runtime can expose only an existing local or imported peer Agent commit"
+            )
+        from aka.light.workspace.sources import from_git
 
-            if from_git(self.workspace, existing_commit) == source:
-                return existing_commit
-        files = Artifact(source).materialized_files
-        with tempfile.TemporaryDirectory(prefix="aka-agent-index-") as directory:
-            index = str(Path(directory) / "index")
-            environment = {"GIT_INDEX_FILE": index}
-            _run(self.workspace, "read-tree", "--empty", extra_env=environment)
-            for name, data in sorted(files.items()):
-                blob = subprocess.run(
-                    ["git", "hash-object", "-w", "--stdin"],
-                    cwd=self.workspace,
-                    env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"},
-                    input=data,
-                    capture_output=True,
-                    check=True,
-                ).stdout.decode().strip()
-                _run(
-                    self.workspace,
-                    "update-index",
-                    "--add",
-                    "--cacheinfo",
-                    f"100644,{blob},{name}",
-                    extra_env=environment,
-                )
-            tree = _run(self.workspace, "write-tree", extra_env=environment).stdout.strip()
-        commit = _run(self.workspace, "commit-tree", tree, "-m", message).stdout.strip()
-        _run(self.workspace, "update-ref", ref, commit)
-        return commit
+        if from_git(self.workspace, commit_id) != source:
+            raise ValueError("Runtime Kernel commit does not match its saved source")
+        _run(self.workspace, "update-ref", ref, commit_id)
+        return commit_id
 
     def commit_reachable(self, commit_id: str) -> bool:
         """Return whether a complete commit is reachable from Agent-visible Git state."""
@@ -448,134 +423,166 @@ class AgentGit:
             )
         return head
 
+    def archive_into(
+        self,
+        supervisor_workspace: Path,
+        commit_id: str,
+        expected_source: bytes,
+        *,
+        install_source: bool = False,
+    ) -> str:
+        """Archive one Agent commit as a distinct private Supervisor commit.
+
+        ``commit_id`` remains the only public Kernel identity. The returned ID is
+        private archival state and must never be projected to the Agent.
+        """
+        if GIT_COMMIT_ID.fullmatch(commit_id) is None:
+            raise ValueError("Agent Kernel identity is not a Git commit ID")
+        if not self.commit_reachable(commit_id):
+            raise ValueError("Agent Kernel commit is not reachable from local or shared Git refs")
+
+        from aka.light.workspace.sources import Artifact, from_git, install
+
+        if from_git(self.workspace, commit_id) != expected_source:
+            raise ValueError("Agent Kernel commit does not match the submitted source")
+        supervisor_workspace = supervisor_workspace.resolve(strict=True)
+        environment = {
+            **os.environ,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "/usr/bin/false",
+        }
+
+        mapping_ref = supervisor_archive_ref(commit_id)
+        existing = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{mapping_ref}^{{commit}}"],
+            cwd=supervisor_workspace,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        private_commit = existing.stdout.strip() if existing.returncode == 0 else ""
+        created = not private_commit
+        if created:
+            # Archive only the exact submitted Kernel source. Agent branches,
+            # commit ancestry and non-Kernel repository metadata never enter
+            # the Supervisor repository.
+            files = Artifact(expected_source).materialized_files
+            with tempfile.TemporaryDirectory(prefix="aka-supervisor-index-") as directory:
+                index_environment = {
+                    **environment,
+                    "GIT_INDEX_FILE": str(Path(directory) / "index"),
+                }
+                subprocess.run(
+                    ["git", "read-tree", "--empty"], cwd=supervisor_workspace,
+                    env=index_environment, text=True, capture_output=True, check=True,
+                )
+                for name, data in sorted(files.items()):
+                    blob = subprocess.run(
+                        ["git", "hash-object", "-w", "--stdin"],
+                        cwd=supervisor_workspace, env=index_environment, input=data,
+                        capture_output=True, check=True,
+                    ).stdout.decode().strip()
+                    subprocess.run(
+                        ["git", "update-index", "--add", "--cacheinfo",
+                         f"100644,{blob},{name}"],
+                        cwd=supervisor_workspace, env=index_environment, text=True,
+                        capture_output=True, check=True,
+                    )
+                tree = subprocess.run(
+                    ["git", "write-tree"], cwd=supervisor_workspace,
+                    env=index_environment, text=True, capture_output=True, check=True,
+                ).stdout.strip()
+            commit_environment = {
+                **environment,
+                "GIT_AUTHOR_NAME": "Atrex Supervisor",
+                "GIT_AUTHOR_EMAIL": "supervisor@localhost",
+                "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
+                "GIT_COMMITTER_NAME": "Atrex Supervisor",
+                "GIT_COMMITTER_EMAIL": "supervisor@localhost",
+                "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00",
+            }
+            private_commit = subprocess.run(
+                ["git", "commit-tree", tree],
+                cwd=supervisor_workspace,
+                env=commit_environment,
+                input=(
+                    f"Archive Agent Kernel {commit_id}\n\n"
+                    f"Supervisor-Archive-Nonce: {uuid.uuid4().hex}\n"
+                ),
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            if private_commit == commit_id:
+                raise RuntimeError("Supervisor archival commit unexpectedly reused Agent identity")
+            subprocess.run(
+                ["git", "update-ref", mapping_ref, private_commit],
+                cwd=supervisor_workspace,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+        # The accepted ref is an internal capability marker keyed only by the
+        # private commit. Recreate it idempotently during recovery if needed.
+        subprocess.run(
+            ["git", "update-ref", f"refs/atrex/accepted/{private_commit}", private_commit],
+            cwd=supervisor_workspace,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        try:
+            resolved = subprocess.run(
+                ["git", "rev-parse", "--verify", f"{mapping_ref}^{{commit}}"],
+                cwd=supervisor_workspace,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            if resolved != private_commit:
+                raise RuntimeError("Supervisor Agent-to-private commit mapping changed identity")
+            if from_git(supervisor_workspace, private_commit) != expected_source:
+                raise RuntimeError("Supervisor archival commit does not match submitted source")
+            if install_source:
+                install(supervisor_workspace, expected_source)
+        except Exception:
+            if created:
+                subprocess.run(
+                    ["git", "update-ref", "-d", mapping_ref],
+                    cwd=supervisor_workspace,
+                    env=environment,
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            raise
+        return private_commit
+
     def seal_into(
         self,
         supervisor_workspace: Path,
         commit_id: str,
         expected_source: bytes,
     ) -> str:
-        """Import the exact Agent commit into the Supervisor's protected refs.
-
-        The Agent HEAD is the Kernel identity.  The Supervisor therefore imports
-        that object instead of manufacturing a second commit for the same source.
-        Only the canonical Kernel source and Runtime-owned ``.gitignore`` may be
-        tracked by the imported commit; evidence and scratch state stay outside
-        the trusted Kernel identity.
-        """
-        if GIT_COMMIT_ID.fullmatch(commit_id) is None:
-            raise ValueError("Agent Kernel identity is not a Git commit ID")
+        """Seal the current Agent HEAD into the private Supervisor archive."""
         if self.kernel_commit(expected_source) != commit_id:
             raise DirtyKernelWorktree(
                 [], "Agent HEAD changed before the Kernel commit could be sealed"
             )
-
-        from aka.light.workspace.sources import commit_paths, from_git, install
-
-        allowed = set(commit_paths(self.workspace, normalize=False)) | {".gitignore"}
-        listing = _run(
-            self.workspace,
-            "ls-tree",
-            "-r",
-            "-z",
+        return self.archive_into(
+            supervisor_workspace,
             commit_id,
-        ).stdout
-        tracked: set[str] = set()
-        for entry in listing.split("\0"):
-            if not entry:
-                continue
-            metadata, name = entry.split("\t", 1)
-            mode, object_type, _ = metadata.split(" ", 2)
-            if object_type != "blob" or mode not in {"100644", "100755"}:
-                raise ValueError(
-                    f"Agent Kernel commit contains a link or special object: {name}"
-                )
-            tracked.add(name)
-        unexpected = sorted(tracked - allowed)
-        if unexpected:
-            raise ValueError(
-                "Agent Kernel commit contains non-Kernel tracked paths: "
-                + ", ".join(unexpected[:20])
-            )
-
-        supervisor_workspace = supervisor_workspace.resolve()
-        protected_ref = f"refs/atrex/accepted/{commit_id}"
-        existing = subprocess.run(
-            ["git", "rev-parse", "--verify", f"{protected_ref}^{{commit}}"],
-            cwd=supervisor_workspace,
-            env={
-                **os.environ,
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_TERMINAL_PROMPT": "0",
-            },
-            text=True,
-            capture_output=True,
-            check=False,
+            expected_source,
+            install_source=True,
         )
-        created = existing.returncode != 0
-        if not created and existing.stdout.strip() != commit_id:
-            raise RuntimeError("Protected Agent Kernel ref resolves to a different commit")
-        if created:
-            export_ref = f"refs/atrex/export/{commit_id}"
-            _run(self.workspace, "update-ref", export_ref, commit_id)
-            try:
-                result = subprocess.run(
-                    [
-                        "git",
-                        "-c",
-                        "protocol.file.allow=always",
-                        "-c",
-                        "core.hooksPath=/dev/null",
-                        "fetch",
-                        "--no-tags",
-                        "--no-write-fetch-head",
-                        str(self.workspace),
-                        f"{export_ref}:{protected_ref}",
-                    ],
-                    cwd=supervisor_workspace,
-                    env={
-                        **os.environ,
-                        "GIT_CONFIG_NOSYSTEM": "1",
-                        "GIT_CONFIG_GLOBAL": "/dev/null",
-                        "GIT_TERMINAL_PROMPT": "0",
-                        "GIT_ASKPASS": "/usr/bin/false",
-                    },
-                    text=True,
-                    capture_output=True,
-                    check=False,
-                )
-            finally:
-                _run(self.workspace, "update-ref", "-d", export_ref, check=False)
-            if result.returncode != 0:
-                raise RuntimeError(
-                    "Supervisor could not import the Agent Kernel commit: "
-                    + (result.stderr.strip() or "git fetch failed")
-                )
-
-        try:
-            resolved = subprocess.run(
-                ["git", "rev-parse", "--verify", f"{protected_ref}^{{commit}}"],
-                cwd=supervisor_workspace,
-                text=True,
-                capture_output=True,
-                check=True,
-            ).stdout.strip()
-            if resolved != commit_id:
-                raise RuntimeError("Imported Agent Kernel ref changed identity")
-            if from_git(supervisor_workspace, commit_id) != expected_source:
-                raise RuntimeError("Imported Agent Kernel commit does not match measured source")
-            install(supervisor_workspace, expected_source)
-        except Exception:
-            if created:
-                subprocess.run(
-                    ["git", "update-ref", "-d", protected_ref],
-                    cwd=supervisor_workspace,
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            raise
-        return commit_id
 
     def checkpoint(self, message: str) -> str | None:
         from aka.light.workspace.sources import commit_paths
@@ -610,7 +617,9 @@ class AgentGit:
         return {"head": head, "clean": clean, "tree": tree}
 
     def persist(self) -> str | None:
-        head = self.checkpoint("Runtime: preserve Episode WIP checkpoint")
+        # Persist refs only. Uncommitted work remains in the stable workspace,
+        # but the Supervisor never manufactures Agent history on Session exit.
+        head = self.head()
         if head is None:
             return None
         self._record_active_branch()
