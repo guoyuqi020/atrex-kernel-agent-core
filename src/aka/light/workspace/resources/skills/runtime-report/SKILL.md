@@ -14,4 +14,4 @@ Use local Git for candidate history. Before every Kernel-bound Runtime request, 
 
 For `candidate_ready`, cite real `gateway_record_ids`, including a passing standard full Evaluate of the exact clean HEAD. `pivot` and `blocked` reports omit them; a blocker also supplies `blocker`. Follow [the exact report schema and repair rules](references/journal.md) and [saved result/source semantics](references/records.md). Report acceptance is a handoff, not promotion.
 
-Framework Baseline uses the same Git and Runtime measurement loop, but has a separate finish procedure: leave a correctness-passing candidate at clean HEAD without submitting `episode-report`; the Supervisor independently validates and records the accepted V1.
+Framework Baseline is Episode 0. Use the same Git and Runtime measurement loop, then submit the ordinary `episode-report` after a correctness-passing standard full Evaluate. Runtime applies the ordinary final-candidate gates and records the accepted V1 in Research Store; Episode 0 does not require ABBA or a speedup over V0.

@@ -794,7 +794,8 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("same Git and Runtime measurement loop", report_skill)
-        self.assertIn("correctness-passing candidate at clean HEAD", report_skill)
+        self.assertIn("submit the ordinary `episode-report`", report_skill)
+        self.assertIn("does not require ABBA", report_skill)
         self.assertIn("`pivot` and `blocked` reports omit them", report_skill)
         self.assertNotIn("smoke-and-exit procedure", report_skill)
         wiki_plugin = Path(__file__).resolve().parents[1] / "plugins/gpu-wiki"
@@ -2915,7 +2916,8 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
         self.assertIn("Editable kernel.py and optional impl/ form one Kernel", contract)
         self.assertIn("same Runtime measurement operations", contract)
         self.assertIn("Use local Git for candidate checkpoints", contract)
-        self.assertIn("Do not submit episode-report", contract)
+        self.assertIn("ordinary episode-report contract", contract)
+        self.assertIn("without ABBA", contract)
         self.assertNotIn("trajectory-private local Git repository", contract)
 
     def test_dependency_recovery_preserves_sourceprovider_and_mode_contracts(self):

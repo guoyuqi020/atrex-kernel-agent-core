@@ -3441,14 +3441,18 @@ class SupervisorJournalService:
             ensure_baseline_gateway_record,
             read_baseline_record,
         )
-        ensure_baseline_gateway_record(self.workspace)
-        baseline = read_baseline_record(self.workspace) or {}
+        # V0 facts live beside the private Controller repository, not inside
+        # the projected Agent workspace.  Expose only the Agent-visible base
+        # commit identity from the Runtime Journal; never leak the Controller
+        # commit stored in the private V0 receipt.
+        ensure_baseline_gateway_record(self.git_workspace)
+        baseline = read_baseline_record(self.git_workspace) or {}
         performance = baseline.get("performance")
         performance = performance if isinstance(performance, Mapping) else {}
         correctness = baseline.get("correctness")
         correctness = correctness if isinstance(correctness, Mapping) else {}
         board["v0_baseline"] = {
-            "kernel_commit_id": baseline.get("git_commit_hash"),
+            "kernel_commit_id": journal.get("base_kernel_id"),
             "latency_us_geomean": performance.get("latency_us_geomean"),
             "measured_shape_count": performance.get("measured_shape_count"),
             "correctness_status": correctness.get("status"),

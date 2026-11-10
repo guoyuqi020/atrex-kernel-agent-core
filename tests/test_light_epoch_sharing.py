@@ -3523,6 +3523,115 @@ def test_framework_baseline_registers_as_episode_zero(tmp_path):
     ]
 
 
+def test_framework_baseline_episode_zero_reads_reported_full_evaluate(
+    tmp_path, monkeypatch
+):
+    campaign = Campaign(
+        name="operator",
+        kernel_demo="unused.py",
+        platform="cuda",
+        framework="cuda",
+        work_dir=str(tmp_path),
+    )
+    campaign.workspace.mkdir(parents=True)
+    agent_workspace = tmp_path / "agent-workspace"
+    agent_workspace.mkdir()
+    campaign._framework_baseline_agent_workspace = agent_workspace
+    private = {
+        "state": "candidate_ready",
+        "finalized_at": "2026-11-10T00:00:00+00:00",
+        "candidate_kernel_id": "a" * 40,
+    }
+    campaign.read_runtime_episode_journal = lambda episode: (
+        private if episode == 0 else None
+    )
+    observed = {}
+    campaign.selected_episode_evaluation = lambda episode, source: observed.update(
+        episode=episode, source=source
+    ) or {
+        "all_pass": True,
+        "latency_us_geomean": 1.25,
+        "gateway_record_id": "gateway-" + "1" * 32,
+    }
+    monkeypatch.setattr(
+        "aka.light.workflow.journal_service.sealed_candidate_source",
+        lambda journal, workspace: b"sealed-source",
+    )
+    monkeypatch.setattr(
+        "aka.light.workspace.sources.from_git",
+        lambda workspace, commit: b"sealed-source",
+    )
+
+    result, commit = campaign._framework_baseline_report_result()
+
+    assert commit == "a" * 40
+    assert result["all_pass"] is True
+    assert observed == {"episode": 0, "source": b"sealed-source"}
+
+
+def test_framework_baseline_episode_zero_records_research_and_attempt(tmp_path):
+    campaign = Campaign(
+        name="operator",
+        kernel_demo="unused.py",
+        platform="cuda",
+        framework="cuda",
+        work_dir=str(tmp_path),
+    )
+    campaign.workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=campaign.workspace, check=True)
+    agent_workspace = tmp_path / "agent-workspace"
+    agent_workspace.mkdir()
+    campaign._framework_baseline_agent_workspace = agent_workspace
+
+    class Research:
+        def __init__(self):
+            self.checkpoints = []
+            self.events = []
+
+        def checkpoint_lineage(self, payload, *, origin):
+            self.checkpoints.append((payload, origin))
+
+        def append(self, event_type, payload, *, origin, dedupe_key):
+            self.events.append((event_type, payload, origin, dedupe_key))
+
+    research = Research()
+    published = []
+    binding = SimpleNamespace(
+        service=SimpleNamespace(
+            publish_research_files=lambda: published.append(True)
+        )
+    )
+    campaign._supervisor_runtime = SimpleNamespace(
+        research=research,
+        journals={agent_workspace.resolve(): binding},
+    )
+    session = SimpleNamespace(session_id="baseline-session", tokens=123)
+    candidate = "b" * 40
+
+    campaign._record_framework_baseline_research(
+        agent_commit=candidate,
+        result={
+            "latency_us_geomean": 1.5,
+            "gateway_record_id": "gateway-" + "2" * 32,
+        },
+        session=session,
+    )
+
+    assert research.checkpoints[0][0]["working_kernel_id"] == candidate
+    assert research.events[0][0] == "promotion.accepted"
+    assert research.events[0][1]["kernel_id"] == candidate
+    assert research.events[0][2]["episode"] == 0
+    assert published == [True]
+    store = CampaignStore(campaign.workspace)
+    attempt = json.loads((store.episode_dir(0) / "attempt.json").read_text())
+    assert attempt["episode"] == 0
+    assert attempt["accepted"] is True
+    state = store.load_state()
+    assert state.episodes == 0
+    assert state.incumbent_kernel_commit_id == candidate
+    assert state.session_id == "baseline-session"
+
+
 def _finalized_journal(path: Path, *, episode: int, suffix: str, record_id: str) -> tuple[str, str]:
     direction_id = "direction_" + suffix * 32
     experiment_id = "experiment_" + suffix * 32

@@ -102,6 +102,7 @@ from aka.light.workflow.session_io import (
     run_session,
     sandbox_directive,
 )
+from aka.light.workflow.models import EpisodeHandoff
 from aka.light.workspace.assets import (_agent_runtime_directive, link_runtime)
 from aka.light.workspace.state import (
     git_head,
@@ -163,8 +164,10 @@ def framework_baseline_workspace_contract(workspace: Path) -> bytes:
         "README.md, CLAUDE.md, this file, evaluator/public-contract inputs, profile_driver.py "
         "and memory/ are Supervisor-owned. Put temporary implementation probes under scratch/. "
         "Use local Git for candidate checkpoints and leave it clean before Kernel-bound Runtime "
-        "requests. Do not submit episode-report or write canonical memory; leave the complete "
-        "candidate at a clean HEAD for the Supervisor gates.\n"
+        "requests. Finish Episode 0 through the ordinary episode-report contract after a "
+        "passing standard full Evaluate. The Supervisor runs the ordinary final-candidate "
+        "gates without ABBA, records the accepted candidate in Research Store, and projects "
+        "canonical state.\n"
     ).encode("utf-8")
 
 
@@ -1884,58 +1887,29 @@ class Campaign:
         baseline_commit = self._v0_baseline_commit()
         from aka.light.workspace.sources import revision_identity
         v0_identity = revision_identity(self.workspace, baseline_commit)
-        pre_head = git_head(self.workspace)
         self._ensure_framework_baseline_solution_manifest()
 
+        self._link_runtime()
         if action == "run":
-            self._link_runtime()
             self._restore_framework_baseline_candidate(v0_identity)
-            self._prepare_framework_baseline_episode(baseline_commit)
-            self._sync_framework_baseline_live(
-                phase="framework_baseline_correctness_review"
-            )
-            self._ensure_framework_baseline_correctness_guidance()
-            self._sync_framework_baseline_live(phase="framework_baseline")
-            try:
-                res = self._run_framework_baseline_agent(
-                    n=n,
-                    label="framework baseline",
-                )
-            finally:
-                self._warn_restored_baseline_paths(baseline_commit)
-            if res.exit_status != 0 and res.tokens == 0:
-                raise RuntimeError(
-                    "the framework baseline Agent exited without usable output; "
-                    f"inspect {framework_baseline_progress_path(self.workspace)}"
-                )
-            problem = self._framework_baseline_problem(
-                v0_identity, baseline_commit, include_policy_review=False
-            )
-        else:  # adopt: our own interrupted run already committed the kernel
-            self._prepare_framework_baseline_episode(baseline_commit)
-            self._sync_framework_baseline_live(phase="framework_baseline")
-            self._warn_restored_baseline_paths(baseline_commit)
-            problem = self._framework_baseline_problem(
-                v0_identity, baseline_commit, include_policy_review=False
-            )
-        result, problem = self._repair_framework_baseline_until_accepted(
-            problem=problem,
-            v0_identity=v0_identity,
-            baseline_commit=baseline_commit,
-            pre_head=pre_head,
+        self._prepare_framework_baseline_episode(baseline_commit)
+        self._sync_framework_baseline_live(
+            phase="framework_baseline_correctness_review"
         )
-        if problem:
-            # Undo any session-authored commits while retaining every worktree file.  A hard reset
-            # here used to erase the exact candidate and debugging experience needed by a restart.
-            if pre_head and git_head(self.workspace) != pre_head:
-                subprocess.run(
-                    ["git", "reset", "--mixed", pre_head],
-                    cwd=str(self.workspace),
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+        self._ensure_framework_baseline_correctness_guidance()
+        self._sync_framework_baseline_live(phase="framework_baseline")
+        try:
+            res = self._run_framework_baseline_agent(
+                n=n,
+                label="framework baseline",
+            )
+        finally:
             self._warn_restored_baseline_paths(baseline_commit)
+        if res.handoff is None or res.handoff.status != "candidate_ready":
+            problem = (
+                res.completion_diagnosis
+                or "Framework Baseline Episode 0 ended without an accepted candidate_ready report"
+            )
             self._record_framework_baseline_failure(problem)
             self._sync_framework_baseline_live(
                 phase="failed",
@@ -1943,16 +1917,29 @@ class Campaign:
                 accepted=False,
                 outcome={"summary": problem, "next_directions": []},
             )
-            outcome = "validation blocked" if problem.startswith(SUPPLEMENTAL_PENDING_PREFIX) else "rejected"
-            raise RuntimeError(f"framework baseline v{n} {outcome}: {problem}")
+            raise RuntimeError(f"framework baseline Episode 0 failed: {problem}")
 
-        commit = self._commit_framework_baseline(n, result or {})
+        # episode-report already ran the normal final-candidate correctness,
+        # production-policy and optional numerical gates.  Episode 0 differs
+        # from later Episodes only by deliberately skipping incumbent ABBA.
+        result, reported_agent_commit = self._framework_baseline_report_result()
+        commit = self._commit_framework_baseline(n, result)
         agent_commit = self._seed_episode_session_from_framework_baseline()
+        if agent_commit != reported_agent_commit:
+            raise RuntimeError(
+                "Framework Baseline Episode 0 lost its sealed Agent commit while "
+                "seeding Episode 1"
+            )
+        self._record_framework_baseline_research(
+            agent_commit=agent_commit,
+            result=result,
+            session=res,
+        )
         try:
             mark_framework_baseline_accepted(
                 self.workspace,
                 commit=commit,
-                latency_us=(result or {}).get("latency_us_geomean"),
+                latency_us=result.get("latency_us_geomean"),
             )
         except (OSError, RuntimeError) as exc:
             print(
@@ -1981,6 +1968,87 @@ class Campaign:
             f"({latency} us geomean)",
             flush=True,
         )
+
+    def _record_framework_baseline_research(
+        self,
+        *,
+        agent_commit: str,
+        result: dict,
+        session: SessionResult,
+    ) -> None:
+        """Record accepted Episode 0 in normal Research and Episode projections."""
+        from aka.light.workflow.store import CampaignStore
+
+        runtime = getattr(self, "_supervisor_runtime", None)
+        if runtime is None:
+            raise RuntimeError("Framework Baseline Episode 0 Runtime is unavailable")
+        coordinate = getattr(self, "search_coordinate", None)
+        trajectory = (
+            coordinate.get("trajectory", 1)
+            if isinstance(coordinate, dict)
+            else 1
+        )
+        origin = {
+            "epoch": _FRAMEWORK_BASELINE_EPISODE,
+            "trajectory": trajectory,
+            "episode": _FRAMEWORK_BASELINE_EPISODE,
+        }
+        latency = result.get("latency_us_geomean")
+        runtime.research.checkpoint_lineage(
+            {
+                "working_kernel_id": agent_commit,
+                "lineage_best_kernel_id": agent_commit,
+                "lineage_best_latency_us": latency,
+                "last_correct_kernel_id": agent_commit,
+            },
+            origin=origin,
+        )
+        runtime.research.append(
+            "promotion.accepted",
+            {
+                "kernel_id": agent_commit,
+                "latency_us_geomean": latency,
+                "source": "framework_baseline_episode_0",
+            },
+            origin=origin,
+            dedupe_key=f"framework-baseline:{agent_commit}",
+        )
+        agent_workspace = getattr(
+            self, "_framework_baseline_agent_workspace", self.workspace
+        ).resolve()
+        binding = runtime.journals.get(agent_workspace)
+        if binding is None:
+            raise RuntimeError("Framework Baseline Episode 0 Journal binding is unavailable")
+        binding.service.publish_research_files()
+
+        store = CampaignStore(self.workspace)
+        attempt = {
+            "episode": _FRAMEWORK_BASELINE_EPISODE,
+            "memory_version": FRAMEWORK_BASELINE_VERSION,
+            "mode": "framework_baseline",
+            "status": "candidate_ready",
+            "accepted": True,
+            "candidate_kernel_commit_id": agent_commit,
+            "gateway_record_id": result.get("gateway_record_id"),
+            "latency_us_geomean": latency,
+            "verification": "ordinary_final_candidate_gates_without_abba",
+            "session_id": session.session_id or None,
+            "tokens": max(0, int(session.tokens)),
+        }
+        store.archive_attempt(_FRAMEWORK_BASELINE_EPISODE, attempt)
+        state = store.load_state()
+        if not any(
+            item.get("episode") == _FRAMEWORK_BASELINE_EPISODE
+            and item.get("accepted") is True
+            and item.get("candidate_kernel_commit_id") == agent_commit
+            for item in state.attempts
+        ):
+            state.attempts.append(attempt)
+        state.incumbent_kernel_commit_id = agent_commit
+        if session.session_id:
+            state.session_id = session.session_id
+            state.session_backend = self.agent_cli
+        store.save_state(state)
 
     def _sync_framework_baseline_live(
         self,
@@ -2487,13 +2555,19 @@ class Campaign:
         try:
             from aka.light.workflow.session import LongSessionRunner
             from aka.light.workflow.context import session_execution_policy
+            from aka.light.workflow.protocol import atomic_write_text
 
-            observation_root = framework_baseline_progress_path(self.workspace).parent.resolve()
+            observation_root = (
+                self.workspace
+                / ".atrex_long_horizon"
+                / "episodes"
+                / f"e{_FRAMEWORK_BASELINE_EPISODE:04d}"
+            ).resolve()
             observation_root.mkdir(parents=True, exist_ok=True)
             telemetry_environment = {
                 "ATREX_SESSION_CAPTURE_DIR": str(observation_root / "sessions"),
                 "ATREX_TELEMETRY_CAMPAIGN_ID": self.campaign_name,
-                "ATREX_TELEMETRY_ITERATION_ID": "framework-baseline-v1",
+                "ATREX_TELEMETRY_ITERATION_ID": "episode-0000",
                 "ATREX_TELEMETRY_ATTEMPT_ID": "invocation",
             }
             telemetry_environment.update(self.agent_environment())
@@ -2514,23 +2588,28 @@ class Campaign:
             agent_workspace = getattr(
                 self, "_framework_baseline_agent_workspace", self.workspace
             )
+            handoff_path = agent_workspace / ".atrex_long_horizon" / "handoff.json"
             continuing_session_id = self._framework_baseline_session_id()
+            atomic_write_text(observation_root / "BRIEF.md", prompt)
             result = runner.run(
                 agent_workspace,
                 prompt,
                 output_directory=observation_root,
+                handoff_path=handoff_path,
+                handoff_resumes=self.handoff_resumes,
+                completion_check=self._framework_baseline_completion_check,
                 telemetry_environment=telemetry_environment,
-                stage_name="Framework baseline",
+                stage_name="Episode 0 (Framework baseline)",
                 initial_purpose="framework_baseline",
                 session_id=continuing_session_id,
                 resume_session=bool(continuing_session_id),
                 completion_instruction=(
                     "Finish the preserved V1 implementation in the candidate paths declared "
                     "by WORKSPACE.md and the active SourceProvider. Use the normal Runtime "
-                    "measurement loop until the candidate passes standard full Evaluate, then "
-                    "leave the complete candidate at a clean Git HEAD for the Supervisor's "
-                    "framework-baseline gates. Correctness is required; speedup is not. Do not "
-                    "submit an episode-report."
+                    "measurement loop until the candidate passes standard full Evaluate, close "
+                    "any active local Directions, leave the complete candidate at a clean Git "
+                    "HEAD, and submit the ordinary episode-report for Episode 0. Correctness is "
+                    "required; speedup and ABBA are not."
                 ),
                 **session_execution_policy(self),
             )
@@ -2586,6 +2665,94 @@ class Campaign:
                 stderr_tail=result.stderr_tail,
             )
         return result
+
+    def _framework_baseline_completion_check(
+        self, handoff: EpisodeHandoff
+    ) -> str:
+        """Validate Episode 0 through the same published Journal contract as Episodes."""
+        from aka.light.workflow.journal_projection import validate_terminal
+        from aka.light.workflow.journal_service import sealed_candidate_source
+        from aka.light.workspace.sources import from_git
+
+        if handoff.status != "candidate_ready":
+            return (
+                "Framework Baseline Episode 0 must finish with a correct candidate_ready "
+                "report; a pivot cannot establish V1. Repair the candidate or submit a real "
+                "blocked report only when a concrete technical blocker prevents completion."
+            )
+        agent_workspace = getattr(
+            self, "_framework_baseline_agent_workspace", self.workspace
+        )
+        try:
+            private = self.read_runtime_episode_journal(
+                _FRAMEWORK_BASELINE_EPISODE
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            return f"cannot read the private Episode 0 Journal: {error}"
+        diagnosis = validate_terminal(
+            agent_workspace / ".atrex_long_horizon" / "journal.json",
+            expected_episode=_FRAMEWORK_BASELINE_EPISODE,
+            base_commit=str(private.get("base_commit", "")),
+            branch=_FRAMEWORK_BASELINE_BRANCH,
+            state=handoff.status,
+            candidate_commit=handoff.candidate_commit,
+            runtime_journal_loader=lambda: private,
+        )
+        if diagnosis:
+            return (
+                "Supervisor could not confirm the published Episode 0 handoff: "
+                f"{diagnosis}. Resubmit the identical accepted episode-report once to repair "
+                "publication; if it persists, report the concrete Runtime blocker."
+            )
+        try:
+            source = sealed_candidate_source(private, self.workspace)
+            if source is None:
+                return "the accepted Episode 0 report has no sealed candidate source"
+            if from_git(agent_workspace, handoff.candidate_commit) != source:
+                return (
+                    "the accepted Episode 0 Agent commit does not match the Supervisor's "
+                    "sealed candidate source"
+                )
+            self.selected_episode_evaluation(
+                _FRAMEWORK_BASELINE_EPISODE, source
+            )
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
+            return (
+                "Supervisor could not verify Episode 0's accepted full-Evaluate evidence: "
+                f"{error}. Resubmit the exact report only if publication was interrupted; "
+                "otherwise repair the cited candidate or evidence."
+            )
+        return ""
+
+    def _framework_baseline_report_result(self) -> tuple[dict, str]:
+        """Return the exact full Evaluate and Agent commit sealed by Episode 0."""
+        from aka.light.workflow.journal_service import sealed_candidate_source
+        from aka.light.workspace.sources import from_git
+
+        private = self.read_runtime_episode_journal(_FRAMEWORK_BASELINE_EPISODE)
+        if private.get("state") != "candidate_ready" or not private.get("finalized_at"):
+            raise RuntimeError("Framework Baseline Episode 0 has no accepted candidate report")
+        agent_commit = private.get("candidate_kernel_id")
+        if not isinstance(agent_commit, str) or not agent_commit:
+            raise RuntimeError(
+                "Framework Baseline Episode 0 has no sealed Agent Kernel commit identity"
+            )
+        source = sealed_candidate_source(private, self.workspace)
+        if source is None:
+            raise RuntimeError("Framework Baseline Episode 0 has no sealed candidate source")
+        agent_workspace = getattr(
+            self, "_framework_baseline_agent_workspace", self.workspace
+        )
+        if from_git(agent_workspace, agent_commit) != source:
+            raise RuntimeError(
+                "Framework Baseline Episode 0 Agent commit differs from its sealed source"
+            )
+        return (
+            self.selected_episode_evaluation(
+                _FRAMEWORK_BASELINE_EPISODE, source
+            ),
+            agent_commit,
+        )
 
     def _prepare_framework_baseline_episode(self, baseline_commit: str) -> Path:
         """Bind Framework Baseline as Episode 0 in the normal Agent workspace.
