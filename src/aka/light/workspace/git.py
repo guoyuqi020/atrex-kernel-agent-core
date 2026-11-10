@@ -200,12 +200,12 @@ class EpisodeWorktree:
         private_snapshot = _is_private_kernel_snapshot(self.path, resolved)
         if not private_snapshot and resolved != git_head(self.path):
             return "candidate_commit must equal episode HEAD", []
-        branch = git_text(
-            self.path, "symbolic-ref", "--quiet", "--short", "HEAD", check=False
-        )
-        if branch != self.branch:
-            return "episode worktree left its isolated branch", []
         if not private_snapshot:
+            branch = git_text(
+                self.path, "symbolic-ref", "--quiet", "--short", "HEAD", check=False
+            )
+            if branch != self.branch:
+                return "episode worktree left its isolated branch", []
             ancestor = _git(
                 self.path,
                 "merge-base",
@@ -216,6 +216,14 @@ class EpisodeWorktree:
             )
             if ancestor.returncode:
                 return "candidate_commit is not descended from incumbent", []
+        # A private snapshot is an immutable, content-addressed Supervisor
+        # archive referenced by refs/atrex/accepted/*. It is deliberately not
+        # the HEAD of the Agent Episode branch, and Episode 0 may archive it in
+        # the stable Controller repository rather than an Episode worktree.
+        # Source identity and the accepted capability ref are authoritative for
+        # that case; applying the mutable-worktree branch check would reject a
+        # correctly sealed Agent commit solely because the Controller happens
+        # to be on its own branch.
         from aka.light.workspace.sources import from_git, unpack, snapshot as source_snapshot, allowed_changes
         policy, _ = unpack(from_git(self.path, self.base_commit))
         if policy is not None:

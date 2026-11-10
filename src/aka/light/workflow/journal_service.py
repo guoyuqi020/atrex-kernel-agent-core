@@ -399,6 +399,11 @@ def initialize_journal(
         "experiments": [],
         "outcome": None,
         "candidate_commit": None,
+        # Private recovery state only. When an evidence-complete
+        # candidate_ready report cannot be copied into the Supervisor archive,
+        # keep the Episode open and prevent a fallback blocked/pivot report from
+        # permanently discarding that candidate.
+        "pending_candidate_archive": None,
         "created_at": _now(),
         "finalized_at": None,
     }
@@ -4348,6 +4353,7 @@ class SupervisorJournalService:
         projection.pop("base_kernel_id", None)
         projection.pop("runtime_managed", None)
         projection.pop("submitted_report", None)
+        projection.pop("pending_candidate_archive", None)
         experiments = []
         selected = current["outcome"].get("selected_experiment_id")
         projection["outcome"] = dict(current["outcome"])
@@ -4460,6 +4466,26 @@ class SupervisorJournalService:
             "blocked",
         }:
             raise ValueError("Episode Report status must be candidate_ready, pivot, or blocked")
+        pending_archive = persisted.get("pending_candidate_archive")
+        if status != "candidate_ready" and isinstance(pending_archive, Mapping):
+            pending_kernel_id = pending_archive.get("agent_kernel_id")
+            raise RuntimeStateError(
+                "A previously submitted candidate_ready report passed evidence validation, "
+                "but the Supervisor has not yet sealed its private Kernel archive. The "
+                "Episode remains open and cannot be finalized as blocked or pivoted while "
+                "that candidate is pending archival recovery.",
+                code="candidate_archive_pending",
+                next_action=(
+                    "Preserve the clean candidate HEAD and its Gateway Records. After the "
+                    "Supervisor archival fault is repaired, resubmit the same candidate_ready "
+                    "episode-report; do not submit blocked or pivot to work around a Runtime "
+                    "archive failure."
+                    + (
+                        f" Pending Agent Kernel commit: {pending_kernel_id}."
+                        if isinstance(pending_kernel_id, str) else ""
+                    )
+                ),
+            )
         summary = _text(raw.get("summary"), "Episode Report summary")
         handoff_reason = raw.get("handoff_reason")
         if not isinstance(handoff_reason, str) or handoff_reason not in HANDOFF_REASONS:
@@ -4742,7 +4768,30 @@ class SupervisorJournalService:
                 raise RuntimeStateError(
                     "Supervisor Agent-commit sealing is unavailable; report was not accepted"
                 )
-            candidate_commit = seal_candidate(agent_kernel_id, kernel_source)
+            try:
+                candidate_commit = seal_candidate(agent_kernel_id, kernel_source)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                current["pending_candidate_archive"] = {
+                    "agent_kernel_id": agent_kernel_id,
+                    "candidate_kernel_digest": (
+                        "sha256:" + hashlib.sha256(kernel_source).hexdigest()
+                    ),
+                    "submitted_report": dict(raw),
+                    "failed_at": _now(),
+                    "failure": f"{type(error).__name__}: {error}"[:2000],
+                }
+                _save_journal(self.path, self.campaign_root, current)
+                raise RuntimeStateError(
+                    "Supervisor could not seal the evidence-complete candidate into its "
+                    "private Kernel archive. The Episode remains open for an identical "
+                    "candidate_ready retry.",
+                    code="candidate_archive_unavailable",
+                    next_action=(
+                        "Preserve the clean candidate HEAD and Gateway Records. Retry the same "
+                        "candidate_ready episode-report after the Supervisor archive is "
+                        "available; do not submit blocked or pivot as a fallback."
+                    ),
+                ) from error
             from aka.light.workspace.git import EpisodeWorktree
 
             violation, _ = EpisodeWorktree(
@@ -4763,9 +4812,26 @@ class SupervisorJournalService:
                             "Directions; omit candidate evidence fields."
                         ),
                     )
+                current["pending_candidate_archive"] = {
+                    "agent_kernel_id": agent_kernel_id,
+                    "candidate_kernel_digest": (
+                        "sha256:" + hashlib.sha256(kernel_source).hexdigest()
+                    ),
+                    "submitted_report": dict(raw),
+                    "failed_at": _now(),
+                    "failure": violation[:2000],
+                }
+                _save_journal(self.path, self.campaign_root, current)
                 raise RuntimeStateError(
-                    "Supervisor rejected its private Kernel archive: " + violation
+                    "Supervisor rejected its private Kernel archive: " + violation,
+                    code="candidate_archive_unavailable",
+                    next_action=(
+                        "Preserve the clean candidate HEAD and Gateway Records. Retry the same "
+                        "candidate_ready episode-report after the Supervisor archive is "
+                        "repaired; do not submit blocked or pivot as a fallback."
+                    ),
                 )
+            current.pop("pending_candidate_archive", None)
         current["state"] = status
         current["outcome"] = {
             "summary": summary,

@@ -20,7 +20,7 @@ from aka.light.experiment.store import MeasurementStore
 from aka.light.research import ResearchStore
 from aka.light.runtime.server import _Handler, _journal_evidence_hint
 from aka.light.runtime.paths import supervisor_campaign_root
-from aka.light.runtime.request_errors import AgentRequestError
+from aka.light.runtime.request_errors import AgentRequestError, RuntimeStateError
 from aka.light.runtime.request_feedback import augment_error, journal_schema
 from aka.light.runtime.request_errors import REPAIR_REQUEST
 from aka.light.runtime.server import RuntimeConfig, SupervisorRuntime
@@ -5442,6 +5442,138 @@ def test_supervisor_archives_agent_commit_under_distinct_private_identity(tmp_pa
         ).stdout.strip() == sealed
     finally:
         worktree.remove(controller)
+
+
+def test_private_supervisor_snapshot_does_not_require_controller_episode_branch(
+    tmp_path,
+):
+    controller = _controller_repository(
+        tmp_path / "controller", "def run():\n    return 1\n"
+    )
+    base_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=controller,
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    assert subprocess.run(
+        ["git", "branch", "--show-current"], cwd=controller,
+        text=True, capture_output=True, check=True,
+    ).stdout.strip() != "framework-baseline"
+
+    agent_workspace = tmp_path / "agent"
+    _install(agent_workspace, "def run():\n    return 1\n")
+    agent_git = AgentGit(agent_workspace, tmp_path / "agent.bundle")
+    agent_git.prepare()
+    (agent_workspace / "kernel.py").write_text(
+        "def run():\n    return 2\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "kernel.py"], cwd=agent_workspace, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "agent candidate"],
+        cwd=agent_workspace,
+        check=True,
+    )
+    agent_commit = agent_git.kernel_commit()
+    candidate_source = snapshot(agent_workspace)
+
+    sealed = agent_git.seal_into(controller, agent_commit, candidate_source)
+    violation, paths = EpisodeWorktree(
+        0, base_commit, "framework-baseline", controller
+    ).validate_candidate(sealed)
+
+    assert violation == ""
+    assert paths == ["kernel.py"]
+
+
+def test_candidate_archive_failure_keeps_journal_open_and_rejects_blocked_fallback(
+    monkeypatch, tmp_path
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    journals = tmp_path / "scope" / "journals"
+    evidence = journals / "episodes" / "e00000000"
+    evidence.mkdir(parents=True)
+    journal = evidence / "journal.json"
+    initialize_journal(
+        journal,
+        episode=0,
+        base_commit="a" * 40,
+        branch="framework-baseline",
+        tool_modules=(),
+    )
+    source = b"def run():\n    return 2\n"
+    agent_commit = "b" * 40
+    private_commit = "c" * 40
+    monkeypatch.setattr(
+        "aka.light.workflow.journal_service.validate_report_evidence",
+        lambda *args, **kwargs: (load_journal(journal), {}, source),
+    )
+    monkeypatch.setattr(
+        "aka.light.workspace.sources.policy_at", lambda *args, **kwargs: None
+    )
+    validations = iter([
+        ("episode worktree left its isolated branch", []),
+        ("", ["kernel.py"]),
+    ])
+    monkeypatch.setattr(
+        EpisodeWorktree,
+        "validate_candidate",
+        lambda *_args, **_kwargs: next(validations),
+    )
+    service = SupervisorJournalService(
+        workspace=workspace,
+        git_workspace=workspace,
+        campaign_root=journals,
+        evidence_root=evidence,
+        supervisor_git=True,
+    )
+    candidate_report = {
+        "status": "candidate_ready",
+        "handoff_reason": "direction_terminal",
+        "summary": "The exact committed candidate passed full Evaluate.",
+        "gateway_record_ids": ["gateway-" + "1" * 32],
+    }
+
+    with pytest.raises(RuntimeStateError) as archive_failure:
+        service._submit_report(
+            candidate_report,
+            validate_candidate=lambda _source: {"status": "PASS"},
+            agent_kernel_id=agent_commit,
+            seal_candidate=lambda _kernel_id, _source: private_commit,
+        )
+    assert archive_failure.value.response["error"]["code"] == (
+        "candidate_archive_unavailable"
+    )
+    pending = load_journal(journal)
+    assert pending["state"] == "in_progress"
+    assert pending["finalized_at"] is None
+    assert pending["pending_candidate_archive"]["agent_kernel_id"] == agent_commit
+
+    with pytest.raises(RuntimeStateError) as blocked_fallback:
+        service._submit_report({
+            "status": "blocked",
+            "handoff_reason": "blocked",
+            "summary": "Supervisor archival failed.",
+            "blocker": "The private archive is unavailable.",
+        })
+    assert blocked_fallback.value.response["error"]["code"] == (
+        "candidate_archive_pending"
+    )
+    assert load_journal(journal)["state"] == "in_progress"
+
+    accepted = service._submit_report(
+        candidate_report,
+        validate_candidate=lambda _source: {"status": "PASS"},
+        agent_kernel_id=agent_commit,
+        seal_candidate=lambda _kernel_id, _source: private_commit,
+    )
+    assert accepted["status"] == "accepted"
+    finalized = load_journal(journal)
+    assert finalized["state"] == "candidate_ready"
+    assert "pending_candidate_archive" not in finalized
+    projection = json.loads(
+        (workspace / ".atrex_long_horizon" / "journal.json").read_text()
+    )
+    assert "pending_candidate_archive" not in projection
 
 
 def test_agent_workspace_projects_memory_commits_into_agent_git(tmp_path):
