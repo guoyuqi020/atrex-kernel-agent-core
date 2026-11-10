@@ -17,9 +17,14 @@ not replace a passing ordinary full Evaluate for the exact selected source.
 | Does compilation or a sanitizer reveal a defect? | `check --no-sync`, optionally `--sanitize memcheck` | Diagnostic results; inspect inner errors even if transport completed. |
 | What code did the compiler generate? | `disassemble --format ptx --no-sync` | Generated device code, not correctness or performance validation. |
 | Can a self-contained single-file probe that reads no candidate or other workspace file resolve one question? | `dev --input scratch/probe.py --no-sync -- python3 scratch/probe.py` | Only the explicitly declared probe is uploaded; returns its output and exit status. |
-| Does custom code read the candidate, helpers, prior artifacts, or any other workspace state? | `command -- python3 scratch/experiment.py` | Bounded engineering workspace projection uploaded; `scratch/` synchronized back. Runtime control state, Skills and bulk `records/` history are excluded. |
+| Does custom code read the candidate, helpers, prior artifacts, or any other workspace state? | `command -- python3 -m scratch.experiment` | Bounded engineering workspace projection uploaded; `scratch/` synchronized back. Runtime control state, Skills and bulk `records/` history are excluded. |
 | What is available on the assigned GPU target? | `env` | Runtime selects the Campaign hardware and returns its GPU/environment/capability facts; this is not a fact about the Agent host or a Kernel measurement. |
 | Has this exact candidate or observation already been measured? | `records/*.json`, local Git, root `PROGRESS.md` | Saved facts and exact committed source; `PROGRESS.md` includes per-Shape historical winners. No new GPU allocation. |
+
+For Python Command probes below `scratch/`, use module form such as
+`python3 -m scratch.probe`. Running `python3 scratch/probe.py` directly makes
+`scratch/` the first Python module-search directory, so root candidate modules such as
+`kernel.py` may not be importable even though Command uploaded them correctly.
 
 Read `python3 tools/sandbox.py --kind OPERATION --help` before using unfamiliar controls.
 The Runtime discovers safe native options from its installed Agate client at startup and
@@ -267,7 +272,7 @@ into `scratch/` with a normal local file copy rather than uploading the entire m
 
 ```bash
 cp records/gateway-0123456789abcdef0123456789abcdef.json scratch/record.json
-python3 tools/sandbox.py --kind command -- python3 scratch/probe_mma.py
+python3 tools/sandbox.py --kind command -- python3 -m scratch.probe_mma
 ```
 
 It uploads a bounded engineering projection, including the committed candidate, custom helpers

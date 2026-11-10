@@ -36,9 +36,14 @@ python3 tools/sandbox.py --kind run --no-sync
 python3 tools/sandbox.py --kind run --mode correctness_only --no-sync
 python3 tools/sandbox.py --kind profile --profile-shape-id SHAPE_ID --no-sync
 python3 tools/sandbox.py --kind dev --input scratch/probe.py --no-sync -- python3 scratch/probe.py
-python3 tools/sandbox.py --kind command -- python3 scratch/experiment.py
+python3 tools/sandbox.py --kind command -- python3 -m scratch.experiment
 python3 tools/sandbox.py --kind env
 ```
+
+Use `python3 -m scratch.<module>` for Python Command probes below `scratch/`. Directly running
+`python3 scratch/<module>.py` makes `scratch/` rather than the uploaded workspace root the first
+module-search directory, so imports such as `import kernel` may fail even though `kernel.py` was
+uploaded correctly.
 
 | Operation | Meaning |
 | --- | --- |

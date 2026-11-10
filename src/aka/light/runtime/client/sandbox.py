@@ -8,7 +8,9 @@ An explicit command after ``--`` is an operation-specific override; use it only 
 GPU-measurement Skill documents that exact form.
 Custom execution examples:
   python3 tools/sandbox.py --kind dev --input scratch/probe.py -- python3 scratch/probe.py
-  python3 tools/sandbox.py --kind command -- python3 scratch/probe.py
+  python3 tools/sandbox.py --kind command -- python3 -m scratch.probe
+Use module form for Python Command scripts below scratch/ so the uploaded workspace root remains
+on Python's import path and root modules such as kernel.py stay importable.
 Additional typed operations: check, disassemble, env; Wiki: wiki-query, wiki-search,
 wiki-hardware. Use --kind OPERATION --help for the operation's request options.
 Successful terminal measurement calls print a compact receipt. Env is read-only discovery and
