@@ -1758,9 +1758,8 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
 
         self.assertIs(defaults["lock_clocks"], True)
         self.assertNotIn("gpu_clock_mhz", defaults["runner_overrides"])
-        self.assertIs(
-            defaults["runner_overrides"]["clock_lock_fail_on_deviation"],
-            False,
+        self.assertNotIn(
+            "clock_lock_fail_on_deviation", defaults["runner_overrides"]
         )
         self.assertIsNone(resolved_gpu_clock_mhz("NVIDIA L20N"))
         self.assertIsNone(

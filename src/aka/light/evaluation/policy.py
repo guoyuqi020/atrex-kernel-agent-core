@@ -64,10 +64,6 @@ def runner_overrides(
         "candidate_timeout_s": step_timeout,
         "perf_timeout_s": step_timeout,
         "skip_kernel_attribution": True,
-        # Clock locking is best-effort.  Preserve the requested target and
-        # measurement trace, but never reject otherwise valid evaluation
-        # evidence because a worker realizes or samples a nearby clock bin.
-        "clock_lock_fail_on_deviation": False,
     }
     # Kept in the Python signature for callers restoring older Campaign
     # configurations.  Agate owns frequency selection; never put this value on
