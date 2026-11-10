@@ -63,6 +63,7 @@ from aka.light.evaluation.policy import (
     BENCH_ITERS,
     CORRECTNESS_CASES,
     SHAPE_BATCH_SIZE,
+    WARMUP_ITERS,
     measurement_defaults,
     runner_overrides,
     resolved_gpu_clock_mhz,
@@ -1756,6 +1757,10 @@ class RuntimeOwnedCorrectnessPolicyTests(unittest.TestCase):
     def test_eval_delegates_locked_clock_frequency_to_agate(self):
         defaults = measurement_defaults("L20N")
 
+        self.assertEqual(defaults["bench_iters"], 100)
+        self.assertEqual(defaults["runner_overrides"]["warmup_iters"], 20)
+        self.assertEqual(BENCH_ITERS, 100)
+        self.assertEqual(WARMUP_ITERS, 20)
         self.assertIs(defaults["lock_clocks"], True)
         self.assertNotIn("gpu_clock_mhz", defaults["runner_overrides"])
         self.assertNotIn(

@@ -1,4 +1,4 @@
-"""Light's measurement defaults, with Legacy-aligned timing and warmup counts.
+"""Light's Runtime-owned measurement defaults.
 
 Keep these local to Light: selecting another AKA composition does not change
 its evaluator or acceptance policy. Explicit request/operator overrides still
@@ -14,8 +14,8 @@ from aka.contracts.evaluation import (
 
 # One base case plus four additional deterministic input cases per Shape.
 CORRECTNESS_CASES = 5
-BENCH_ITERS = 20
-WARMUP_ITERS = 5
+BENCH_ITERS = 100
+WARMUP_ITERS = 20
 # The Runtime-owned step timeout supplies both aliases at request construction.
 # A multi-Shape request keeps fixed work single and adds only the sequential
 # performance budget for each extra Shape.

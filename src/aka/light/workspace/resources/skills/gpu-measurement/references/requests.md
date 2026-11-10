@@ -107,8 +107,8 @@ Runtime also owns Shape batch size, measurement repetitions and the derived allo
 them with repeated Agent requests or environment overrides. Other request/input changes can
 prevent reuse. A matching comparison is optional and does not replace the report's full Evaluate.
 
-Full Evaluate and ABBA default to 20 timing iterations and 5 warmup iterations, matching
-Legacy's sampling counts. Runtime uses its configured Shape-batch upper bound (default 5, and it
+Full Evaluate and ABBA default to 100 timing iterations and 20 warmup iterations. Runtime uses
+its configured Shape-batch upper bound (default 5, and it
 may reduce the effective batch size to fit a request deadline) and configured batch-worker cap
 (default 16). These are Supervisor settings, not Agent request fields.
 Promotion minimizes GeoMean latency versus the
