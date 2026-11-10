@@ -1255,6 +1255,18 @@ class Campaign:
     ) -> list[str]:
         """Bound timeout retries across sessions and supervisor restarts."""
         from aka.light.execution.retry import retry_review
+        from aka.light.workspace.sources import seed_baseline_metadata
+
+        # Open-DSL single-file workspaces are initialized before the Agent has
+        # selected a DSL. Refresh Supervisor-owned solution.json from the
+        # finished candidate so the fail-closed Production review sees the
+        # implementation's real language and dependencies.
+        seed_baseline_metadata(
+            workspace,
+            framework,
+            self.campaign_name,
+            native_eval=bool(self.atrex_bench_root),
+        )
 
         digest = _production_review_digest(
             workspace, framework, require_gluon, self.specify_dsl
