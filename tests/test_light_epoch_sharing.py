@@ -3398,6 +3398,9 @@ def test_interrupted_framework_baseline_resumes_original_provider_session(
         work_dir=str(tmp_path),
     )
     campaign.workspace.mkdir(parents=True)
+    agent_workspace = tmp_path / "agent-workspace"
+    agent_workspace.mkdir()
+    campaign._framework_baseline_agent_workspace = agent_workspace
     campaign.agent = object()
     campaign._remember_framework_baseline_session(
         SimpleNamespace(session_id="framework-session")
@@ -3434,10 +3437,73 @@ def test_interrupted_framework_baseline_resumes_original_provider_session(
 
     campaign._run_framework_baseline_agent(n=1, label="framework baseline")
 
+    assert observed["workspace"] == agent_workspace
+    assert observed["kwargs"]["handoff_path"] == (
+        campaign.workspace / ".atrex_long_horizon" / "handoff.json"
+    )
     assert observed["kwargs"]["session_id"] == "framework-session"
     assert observed["kwargs"]["resume_session"] is True
     assert "original Provider Session" in observed["prompt"]
     assert "resume.json" not in observed["prompt"]
+
+
+def test_framework_baseline_completion_reads_controller_projection(
+    tmp_path, monkeypatch
+):
+    campaign = Campaign(
+        name="operator",
+        kernel_demo="unused.py",
+        platform="cuda",
+        framework="cuda",
+        work_dir=str(tmp_path),
+    )
+    campaign.workspace.mkdir(parents=True)
+    agent_workspace = tmp_path / "agent-workspace"
+    agent_workspace.mkdir()
+    campaign._framework_baseline_agent_workspace = agent_workspace
+    candidate = "a" * 40
+    private = {
+        "state": "candidate_ready",
+        "finalized_at": "2026-11-10T00:00:00+00:00",
+        "base_commit": "b" * 40,
+        "candidate_kernel_id": candidate,
+    }
+    campaign.read_runtime_episode_journal = lambda episode: (
+        private if episode == 0 else None
+    )
+    campaign.selected_episode_evaluation = lambda episode, source: {
+        "all_pass": True,
+        "latency_us_geomean": 1.25,
+    }
+    observed = {}
+
+    def validate(path, **kwargs):
+        observed.update(path=path, kwargs=kwargs)
+        return ""
+
+    monkeypatch.setattr(
+        "aka.light.workflow.journal_projection.validate_terminal", validate
+    )
+    monkeypatch.setattr(
+        "aka.light.workflow.journal_service.sealed_candidate_source",
+        lambda journal, workspace: b"sealed-source",
+    )
+    monkeypatch.setattr(
+        "aka.light.workspace.sources.from_git",
+        lambda workspace, commit: b"sealed-source",
+    )
+
+    diagnosis = campaign._framework_baseline_completion_check(
+        EpisodeHandoff(status="candidate_ready", candidate_commit=candidate)
+    )
+
+    assert diagnosis == ""
+    assert observed["path"] == (
+        campaign.workspace / ".atrex_long_horizon" / "journal.json"
+    )
+    assert observed["path"].parent != (
+        agent_workspace / ".atrex_long_horizon"
+    )
 
 
 def test_framework_baseline_keeps_resuming_after_multiple_gate_rejections(

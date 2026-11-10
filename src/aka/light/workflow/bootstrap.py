@@ -2588,7 +2588,14 @@ class Campaign:
             agent_workspace = getattr(
                 self, "_framework_baseline_agent_workspace", self.workspace
             )
-            handoff_path = agent_workspace / ".atrex_long_horizon" / "handoff.json"
+            # Runtime publishes the compatibility Journal and handoff into its
+            # trusted ``git_workspace`` (the Controller workspace passed to
+            # ``register_runtime_episode``), not into the separately projected
+            # Agent workspace.  Watch the same Controller projection used by
+            # normal Episodes; otherwise an accepted Episode 0 report is
+            # durably sealed while the Session Runner incorrectly diagnoses a
+            # missing handoff.
+            handoff_path = self.workspace / ".atrex_long_horizon" / "handoff.json"
             continuing_session_id = self._framework_baseline_session_id()
             atomic_write_text(observation_root / "BRIEF.md", prompt)
             result = runner.run(
@@ -2690,7 +2697,10 @@ class Campaign:
         except (OSError, RuntimeError, ValueError) as error:
             return f"cannot read the private Episode 0 Journal: {error}"
         diagnosis = validate_terminal(
-            agent_workspace / ".atrex_long_horizon" / "journal.json",
+            # ``_publish_legacy_report`` projects the public Journal beside the
+            # Controller handoff.  The Agent workspace contains editable source
+            # and Git history, but is not the compatibility publication target.
+            self.workspace / ".atrex_long_horizon" / "journal.json",
             expected_episode=_FRAMEWORK_BASELINE_EPISODE,
             base_commit=str(private.get("base_commit", "")),
             branch=_FRAMEWORK_BASELINE_BRANCH,
