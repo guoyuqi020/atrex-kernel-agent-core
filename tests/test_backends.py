@@ -72,11 +72,16 @@ def test_an_absent_system_prompt_adds_no_argument() -> None:
 
 
 @pytest.mark.parametrize("timeout_s", [30, 72 * 60 * 60])
+@pytest.mark.parametrize("active_clock", [False, True])
 def test_claude_waits_for_foreground_tools_until_session_deadline(
-    tmp_path: Path, timeout_s: int, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, timeout_s: int, monkeypatch: pytest.MonkeyPatch, active_clock: bool,
 ) -> None:
     monkeypatch.delenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", raising=False)
     monkeypatch.delenv("BASH_DEFAULT_TIMEOUT_MS", raising=False)
+    if active_clock:
+        monkeypatch.setenv("ATREX_SESSION_CLOCK_PATH", str(tmp_path / "runtime-clock.json"))
+    else:
+        monkeypatch.delenv("ATREX_SESSION_CLOCK_PATH", raising=False)
 
     def runner(
         command: list[str],
@@ -88,7 +93,7 @@ def test_claude_waits_for_foreground_tools_until_session_deadline(
         assert command[0] == "claude"
         assert cwd == tmp_path and timeout == timeout_s
         assert env is not None
-        expected_ms = max(timeout_s * 1000, 120_000)
+        expected_ms = 72 * 3600 * 1000 if active_clock else max(timeout_s * 1000, 120_000)
         assert "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" not in env
         assert "BASH_DEFAULT_TIMEOUT_MS" not in env
         assert env["BASH_MAX_TIMEOUT_MS"] == str(expected_ms)

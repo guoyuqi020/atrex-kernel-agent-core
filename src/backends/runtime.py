@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
+from session_clock import SESSION_CLOCK_ENV
 from session_transcript import encode_records, provider_line_record, record_provider_line
 
 from .adapter import (
@@ -405,9 +406,15 @@ class CliAgentRuntime:
         environment = build_session_environment(self.id)
         environment["IS_SANDBOX"] = "1"
         if self.id == "claude":
-            # A scoped PreToolUse hook gives Runtime CLI calls the Session allowance.
-            # Other Bash calls keep their usual default, and background subagents remain available.
-            bash_timeout_ms = min(max(request.timeout_s * 1000, 120_000), 2_147_483_647)
+            # Runtime waits do not spend active Session time. Give their foreground
+            # Bash calls the 72-hour HTTP allowance rather than the remaining Agent budget.
+            # run_bounded additionally pauses the Provider tree while its independent
+            # HTTP worker owns a Runtime request; shell timeouts cannot release it.
+            tool_timeout_s = (
+                max(request.timeout_s, 72 * 3600)
+                if environment.get(SESSION_CLOCK_ENV) else request.timeout_s
+            )
+            bash_timeout_ms = min(max(tool_timeout_s * 1000, 120_000), 2_147_483_647)
             environment["BASH_MAX_TIMEOUT_MS"] = str(bash_timeout_ms)
             environment["ATREX_RUNTIME_TOOL_BASH_TIMEOUT_MS"] = str(bash_timeout_ms)
         claude_observer = (
@@ -582,9 +589,18 @@ class CliAgentRuntime:
             cleanup_error = codex_temporary_home.close()
             if cleanup_error:
                 observation_errors += (cleanup_error,)
+        failure_kind, provider_error_code = self._adapter.classify_terminal_failure(
+            stdout, session_id
+        )
+        policy_diagnostics = process.policy_diagnostics
+        if failure_kind is not None and not process.process_scope_complete:
+            diagnostic = "Agent process scope could not be verified quiescent"
+            if diagnostic not in policy_diagnostics:
+                policy_diagnostics += (diagnostic,)
         return AgentRunResult(
             runtime_id=self.id,
-            exit_status=process.returncode,
+            # A structured terminal error remains a failure even if the CLI exits 0.
+            exit_status=process.returncode or (1 if failure_kind is not None else 0),
             timed_out=process.timed_out,
             terminal_usage=terminal_usage,
             events=events,
@@ -595,8 +611,10 @@ class CliAgentRuntime:
             raw_session_files=raw_session_files,
             raw_provider_capture_complete=raw_provider_capture_complete,
             response_usage_complete=response_usage_complete,
-            policy_diagnostics=process.policy_diagnostics,
+            policy_diagnostics=policy_diagnostics,
             session_id=session_id,
+            failure_kind=failure_kind,
+            provider_error_code=provider_error_code,
             budget_exhausted=(budget_observer.exhausted if budget_observer is not None else False),
         )
 

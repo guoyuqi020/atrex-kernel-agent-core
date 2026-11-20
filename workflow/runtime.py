@@ -218,6 +218,10 @@ class EpochRound:
 
     number: int
     _results: dict[EpochPool, tuple[dict[str, Any], ...]]
+    _history: dict[EpochPool, tuple[dict[str, Any], ...]] = field(
+        default_factory=dict,
+        repr=False,
+    )
     _kernel_routes: dict[tuple[EpochPool, int], str] = field(default_factory=dict, repr=False)
     _state_routes: dict[tuple[EpochPool, int], AgentStateRef] = field(
         default_factory=dict,
@@ -232,11 +236,11 @@ class EpochRound:
             raise WorkflowRuntimeError("Pool did not participate in this round") from error
 
     def best_accepted_kernel(self, *pools: EpochPool) -> str | None:
-        """Return the lowest-latency accepted Kernel in the selected Pools."""
+        """Return the lowest-latency accepted Kernel so far in the selected Pools."""
         selected = pools or tuple(self._results)
         accepted: list[dict[str, Any]] = []
         for pool in selected:
-            for outcome in self._results.get(pool, ()):
+            for outcome in self._history.get(pool, self._results.get(pool, ())):
                 latency = outcome.get("latency_us")
                 revision = outcome.get("trajectory_kernel_revision_id")
                 if (
@@ -367,6 +371,7 @@ class EpochRuntime:
 
         kernel_routes: dict[tuple[EpochPool, int], str] = {}
         state_routes: dict[tuple[EpochPool, int], AgentStateRef] = {}
+        history: dict[EpochPool, list[dict[str, Any]]] = {pool: [] for pool in selected}
         completed_rounds: list[EpochRound] = []
         for round_number in range(1, max(pool.rounds for pool in selected) + 1):
             participants = tuple(pool for pool in selected if round_number <= pool.rounds)
@@ -383,9 +388,7 @@ class EpochRuntime:
                                 (pool, trajectory.ordinal),
                                 trajectory.initial_state,
                             ),
-                            input_kernel_revision_id=kernel_routes.get(
-                                (pool, trajectory.ordinal)
-                            ),
+                            input_kernel_revision_id=kernel_routes.get((pool, trajectory.ordinal)),
                         )
                     )
             raw = self._client.run_attempts_parallel(launches)
@@ -402,9 +405,11 @@ class EpochRuntime:
                         "Runtime returned an invalid output Agent State reference"
                     )
                 grouped[pool].append(projected)
+                history[pool].append(projected)
             current = EpochRound(
                 number=round_number,
                 _results={pool: tuple(values) for pool, values in grouped.items()},
+                _history={pool: tuple(history[pool]) for pool in selected},
             )
             if after_round is not None:
                 after_round(current)

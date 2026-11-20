@@ -30,18 +30,12 @@ def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _terminal_report(status: str) -> dict[str, Any]:
-    report = helpers._report("experiment_" + "1" * 32)
-    report.update(
-        {
-            "status": status,
-            "final_candidate": None,
-            "profile_evidence": None,
-            "findings": [],
-            "contributing_result_artifact_digests": [],
-            "blocker": "No usable evaluation could be obtained" if status == "blocked" else None,
-        }
-    )
-    return report
+    return {
+        "status": status,
+        "final_candidate": None,
+        "contributing_result_artifact_digests": [],
+        "blocker": "No usable evaluation could be obtained" if status == "blocked" else None,
+    }
 
 
 @pytest.mark.parametrize("allow_baseline", [False, True])
@@ -61,25 +55,25 @@ def test_adopt_schema_exposes_action_and_requires_trial_reference_fields(
             "pattern": r"^sha256:[0-9a-f]{64}$",
         }
         assert subject["additionalProperties"] is False
-        assert schema["allOf"][1]["if"]["properties"]["action"] == {"enum": ["adopt", "keep_after", "restore_before"]}
+        assert schema["allOf"][1]["if"]["properties"]["action"] == {
+            "enum": ["adopt", "keep_after", "restore_before"]
+        }
         assert schema["allOf"][1]["then"]["properties"][side] == subject
 
 
 @pytest.mark.parametrize("allow_baseline", [False, True])
-def test_report_schema_requires_findings_only_for_candidate_ready(allow_baseline: bool) -> None:
+def test_report_schema_is_a_compact_terminal_handoff(allow_baseline: bool) -> None:
     schema = tool_request_schema("attempt-report", allow_baseline=allow_baseline)
 
     assert schema is not None
-    assert "minItems" not in schema["properties"]["findings"]
-    assert schema["allOf"] == [
-        {
-            "if": {
-                "properties": {"status": {"const": "candidate_ready"}},
-                "required": ["status"],
-            },
-            "then": {"properties": {"findings": {"minItems": 1}}},
-        }
-    ]
+    assert set(schema["properties"]) == {
+        "status",
+        "final_candidate",
+        "contributing_result_artifact_digests",
+        "blocker",
+    }
+    assert set(schema["required"]) == set(schema["properties"])
+    assert "allOf" not in schema
 
 
 def test_historical_adopt_survives_http_and_journal_snapshot_into_candidate_report(
@@ -143,7 +137,9 @@ def test_historical_adopt_survives_http_and_journal_snapshot_into_candidate_repo
     experiment_calls = [call for call in calls if call["operation"] == "experiment_record"]
     assert len(experiment_calls) == 1
     assert experiment_calls[0]["request"] == experiment
-    assert experiment_calls[0]["request"]["after"] == {"result_artifact_digest": "sha256:" + "f" * 64}
+    assert experiment_calls[0]["request"]["after"] == {
+        "result_artifact_digest": "sha256:" + "f" * 64
+    }
     snapshot_operation = runtime_tools._RUNTIME_JOURNAL_COMMANDS["_journal-snapshot"]
     assert any(call["operation"] == snapshot_operation for call in calls)
     assert published["report_status"] == "candidate_ready"
@@ -151,7 +147,7 @@ def test_historical_adopt_survives_http_and_journal_snapshot_into_candidate_repo
     assert report["experiments"][0]["action"] == "adopt"
     assert report["experiments"][0]["after"] == helpers._materialized_subject(experiment["after"])
     assert report["experiments"][0]["experiment_id"] == receipt["experiment_id"]
-    assert report["findings"][0]["supporting_experiment_ids"] == [receipt["experiment_id"]]
+    assert "findings" not in report
     assert [report] == helpers._REGISTERED_REPORTS
 
 
@@ -195,7 +191,7 @@ def test_adopt_rejects_both_trial_references_null(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("status", ["blocked", "pivot"])
-def test_terminal_report_can_publish_without_experiments_findings_or_direction_events(
+def test_terminal_report_can_publish_without_experiments_or_direction_events(
     tmp_path: Path,
     status: str,
 ) -> None:
@@ -204,9 +200,10 @@ def test_terminal_report_can_publish_without_experiments_findings_or_direction_e
     published = runtime_tools.attempt_report(context, _terminal_report(status))
 
     assert published["report_status"] == status
-    assert published["experiment_count"] == published["finding_count"] == 0
+    assert published["experiment_count"] == published["direction_count"] == 0
     report = json.loads(context.report_path.read_text())
-    assert report["experiments"] == report["findings"] == report["direction_events"] == []
+    assert report["experiments"] == report["direction_events"] == []
+    assert "findings" not in report
     assert [report] == helpers._REGISTERED_REPORTS
 
 
@@ -216,7 +213,7 @@ def test_blocked_bootstrap_can_publish_without_experiments(tmp_path: Path) -> No
     published = runtime_tools.attempt_report(context, _terminal_report("blocked"))
 
     assert published["report_status"] == "blocked"
-    assert published["experiment_count"] == published["finding_count"] == 0
+    assert published["experiment_count"] == published["direction_count"] == 0
 
 
 @pytest.mark.parametrize(
@@ -224,7 +221,6 @@ def test_blocked_bootstrap_can_publish_without_experiments(tmp_path: Path) -> No
     [
         ("experiments", "Experiment"),
         ("direction_events", "Direction event"),
-        ("findings", "findings"),
     ],
 )
 def test_candidate_ready_still_requires_each_kind_of_evidence(
@@ -235,10 +231,7 @@ def test_candidate_ready_still_requires_each_kind_of_evidence(
     context = helpers._context(tmp_path)
     _, receipt = helpers._completed_test_experiment(context)
     report = helpers._report(str(receipt["experiment_id"]))
-    if missing == "findings":
-        report["findings"] = []
-    else:
-        helpers._fake_state(context)[missing].clear()
+    helpers._fake_state(context)[missing].clear()
 
     with pytest.raises(ValueError, match=message):
         runtime_tools.attempt_report(context, report)
@@ -270,10 +263,7 @@ def test_zero_experiments_cannot_bypass_an_active_direction(
 ) -> None:
     context = helpers._context(tmp_path)
     direction_id = helpers._propose_and_start_direction(context)
-    # An active historical Direction must be checked even with an empty current journal.
-    state = helpers._fake_state(context)
-    helpers._FAKE_HISTORY[str(context.workspace)] = deepcopy(state)
-    state["direction_events"].clear()
+    # Missing Experiments cannot bypass this Attempt's own active Direction.
     report = _terminal_report(status)
 
     with pytest.raises(ValueError, match="cannot leave any Direction in progress"):
@@ -299,3 +289,25 @@ def test_zero_experiments_cannot_bypass_an_active_direction(
     assert published["report_status"] == status
     assert published["experiment_count"] == 1
     assert helpers._fake_state(context)["direction_events"][-1]["action"] == close_action
+
+
+@pytest.mark.parametrize("status", ["blocked", "pivot"])
+def test_empty_terminal_report_does_not_close_historical_open_direction(
+    tmp_path: Path, status: str
+) -> None:
+    source = helpers._context(tmp_path / "source")
+    direction_id = helpers._propose_and_start_direction(source)
+    reader = helpers._context(tmp_path / "reader")
+    helpers._FAKE_HISTORY[str(reader.workspace)] = deepcopy(helpers._fake_state(source))
+
+    published = runtime_tools.attempt_report(reader, _terminal_report(status))
+
+    assert published["report_status"] == status
+    assert published["experiment_count"] == 0
+    assert helpers._fake_state(reader)["direction_events"] == []
+    assert runtime_tools.load_direction(reader, {"direction_id": direction_id})["status"] == (
+        "in_progress(other)"
+    )
+    assert runtime_tools.load_direction(source, {"direction_id": direction_id})["status"] == (
+        "in_progress(self)"
+    )

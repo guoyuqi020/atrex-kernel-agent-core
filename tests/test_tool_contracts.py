@@ -75,8 +75,12 @@ def test_complex_local_schemas_track_validator_top_level_fields() -> None:
     assert bootstrap_experiment is not None
     assert report is not None
     assert bootstrap_report is not None
-    assert set(experiment["required"]) == _EXPERIMENT_FIELDS
-    assert set(experiment["properties"]) == _EXPERIMENT_FIELDS
+    assert set(experiment["required"]) == _EXPERIMENT_FIELDS - {
+        "hypothesis",
+        "evidence",
+        "analysis",
+    }
+    assert set(experiment["properties"]) == _EXPERIMENT_FIELDS | {"knowledge_used"}
     assert set(report["required"]) == _REPORT_FIELDS
     assert set(report["properties"]) == _REPORT_FIELDS
     assert experiment["additionalProperties"] is False
@@ -84,7 +88,7 @@ def test_complex_local_schemas_track_validator_top_level_fields() -> None:
     assert experiment["properties"]["action"]["enum"] == [
         "keep_after",
         "restore_before",
-        "abandon_direction",
+        "discard",
         "adopt",
     ]
     subject = experiment["properties"]["before"]["oneOf"][0]
@@ -106,27 +110,44 @@ def test_complex_local_schemas_track_validator_top_level_fields() -> None:
         "candidate_ready",
         "blocked",
     ]
-    profile_result = bootstrap_report["properties"]["profile_evidence"]["oneOf"][0]["properties"][
-        "supporting_results"
-    ]["items"]
-    assert profile_result["properties"]["operation"] == {"const": "profile"}
+    assert "profile_evidence" not in bootstrap_report["properties"]
 
 
 def test_simple_read_contracts_are_exact_and_bounded() -> None:
     listing = tool_request_schema("list-experiments")
     direction_listing = tool_request_schema("list-directions")
     artifact = tool_request_schema("kernel-artifact-read")
+    lookup = tool_request_schema("find-kernel-experiments")
 
-    assert listing == {
+    assert listing is not None and direction_listing is not None
+    assert listing["description"] != direction_listing["description"]
+    assert {key: value for key, value in listing.items() if key != "description"} == {
         "type": "object",
         "properties": {"file": {"type": "string", "pattern": r"^scratch/.+"}},
         "required": ["file"],
         "additionalProperties": False,
     }
-    assert direction_listing == listing
+    assert {key: value for key, value in direction_listing.items() if key != "description"} == {
+        key: value for key, value in listing.items() if key != "description"
+    }
     assert artifact is not None
     assert artifact["required"] == ["kernel_artifact_digest", "file"]
     assert artifact["additionalProperties"] is False
+    assert lookup == {
+        "type": "object",
+        "properties": {
+            "kernel_artifact_digest": {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"}
+        },
+        "required": ["kernel_artifact_digest"],
+        "additionalProperties": False,
+    }
+    assert tool_request_schema("find-kernel-directions") == lookup
+    assert tool_request_schema("kernel-pareto-frontier") == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
 
 
 def test_contributing_trials_schema_accepts_duplicates_and_keeps_input_limit() -> None:
@@ -196,19 +217,17 @@ def test_attempt_report_recovery_explains_how_to_close_open_directions() -> None
         "tool": "list-experiments",
         "request": {"file": "scratch/experiments-index.json"},
     }
-    assert "close every in_progress Direction" in recovery[2]["instruction"]
+    assert "close every in_progress(self) Direction" in recovery[2]["instruction"]
     assert "complete, abandon, block, and defer all require" in recovery[2]["instruction"]
-    assert (
-        "Every Experiment needs at least one real Kernel-bound Gateway Result"
-        in recovery[2]["instruction"]
-    )
+    assert "unresolved permits empty support" in recovery[2]["instruction"]
     assert "failed attempt-report publishes nothing" in recovery[3]["instruction"]
     assert "then retry" in recovery[3]["instruction"]
     assert "never retry after a successful response" in recovery[3]["instruction"]
 
 
 def test_direction_limit_recovery_says_not_to_retry_start() -> None:
-    recovery = tool_recovery("update-direction")
+    recovery = tool_recovery("update-direction", request={"action": "start"},
+                             detail="Attempt Direction advancement limit exceeded")
 
     assert recovery is not None
     instruction = recovery[-1]["instruction"]
@@ -219,12 +238,12 @@ def test_direction_limit_recovery_says_not_to_retry_start() -> None:
 
 def test_direction_schema_and_recovery_describe_all_closure_requirements() -> None:
     schema = tool_request_schema("update-direction")
-    recovery = tool_recovery("update-direction")
+    recovery = tool_recovery("update-direction", request={"action": "complete"})
     assert schema is not None and recovery is not None
-    assert "complete, abandon, block, and defer each require" in schema["oneOf"][1]["description"]
+    assert "analysis is optional" in schema["oneOf"][1]["description"]
     assert "hypothesis_status" in schema["oneOf"][1]["description"]
-    assert "Before complete, abandon, block, or defer" in recovery[1]["instruction"]
-    assert "at least one real Kernel-bound Gateway Result" in recovery[1]["instruction"]
+    assert 'Retry action="complete"' in recovery[0]["instruction"]
+    assert "unresolved for unmeasured" in recovery[0]["instruction"]
 
 
 def test_tool_schemas_drop_disabled_cross_module_links() -> None:
@@ -235,12 +254,12 @@ def test_tool_schemas_drop_disabled_cross_module_links() -> None:
     assert "supporting_experiment_ids" not in direction["oneOf"][1]["properties"]
     assert "direction_id" not in experiment["properties"]
     assert "direction_id" not in experiment["required"]
-    finding = report["properties"]["findings"]["items"]
-    assert "supporting_experiment_ids" not in finding["properties"]
+    assert "findings" not in report["properties"]
 
 
 def test_direction_concurrency_recovery_says_to_close_the_active_direction() -> None:
-    recovery = tool_recovery("update-direction")
+    recovery = tool_recovery("update-direction", request={"action": "start"},
+                             detail="Only one Direction may be in progress at a time")
 
     assert recovery is not None
     instruction = next(
@@ -248,12 +267,27 @@ def test_direction_concurrency_recovery_says_to_close_the_active_direction() -> 
         for item in recovery
         if "direction_concurrency_conflict" in item.get("instruction", "")
     )
-    assert "continue the existing in-progress Direction" in instruction
+    assert "continue the existing in_progress(self) Direction" in instruction
     assert "complete, abandon, defer, or block" in instruction
-    assert "Retry start only after no other Direction is in progress" in instruction
+    assert "Retry start only after this Attempt has no in_progress(self) Direction" in instruction
 
     issue = local_validation_issue(
         "Only one Direction may be in progress at a time: requested_direction_id=direction_b"
     )
     assert issue["path"] == "direction_id"
     assert issue["code"] == "direction_concurrency_conflict"
+
+
+@pytest.mark.parametrize("experiments_enabled", [False, True])
+def test_claim_schema_support_is_independent_of_experiment_module(
+    experiments_enabled: bool,
+) -> None:
+    schema = tool_request_schema("attempt-report", experiments_enabled=experiments_enabled)
+    assert schema is not None
+    assert "findings" not in schema["properties"]
+    direction = tool_request_schema("update-direction", experiments_enabled=experiments_enabled)
+    assert direction is not None
+    update = direction["oneOf"][1]
+    assert "supporting_results" in update["properties"]
+    if experiments_enabled:
+        assert update["properties"]["supporting_experiment_ids"].get("minItems", 0) == 0

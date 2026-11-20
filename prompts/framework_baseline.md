@@ -13,6 +13,7 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 | Purpose | Path or operation |
 | --- | --- |
 | immutable reference or seed Kernel | `input/kernel/` |
+| task-declared public operator sources | `input/problem/` when present |
 | writable baseline candidate copied from the seed | `work/kernel/` |
 | immutable Agent implementation and included Skills | `agent/optimizer/` |
 | read-only inherited phase prompts and instructions | `prompts/` |
@@ -22,6 +23,11 @@ latency, start an optimization loop, create Git commits, or ask for confirmation
 
 Private evaluator inputs and exact cases are absent. The trusted task context below is authoritative
 for the operator, hardware, and DSL.
+
+When `input/problem/` exists, read its `README.md` and the public `reference.py`, `input.py`, and
+sanitized `metadata.json` files present there before constructing probes. Runtime has already
+removed exact evaluator Shapes, case IDs, per-case weights, and private results. Do not use Dev or
+scan evaluator temporary directories to recover another copy of these task files.
 
 ## Execution boundary
 
@@ -53,7 +59,8 @@ for the operator, hardware, and DSL.
 
 ### 1. Reconstruct the operator contract
 
-Read the seed Kernel and use the public operator contract injected into this Prompt. Record:
+Read the seed Kernel, the injected public operator contract, and `input/problem/` when present.
+Record:
 
 - operator semantics and calling ABI;
 - public input/output shape regimes and domains;
@@ -98,8 +105,8 @@ compilation and correctness repair. Then evaluate the exact current candidate wi
 `gateway-execute` request containing `{"operation":"evaluate","latency_prediction":"retained"}`
 (choose the prediction from your actual expectation).
 
-Every accepted `evaluate` is an exploratory measurement of the exact `work/kernel/` tree at that
-moment. It runs three complete measurements and returns their per-Shape median. You may measure the
+An ordinary full `evaluate` measures the exact candidate using the configured evaluation policy.
+Use the returned correctness and timing; correctness-only calls contain no timing. You may measure the
 unchanged seed once during Bootstrap and submit multiple materially different repaired candidates,
 but the controller rejects a repeated identical Kernel task and points to its prior Result Artifact.
 Core assigns request identities, and the controller durably retains every evaluated Kernel and raw
@@ -152,23 +159,20 @@ Directions. Do not create `suggested` Directions. Later optimization sessions ch
 own Directions from the public contract, profiling, and durable Journal evidence.
 
 A `candidate_ready` Bootstrap report requires exactly one `baseline` Experiment. A blocked report
-may contain zero Experiments and empty `findings` if no Direction needs closing; do not manufacture
-evidence just to terminate.
-It may omit baseline when all recorded Experiments are `abandon_direction` diagnostics, or none
-exist. Diagnostic Results do not imply that a usable baseline exists.
-Closing an `in_progress` Direction with `block` or `defer` requires an associated Experiment
-first. Record the actual investigation or blocker using `abandon_direction` with at least one
-real Kernel-bound Gateway Result in `before` or `after`, then close with `hypothesis_status=unresolved`.
-Both sides may not be null; a diagnostic result is not evidence of a performance improvement. If no Direction was started,
-an empty Runtime Direction event list is valid for `blocked`.
-Every closure explicitly selects `supporting_experiment_ids` and declares `hypothesis_status`.
+may contain zero Experiments; do not manufacture evidence just to terminate.
+It may omit baseline when all recorded Experiments are `discard` diagnostics, or none
+exist. Diagnostic Results do not imply that a usable baseline exists. Close a started Direction
+with `hypothesis_status=unresolved` and empty support if no conclusive evidence exists. No Experiment
+or diagnostic Gateway call is needed merely to close it. When support exists, select relevant
+Experiment IDs or exact direct `supporting_results`; judged conclusions also require a tested scope.
+If no Direction was started, an empty Runtime Direction event list is valid for `blocked`.
 Unmeasured investigations remain `unresolved`; do not present a toolchain blocker or an
 untested structural interpretation as an experimentally refuted hypothesis.
 
-Use the shared report fields with Bootstrap semantics: `diagnosis` names the bring-up or correctness
-issue, `approach` explains the construction or repair, and `expected_impact` states the expected
-correctness or compatibility effect. Set `profile_evidence` to `null` unless profiling was actually
-needed. Bootstrap precedes all Lineage history, so `contributing_result_artifact_digests` is always `[]`.
+Use the compact attempt-report handoff: status, final_candidate,
+contributing_result_artifact_digests and blocker. Keep bring-up or repair analysis in enabled
+Journals or your own notes; do not repeat it in the report. Bootstrap precedes all Lineage history,
+so contributing_result_artifact_digests is always [].
 If the nominated Kernel is unchanged from the seed, say that explicitly in
 `final_candidate.change_summary`; do not invent a change or a performance bottleneck.
 

@@ -190,6 +190,8 @@ def test_core_session_preserves_unredacted_prompt_and_provider_streams(
     assert metadata["runtime_id"] == "claude"
     assert metadata["reasoning_effort"] == "max"
     assert metadata["model"] == "lineage-model"
+    assert metadata["failure_kind"] is None
+    assert metadata["provider_error_code"] is None
 
     blocked = replace(context, session_trace_path=sessions / "blocked")
     assert blocked.session_trace_path is not None

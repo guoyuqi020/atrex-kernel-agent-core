@@ -12,11 +12,13 @@ from contexts.attempt import RuntimeAttemptContext
 from .common import execute_agent_session, guarded_main
 from .operator_contract import public_operator_contract
 from .report_completion import report_completion_prompt
+from .source_completion import SourceCompletionCheck, source_boundary_prompt
 from .tool_module_prompts import (
     active_modules,
     modular_evidence_prompt,
     modular_tool_instructions,
     modular_workflow,
+    wiki_tool_instructions,
 )
 
 _RUNTIME_TOOL = "agent/optimizer/src/runtime_tools.py"
@@ -44,13 +46,16 @@ def _tool_instructions(config: AgentConfig, dsl: str) -> str:
     modules = active_modules()
     template = config.prompt_fragment_path("attempt_tools").read_text(encoding="utf-8")
     if modules != frozenset({"directions", "experiments"}):
-        return modular_tool_instructions(template, dsl, modules)
-    return _render_prompt_fragment(
-        template,
-        {
-            "DSL": dsl,
-            "RUNTIME_TOOL": _RUNTIME_TOOL,
-        },
+        return modular_tool_instructions(template, dsl, modules) + wiki_tool_instructions()
+    return (
+        _render_prompt_fragment(
+            template,
+            {
+                "DSL": dsl,
+                "RUNTIME_TOOL": _RUNTIME_TOOL,
+            },
+        )
+        + wiki_tool_instructions()
     )
 
 
@@ -95,10 +100,15 @@ def render_prompt(context: RuntimeAttemptContext, config: AgentConfig) -> str:
 
 def render_system_prompt(context: RuntimeAttemptContext, config: AgentConfig) -> str:
     """Carry the Session-tool contract where context compaction cannot drop it."""
-    return _tool_instructions(config, str(context.manifest["dsl"]))
+    return (_tool_instructions(config, str(context.manifest["dsl"]))
+            + "\n\n" + source_boundary_prompt(context.workspace))
 
 
 def run() -> int:
+    from runtime_contract import raw_enabled
+    if raw_enabled():
+        from .raw import run as run_raw
+        return run_raw()
     context = RuntimeAttemptContext.from_environment()
     config = AgentConfig.load(context.repository, workspace=context.workspace)
     return execute_agent_session(
@@ -106,8 +116,9 @@ def run() -> int:
         config,
         render_prompt(context, config),
         system_prompt=render_system_prompt(context, config),
-        completion_check=lambda remaining_timeout_seconds: report_completion_prompt(
-            context, remaining_timeout_seconds
+        completion_check=SourceCompletionCheck(
+            context.workspace,
+            lambda remaining_timeout_seconds: report_completion_prompt(context, remaining_timeout_seconds),
         ),
     )
 

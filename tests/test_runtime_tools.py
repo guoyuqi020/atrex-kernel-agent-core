@@ -29,6 +29,8 @@ from runtime_tools import (
     runtime_query,
     update_direction,
 )
+from runtime_tools import _register_attempt_report as real_register_report
+from runtime_tools import runtime_journal as real_runtime_journal
 
 
 def _change_direction(context: Any, request: dict[str, Any]) -> dict[str, Any]:
@@ -37,9 +39,11 @@ def _change_direction(context: Any, request: dict[str, Any]) -> dict[str, Any]:
         request = {
             "hypothesis_status": "unresolved",
             "supporting_experiment_ids": [
-                item["experiment_id"] for item in _fake_visible(context, "experiments")
+                item["experiment_id"]
+                for item in _fake_visible(context, "experiments")
                 if item["direction_id"] == request["direction_id"]
-            ], **request,
+            ],
+            **request,
         }
     return update_direction(context, request)
 
@@ -54,6 +58,53 @@ def _context(root: Path) -> Any:
         gateway_capability="capability",
         manifest={"context": {"epoch_number": 2, "attempt_ordinal": 2}},
     )
+
+
+@pytest.mark.parametrize(
+    ("command", "operation", "result_key"),
+    [
+        ("find_kernel_experiments", "kernel_experiments_find", "experiment_ids"),
+        ("find_kernel_directions", "kernel_directions_find", "direction_ids"),
+    ],
+)
+def test_find_kernel_journal_links_route_exact_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    operation: str,
+    result_key: str,
+) -> None:
+    context = _context(tmp_path)
+    kernel = "sha256:" + "a" * 64
+    expected = {"kernel_artifact_digest": kernel, result_key: [], "count": 0}
+
+    def fake_post(_url: str, _capability: str, path: str, value: Any) -> dict[str, Any]:
+        assert path == "/v1/runtime/journals"
+        assert value["operation"] == operation
+        assert value["attempt_id"] == context.attempt_id
+        assert value["kernel_artifact_digest"] == kernel
+        return {"result": expected}
+
+    monkeypatch.setattr(runtime_tools, "_post", fake_post)
+    monkeypatch.setattr(runtime_tools, "runtime_journal", real_runtime_journal)
+    assert getattr(runtime_tools, command)(context, {"kernel_artifact_digest": kernel}) == expected
+
+
+def test_kernel_pareto_frontier_queries_runtime_without_agent_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context = _context(tmp_path)
+    expected = {"best_by_shape": {}, "shape_count": 0}
+
+    def fake_post(_url: str, _capability: str, path: str, value: Any) -> dict[str, Any]:
+        assert path == "/v1/runtime/queries"
+        assert value["operation"] == "kernel_pareto_frontier"
+        assert value["attempt_id"] == context.attempt_id
+        assert "request" not in value
+        return {"result": expected}
+
+    monkeypatch.setattr(runtime_tools, "_post", fake_post)
+    assert runtime_query(context, "kernel-pareto-frontier", {}) == expected
 
 
 def _bootstrap_context(root: Path) -> RuntimeLineageBootstrapContext:
@@ -96,12 +147,15 @@ def _runtime_contract(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             "gateway-execute",
             "kernel-artifact-read",
             "result-artifact-read",
+            "kernel-pareto-frontier",
             "update-direction",
             "list-directions",
             "load-direction",
+            "find-kernel-directions",
             "record-experiment",
             "list-experiments",
             "load-experiment",
+            "find-kernel-experiments",
             "attempt-report",
         )
     }
@@ -121,9 +175,7 @@ def _runtime_contract(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             }
         )
     )
-    (contract / "environment.json").write_text(
-        json.dumps({"schema_version": 1, "dsl": "triton"})
-    )
+    (contract / "environment.json").write_text(json.dumps({"schema_version": 1, "dsl": "triton"}))
     (contract / "limits.json").write_text(
         json.dumps({"schema_version": 1, "session_timeout_seconds": 60})
     )
@@ -248,12 +300,38 @@ def _fake_direction_views(context: Any) -> dict[str, dict[str, Any]]:
     return directions
 
 
+def _fake_own_open_directions(context: Any) -> set[str]:
+    latest = {
+        str(event["direction_id"]): str(event["action"])
+        for event in _fake_state(context)["direction_events"]
+        if event["action"] not in {"propose", "suggest"}
+    }
+    return {direction_id for direction_id, action in latest.items() if action == "start"}
+
+
+def _fake_direction_query_views(context: Any) -> dict[str, dict[str, Any]]:
+    directions = _fake_direction_views(context)
+    own_open = _fake_own_open_directions(context)
+    for direction_id, direction in directions.items():
+        if direction["status"] == "in_progress":
+            ownership = "self" if direction_id in own_open else "other"
+            direction["status"] = f"in_progress({ownership})"
+    return directions
+
+
 def _fake_citable_profile_results(context: Any) -> list[dict[str, Any]]:
     # The Runtime projection comes from observations, not Experiment subjects.
-    return deepcopy(_FAKE_PROFILES.setdefault(str(context.workspace), [{
-        "kernel_artifact_digest": "sha256:" + "d" * 64,
-        "result_artifact_digest": "sha256:" + "f" * 64,
-    }]))
+    return deepcopy(
+        _FAKE_PROFILES.setdefault(
+            str(context.workspace),
+            [
+                {
+                    "kernel_artifact_digest": "sha256:" + "d" * 64,
+                    "result_artifact_digest": "sha256:" + "f" * 64,
+                }
+            ],
+        )
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -309,14 +387,7 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                     }
                     if direction_id not in started and len(started) >= 3:
                         raise ValueError("Direction advancement limit exceeded: maximum=3")
-                    in_progress = sorted(
-                        visible_direction_id
-                        for visible_direction_id, visible_direction in _fake_direction_views(
-                            context
-                        ).items()
-                        if visible_direction["status"] == "in_progress"
-                        and visible_direction_id != direction_id
-                    )
+                    in_progress = sorted(_fake_own_open_directions(context) - {direction_id})
                     if in_progress:
                         raise ValueError(
                             "Only one Direction may be in progress at a time: "
@@ -357,18 +428,18 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                         "status": value["status"],
                         "hypothesis_status": value["hypothesis_status"],
                     }
-                    for value in _fake_direction_views(context).values()
+                    for value in _fake_direction_query_views(context).values()
                 ]
             }
         if command == "load-direction":
             try:
-                return _fake_direction_views(context)[str(request["direction_id"])]
+                return _fake_direction_query_views(context)[str(request["direction_id"])]
             except KeyError as error:
                 raise ValueError(
                     "Direction ID is outside the current Attempt's visible history"
                 ) from error
         if command == "record-experiment":
-            if set(request) != runtime_tools._EXPERIMENT_FIELDS:
+            if set(request) - {"knowledge_used"} != runtime_tools._EXPERIMENT_FIELDS:
                 raise ValueError(
                     f"Experiment fields must be exactly {sorted(runtime_tools._EXPERIMENT_FIELDS)}"
                 )
@@ -389,7 +460,11 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
             if direction is None:
                 raise ValueError("Experiment Direction is outside visible history")
             if direction["status"] not in {
-                "in_progress", "completed", "abandoned", "blocked", "deferred",
+                "in_progress",
+                "completed",
+                "abandoned",
+                "blocked",
+                "deferred",
             }:
                 raise ValueError(
                     "Experiment Direction must be in progress or closed; current status is proposed"
@@ -413,6 +488,7 @@ def _runtime_owned_journals(monkeypatch: pytest.MonkeyPatch) -> None:
                         "evidence": value["evidence"],
                         "analysis": value["analysis"],
                         "action": value["action"],
+                        "knowledge_used": value.get("knowledge_used", []),
                     }
                     for value in _fake_visible(context, "experiments")
                 ]
@@ -579,49 +655,7 @@ def _completed_test_experiment(context: Any) -> tuple[str, dict[str, Any]]:
 def _report(experiment_id: str) -> dict[str, object]:
     return {
         "status": "candidate_ready",
-        "hypothesis": "one transaction replaces two",
-        "diagnosis": {
-            "bottleneck": "load issue rate",
-            "evidence": "survey localized load issue pressure",
-        },
-        "approach": {
-            "summary": "vectorize the load",
-            "steps": ["replace scalar loads"],
-            "expected_impact": "reduce memory transactions",
-            "risks": ["alignment must be checked"],
-        },
         "final_candidate": {"change_summary": "used a vector load"},
-        "evidence_summary": {
-            "correctness": "evaluate result is correct",
-            "performance": "evaluate result is faster",
-        },
-        "profile_evidence": {
-            "tool_used": "gateway-execute/profile",
-            "profiler": "ncu",
-            "profile_level": "survey",
-            "bottleneck_type": "memory_bound",
-            "evidence_summary": "survey result localized the bottleneck",
-            "evidence_chain": "survey counters support the diagnosed bottleneck",
-            "supporting_results": [
-                {
-                    "operation": "profile",
-                    "kernel_artifact_digest": "sha256:" + "d" * 64,
-                    "result_artifact_digest": "sha256:" + "f" * 64,
-                }
-            ],
-        },
-        "analysis": "candidate is correct and faster",
-        "knowledge_used": [],
-        "findings": [
-            {
-                "category": "correctness",
-                "observation": "vector loads require alignment",
-                "root_cause": "unaligned accesses are unsafe",
-                "resolution": "added an alignment guard",
-                "lesson": "alignment must be checked",
-                "supporting_experiment_ids": [experiment_id],
-            }
-        ],
         "contributing_result_artifact_digests": ["sha256:" + "f" * 64],
         "blocker": None,
     }
@@ -751,7 +785,11 @@ def test_cli_local_validation_adds_schema_and_recovery(
             ),
         }
     ]
-    assert set(response["request_schema"]["required"]) == runtime_tools._EXPERIMENT_FIELDS
+    assert set(response["request_schema"]["required"]) == runtime_tools._EXPERIMENT_FIELDS - {
+        "hypothesis",
+        "evidence",
+        "analysis",
+    }
     assert response["recovery"][0] == {
         "tool": "list-directions",
         "request": {"file": "scratch/directions-index.json"},
@@ -801,9 +839,7 @@ def test_optimizer_suggestion_error_keeps_precise_issue_and_recovery() -> None:
     assert response["issues"][0]["path"] == "request.action"
     assert response["issues"][0]["code"] == "forbidden_action"
     assert response["recovery"] == recovery
-    assert response["request_schema"]["oneOf"][0]["properties"]["action"] == {
-        "const": "propose"
-    }
+    assert response["request_schema"]["oneOf"][0]["properties"]["action"] == {"const": "propose"}
 
 
 def test_suggested_direction_start_error_keeps_precise_recovery() -> None:
@@ -855,7 +891,7 @@ def test_attempt_report_error_returns_actionable_direction_recovery() -> None:
     ]
     assert response["recovery"][0]["tool"] == "list-directions"
     assert response["recovery"][1]["tool"] == "list-experiments"
-    assert "close every in_progress Direction" in response["recovery"][2]["instruction"]
+    assert "close every in_progress(self) Direction" in response["recovery"][2]["instruction"]
 
 
 def test_attempt_report_validates_and_atomically_publishes_once(tmp_path: Path) -> None:
@@ -872,10 +908,10 @@ def test_attempt_report_validates_and_atomically_publishes_once(tmp_path: Path) 
         "report_status": "candidate_ready",
         "file": "scratch/attempt-report.json",
         "experiment_count": 1,
-        "finding_count": 1,
+        "direction_count": 1,
     }
     report = json.loads(context.report_path.read_text(encoding="utf-8"))
-    assert report["schema_version"] == 12
+    assert report["schema_version"] == 13
     assert report["experiments"][0]["experiment_id"] == receipt["experiment_id"]
     with pytest.raises(FileExistsError, match="already exists"):
         attempt_report(context, _report(receipt["experiment_id"]))
@@ -887,7 +923,6 @@ def test_attempt_report_without_journal_modules(
     context = _context(tmp_path)
     monkeypatch.setattr(runtime_tools, "_tool_modules", lambda: frozenset())
     request = _report("experiment_" + "0" * 32)
-    request["findings"][0].pop("supporting_experiment_ids")
 
     receipt = attempt_report(context, request)
 
@@ -896,7 +931,7 @@ def test_attempt_report_without_journal_modules(
     assert report["tool_modules"] == []
     assert report["experiments"] == []
     assert report["direction_events"] == []
-    assert report["findings"][0]["supporting_experiment_ids"] == []
+    assert "findings" not in report
 
 
 def test_attempt_report_receipt_withholds_the_report_and_its_identities(tmp_path: Path) -> None:
@@ -977,7 +1012,7 @@ def test_direction_journal_can_be_recorded_listed_and_loaded(tmp_path: Path) -> 
             {
                 "direction_id": direction_id,
                 "name": "vectorize loads",
-                "status": "in_progress",
+                "status": "in_progress(self)",
                 "hypothesis_status": "unresolved",
             }
         ]
@@ -1038,7 +1073,7 @@ def test_direction_reads_include_frozen_history_without_provenance(
             {
                 "direction_id": direction_id,
                 "name": "vectorize loads",
-                "status": "in_progress",
+                "status": "in_progress(other)",
                 "hypothesis_status": "unresolved",
             }
         ]
@@ -1148,7 +1183,7 @@ def test_attempt_may_explore_only_one_direction_at_a_time(tmp_path: Path) -> Non
                 "analysis": "incorrectly interleave two explorations",
             },
         )
-    assert load_direction(context, {"direction_id": first})["status"] == "in_progress"
+    assert load_direction(context, {"direction_id": first})["status"] == "in_progress(self)"
     assert load_direction(context, {"direction_id": second})["status"] == "proposed"
 
     _record_diagnostic_experiment(context, first)
@@ -1168,7 +1203,29 @@ def test_attempt_may_explore_only_one_direction_at_a_time(tmp_path: Path) -> Non
             "analysis": "begin only after the first Direction is closed",
         },
     )
-    assert load_direction(context, {"direction_id": second})["status"] == "in_progress"
+    assert load_direction(context, {"direction_id": second})["status"] == "in_progress(self)"
+
+
+def test_attempt_report_ignores_visible_peers_open_directions(tmp_path: Path) -> None:
+    peer = _context(tmp_path / "peer")
+    peer_direction_id = _propose_and_start_direction(peer)
+    context = _context(tmp_path / "reader")
+    _FAKE_HISTORY[str(context.workspace)] = {
+        "direction_events": deepcopy(_fake_state(peer)["direction_events"]),
+        "experiments": [],
+    }
+    # A peer's open work must not prevent this Attempt starting or reporting its own work.
+    own_direction_id, receipt = _completed_test_experiment(context)
+    assert load_direction(context, {"direction_id": own_direction_id})["status"] == "completed"
+    assert load_direction(context, {"direction_id": peer_direction_id})["status"] == (
+        "in_progress(other)"
+    )
+    report = attempt_report(context, _report(str(receipt["experiment_id"])))
+    assert report["report_status"] == "candidate_ready"
+    assert load_direction(peer, {"direction_id": peer_direction_id})["status"] == (
+        "in_progress(self)"
+    )
+    assert _fake_direction_views(context)[peer_direction_id]["status"] == "in_progress"
 
 
 def test_attempt_report_rejects_unexperimented_direction_left_in_progress(
@@ -1201,7 +1258,7 @@ def test_attempt_report_rejects_unexperimented_direction_left_in_progress(
 
 @pytest.mark.parametrize("action", ["complete", "abandon", "block", "defer"])
 @pytest.mark.parametrize("has_experiment", [False, True])
-def test_direction_event_validation_requires_experiment_for_every_closure(
+def test_direction_event_validation_allows_unresolved_closure_without_experiment(
     tmp_path: Path, action: str, has_experiment: bool
 ) -> None:
     context = _context(tmp_path)
@@ -1215,8 +1272,7 @@ def test_direction_event_validation_requires_experiment_for_every_closure(
         event["supporting_experiment_ids"] = [receipt["experiment_id"]]
         assert runtime_tools._validate_direction_events([event], "journal") == [event]
     else:
-        with pytest.raises(ValueError, match=f"Direction {action} requires supporting Experiments"):
-            runtime_tools._validate_direction_events([event], "journal")
+        assert runtime_tools._validate_direction_events([event], "journal") == [event]
 
 
 def test_experiment_journal_can_be_listed_and_loaded_by_id(
@@ -1262,6 +1318,7 @@ def test_experiment_journal_can_be_listed_and_loaded_by_id(
         "experiments": [
             {
                 "experiment_id": historical_id,
+                "knowledge_used": [],
                 "name": "vectorize load",
                 "hypothesis": "one transaction replaces two",
                 "change": "use a vector load",
@@ -1271,6 +1328,7 @@ def test_experiment_journal_can_be_listed_and_loaded_by_id(
             },
             {
                 "experiment_id": first["experiment_id"],
+                "knowledge_used": [],
                 "name": "vectorize load",
                 "hypothesis": "one transaction replaces two",
                 "change": "use a vector load",
@@ -1280,6 +1338,7 @@ def test_experiment_journal_can_be_listed_and_loaded_by_id(
             },
             {
                 "experiment_id": second["experiment_id"],
+                "knowledge_used": [],
                 "name": "second vectorization experiment",
                 "hypothesis": "one transaction replaces two",
                 "change": "use a vector load",
@@ -1300,7 +1359,8 @@ def test_experiment_journal_can_be_listed_and_loaded_by_id(
     assert loaded["action"] == "restore_before"
     historical = load_experiment(context, {"experiment_id": historical_id})
     assert historical == {
-        key: value for key, value in historical_experiment.items() if key != "sequence"
+        **{key: value for key, value in historical_experiment.items() if key != "sequence"},
+        "knowledge_used": [],
     }
 
 
@@ -1323,15 +1383,13 @@ def test_attempt_report_rejects_invalid_lists_before_publication(tmp_path: Path)
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
     report = _report(receipt["experiment_id"])
-    report["approach"]["steps"] = []  # type: ignore[index]
+    report["contributing_result_artifact_digests"] = "not-an-array"
 
-    with pytest.raises(ValueError, match=r"approach\.steps must not be empty"):
+    with pytest.raises(ValueError, match="contributing_result_artifact_digests must be an array"):
         attempt_report(context, report)
     assert not context.report_path.exists()
 
-    approach = report["approach"]
-    assert isinstance(approach, dict)
-    approach["steps"] = ["apply the measured optimization"]
+    report["contributing_result_artifact_digests"] = []
     published = attempt_report(context, report)
     assert published["report_status"] == "candidate_ready"
     assert context.report_path.is_file()
@@ -1342,7 +1400,8 @@ def test_attempt_report_rejects_invalid_lists_before_publication(tmp_path: Path)
     [["not-a-trial"], ["not-a-trial"] * 2, [123], ["sha256:" + "a" * 64] * 65],
 )
 def test_attempt_report_rejects_invalid_contributing_result_artifact_digests(
-    tmp_path: Path, trials: list[object],
+    tmp_path: Path,
+    trials: list[object],
 ) -> None:
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
@@ -1357,7 +1416,8 @@ def test_attempt_report_rejects_invalid_contributing_result_artifact_digests(
 
 @pytest.mark.parametrize("suffixes", ["", "ab", "ba", "baba", "a" * 64])
 def test_attempt_report_normalizes_contributing_result_artifact_digests(
-    tmp_path: Path, suffixes: str,
+    tmp_path: Path,
+    suffixes: str,
 ) -> None:
     context = _context(tmp_path)
     _direction_id, receipt = _completed_test_experiment(context)
@@ -1374,88 +1434,27 @@ def test_attempt_report_normalizes_contributing_result_artifact_digests(
     assert report == original
 
 
-def test_attempt_report_rejects_incomplete_profile_evidence(tmp_path: Path) -> None:
-    context = _context(tmp_path)
-    _direction_id, receipt = _completed_test_experiment(context)
-    report = _report(receipt["experiment_id"])
-    profile = report["profile_evidence"]
-    assert isinstance(profile, dict)
-    profile.pop("evidence_chain")
-
-    with pytest.raises(ValueError, match="profile_evidence fields must be exactly"):
-        attempt_report(context, report)
-    assert not context.report_path.exists()
 
 
-@pytest.mark.parametrize(("field", "value"), [
-    ("kernel_artifact_digest", "sha256:" + "1" * 64),
-    ("result_artifact_digest", "sha256:" + "1" * 64),
-    ("result_artifact_digest", "sha256:" + "1" * 64),
-])
-def test_attempt_report_rejects_profile_not_observed_by_runtime(
-    tmp_path: Path, field: str, value: str,
-) -> None:
-    context = _context(tmp_path)
-    _direction_id, receipt = _completed_test_experiment(context)
-    report = _report(receipt["experiment_id"])
-    profile = report["profile_evidence"]
-    assert isinstance(profile, dict)
-    results = profile["supporting_results"]
-    assert isinstance(results, list)
-    results[0][field] = value
-
-    with pytest.raises(ValueError, match="does not match a visible Runtime-recorded Profile"):
-        attempt_report(context, report)
-    assert not context.report_path.exists()
 
 
-def test_attempt_report_can_cite_a_profile_without_any_experiment_reference(tmp_path: Path) -> None:
-    context = _context(tmp_path)
-    _direction_id, receipt = _completed_test_experiment(context)
-    prior_journal = deepcopy(_fake_state(context))
-    # A visible historical or newly measured Profile need not be in this Journal.
-    _FAKE_PROFILES[str(context.workspace)] = [{
-        "kernel_artifact_digest": "sha256:" + "2" * 64,
-        "result_artifact_digest": "sha256:" + "4" * 64,
-    }]
-    report = _report(str(receipt["experiment_id"]))
-    profile = report["profile_evidence"]
-    assert isinstance(profile, dict)
-    profile["supporting_results"] = [
-        {
-            "operation": "profile",
-            "kernel_artifact_digest": "sha256:" + "2" * 64,
-            "result_artifact_digest": "sha256:" + "4" * 64,
-        }
-    ]
-
-    assert attempt_report(context, report)["report_status"] == "candidate_ready"
-    assert _fake_state(context) == prior_journal
-    assert _REGISTERED_REPORTS[-1]["profile_evidence"] == profile
 
 
 def test_blocked_report_can_cite_profile_without_creating_a_journal(tmp_path: Path) -> None:
     context = _context(tmp_path)
     report = _report("unused")
-    report.update(status="blocked", final_candidate=None, blocker="cannot repair the candidate",
-                  findings=[], contributing_result_artifact_digests=[])
+    report.update(
+        status="blocked",
+        final_candidate=None,
+        blocker="cannot repair the candidate",
+        contributing_result_artifact_digests=[],
+    )
 
     assert attempt_report(context, report)["report_status"] == "blocked"
     assert _REGISTERED_REPORTS[-1]["experiments"] == []
     assert _REGISTERED_REPORTS[-1]["direction_events"] == []
 
 
-def test_attempt_report_rejects_finding_from_another_experiment(tmp_path: Path) -> None:
-    context = _context(tmp_path)
-    _direction_id, receipt = _completed_test_experiment(context)
-    report = _report(receipt["experiment_id"])
-    findings = report["findings"]
-    assert isinstance(findings, list)
-    findings[0]["supporting_experiment_ids"] = ["experiment_" + "9" * 32]
-
-    with pytest.raises(ValueError, match="outside this journal"):
-        attempt_report(context, report)
-    assert not context.report_path.exists()
 
 
 def test_attempt_report_rejects_legacy_top_level_decision(tmp_path: Path) -> None:
@@ -1607,19 +1606,20 @@ def test_gateway_execute_hides_wire_schema_version(
             "result_artifact_digest": "sha256:" + "e" * 64,
             "job_id": None,
             "evaluation": None,
-            "result": {"env": [{"name": "L20N"}]},
+            "result": {"gpu": "L20N", "env": {"arch": "sm_89"}, "capabilities": {"profile": True}},
         }
 
     monkeypatch.setattr(runtime_tools, "_post", fake_post)
 
     response = gateway_execute(context, {"operation": "env"})
 
-    assert response == {"env": [{"name": "L20N"}]}
+    assert response == {"gpu": "L20N", "env": {"arch": "sm_89"}, "capabilities": {"profile": True}}
     path, request = sent[0]
     assert path == "/v1/operations"
     assert isinstance(request, dict)
     assert request["schema_version"] == 2
     assert isinstance(request["idempotency_key"], str)
+    assert set(request) == {"operation", "schema_version", "attempt_id", "idempotency_key"}
     with pytest.raises(ValueError, match="Runtime-owned fields"):
         gateway_execute(
             context,
@@ -1636,7 +1636,7 @@ def test_gateway_execute_returns_read_only_service_result_directly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _context(tmp_path)
-    result = {"env": [{"name": "L20N"}]}
+    result = {"gpu": "L20N", "env": {"arch": "sm_89"}, "capabilities": {"profile": True}}
 
     def fake_post(_url: str, _capability: str, _path: str, _value: object) -> dict[str, Any]:
         return {
@@ -1691,9 +1691,7 @@ def test_gateway_execute_preserves_canonical_evaluation_result(
 
     monkeypatch.setattr(runtime_tools, "_post", fake_post)
 
-    response = gateway_execute(
-        context, {"operation": "evaluate", "latency_prediction": "retained"}
-    )
+    response = gateway_execute(context, {"operation": "evaluate", "latency_prediction": "retained"})
 
     assert "evaluation" not in response
     assert response["result"] == {
@@ -1943,7 +1941,7 @@ def test_wiki_tool_is_not_exposed(capsys: pytest.CaptureFixture[str]) -> None:
         runtime_tools.main(["wiki-query", "--request", "scratch/query.json"])
     assert error.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
-    assert runtime_tools.tool_request_schema("wiki-query") is None
+    assert runtime_tools.tool_request_schema("wiki-query") is not None
     with pytest.raises(SystemExit) as help_result:
         runtime_tools.main(["--help"])
     assert help_result.value.code == 0
@@ -1954,6 +1952,7 @@ def test_a_slow_operation_is_collected_on_reconnect(monkeypatch: pytest.MonkeyPa
     attempts: list[int] = []
 
     def urlopen(request: Any, timeout: float) -> Any:
+        assert timeout == 72 * 60 * 60
         attempts.append(len(attempts))
         if len(attempts) < 3:
             raise TimeoutError("read timed out")
@@ -1978,6 +1977,42 @@ def test_a_slow_operation_is_collected_on_reconnect(monkeypatch: pytest.MonkeyPa
     assert len(attempts) == 3
 
 
+@pytest.mark.parametrize(
+    ("path", "expected_timeout"),
+    [
+        ("/v1/operations", 72 * 60 * 60),
+        ("/proxy/v1/operations", 72 * 60 * 60),
+        ("/v1/runtime/queries", 600),
+        ("/v1/runtime/journals", 600),
+        ("/v1/wiki/query", 600),
+    ],
+)
+def test_only_gateway_requests_use_the_long_http_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    expected_timeout: int,
+) -> None:
+    observed = []
+
+    class Response:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return b'{"status":"completed"}'
+
+    def urlopen(request: Any, timeout: float) -> Any:
+        observed.append(timeout)
+        return Response()
+
+    monkeypatch.setattr(runtime_tools.urllib.request, "urlopen", urlopen)
+    assert runtime_tools._post("http://runtime.invalid", "cap", path, {}) == {"status": "completed"}
+    assert observed == [expected_timeout]
+
+
 def test_an_unreachable_runtime_still_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
     def urlopen(request: Any, timeout: float) -> Any:
         raise runtime_tools.urllib.error.URLError("connection refused")
@@ -1986,3 +2021,170 @@ def test_an_unreachable_runtime_still_fails_fast(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(RuntimeError, match="Runtime service is unavailable"):
         runtime_tools._post("http://runtime.invalid", "cap", "/v1/operations", {})
+
+
+
+
+def test_report_receipt_persists_effective_assessment_without_echoing_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context(tmp_path)
+    context.working_kernel = context.workspace / "work/kernel"
+    _, experiment = _completed_test_experiment(context)
+    request = _report(experiment["experiment_id"])
+    notes = [{"path": "direction_events", "reason": "No tested scope; judgment remains unresolved"}]
+
+    def post(_url: str, _capability: str, _route: str, value: dict[str, Any]) -> dict[str, Any]:
+        accepted = deepcopy(value["report"])
+        accepted["direction_events"][-1]["hypothesis_status"] = "unresolved"
+        return {"result": {"status": "registered", "report": accepted, "assessment_notes": notes}}
+
+    monkeypatch.setattr(runtime_tools, "_register_attempt_report", real_register_report)
+    monkeypatch.setattr(runtime_tools, "_post", post)
+    monkeypatch.setattr(runtime_tools, "_candidate", lambda _path: {})
+    receipt = attempt_report(context, request)
+    saved = json.loads(context.report_path.read_text())
+    assert saved["direction_events"][-1]["hypothesis_status"] == "unresolved"
+    assert receipt["assessment_notes"] == notes
+    assert "report" not in receipt
+
+
+@pytest.mark.parametrize("accepted", [None, {}, {"attempt_id": "another", "status": "blocked"}])
+def test_report_receipt_rejects_wrong_accepted_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    accepted: object,
+) -> None:
+    context = _context(tmp_path)
+    context.working_kernel = context.workspace / "work/kernel"
+    monkeypatch.setattr(runtime_tools, "_candidate", lambda _path: {})
+    monkeypatch.setattr(
+        runtime_tools,
+        "_post",
+        lambda *_args: {
+            "result": {"status": "registered", "report": accepted},
+        },
+    )
+    with pytest.raises(ValueError, match="invalid accepted report"):
+        real_register_report(
+            context, {"attempt_id": context.attempt_id, "status": "candidate_ready"}
+        )
+
+
+@pytest.mark.parametrize("extra", [{"gpu": "NVIDIA L20D"}, {"capabilities": True}, {"force": True}])
+def test_gateway_execute_env_rejects_agent_parameters_locally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: dict[str, Any],
+) -> None:
+    context = _context(tmp_path)
+
+    def unexpected_post(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Invalid env parameters must not reach Runtime HTTP")
+
+    monkeypatch.setattr(runtime_tools, "_post", unexpected_post)
+    with pytest.raises(ValueError, match="env accepts only"):
+        gateway_execute(context, {"operation": "env", **extra})
+
+
+@pytest.mark.parametrize("field", ["hypothesis", "diagnosis", "approach", "analysis", "findings", "evidence_summary", "profile_evidence", "knowledge_used"])
+def test_compact_report_rejects_duplicate_analysis_before_any_submission(tmp_path: Path, field: str) -> None:
+    context = _context(tmp_path)
+    request = _report("unused")
+    request[field] = None
+    with pytest.raises(ValueError, match="fields must be exactly"):
+        attempt_report(context, request)
+    assert not context.report_path.exists()
+    assert not _REGISTERED_REPORTS
+
+
+@pytest.mark.parametrize("experiments", [False, True])
+@pytest.mark.parametrize("action", [None, "propose", "start", "complete", "abandon", "block", "defer"])
+def test_cli_direction_recovery_uses_original_action_and_missing_field(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    action: str | None, experiments: bool,
+) -> None:
+    modules = ("directions", "experiments") if experiments else ("directions",)
+    monkeypatch.setattr(runtime_tools, "_tool_modules", lambda: modules)
+    monkeypatch.setattr(runtime_tools, "_context", lambda _command: object())
+    original = {"action": action} if action else {"direction_id": "direction_" + "a" * 32}
+    field = ("action" if action is None else "name" if action == "propose"
+             else "direction_id" if action == "start" else "hypothesis_status")
+    issue = {"path": f"request.{field}", "code": "missing", "message": "Field required"}
+    monkeypatch.setattr(runtime_tools, "_request_object", lambda *_args: original)
+
+    def reject(context, received):
+        assert received == original
+        raise RuntimeServiceError(400, {
+            "error": "invalid_request", "detail": f"request.{field}: Field required",
+            "issues": [issue],
+        })
+
+    monkeypatch.setattr(runtime_tools, "update_direction", reject)
+    assert runtime_tools.main(["update-direction", "--request", "scratch/request.json"]) == 2
+    response = json.loads(capsys.readouterr().out)
+    assert response["issues"] == [issue]
+    instructions = " ".join(item.get("instruction", "") for item in response["recovery"])
+    assert f"Supply the missing required fields: request.{field}." in instructions
+    if action is None:
+        assert "Set action to a string matching your intent" in instructions
+        assert "Close the Direction" not in instructions
+    elif action == "propose":
+        assert 'Retry action="propose"' in instructions
+        assert "outcome evidence to a proposal" in instructions
+        assert "Close the Direction" not in instructions
+    elif action == "start":
+        assert 'Retry action="start"' in instructions
+        assert "Starting requires no hypothesis_status" in instructions
+        assert "Do not close the Direction to repair a start request" in instructions
+    else:
+        assert f'Retry action="{action}"' in instructions
+        assert "unresolved for unmeasured" in instructions
+        assert ("Include supporting_experiment_ids" if experiments else
+                "omit supporting_experiment_ids") in instructions
+    assert response["request_schema"]["oneOf"][1]["required"] == ["action", "direction_id"]
+
+
+@pytest.mark.parametrize("action", [None, 42, ["start"], "unknown"])
+def test_cli_invalid_direction_action_does_not_infer_closure(action) -> None:
+    detail = "request.action: Input should be a valid string"
+    response = runtime_tools._augment_agent_error(
+        "update-direction", {"detail": detail, "issues": [{
+            "path": "request.action", "code": "string_type", "message": detail,
+        }]}, detail=detail, request={"action": action},
+    )
+    instruction = response["recovery"][0]["instruction"]
+    assert "Set action to a string matching your intent" in instruction
+    assert "Close the Direction" not in instruction
+
+
+def test_cli_keeps_server_direction_conflict_recovery() -> None:
+    recovery = [{"instruction": "Continue the already-owned Direction."}]
+    payload = {"detail": "ownership conflict", "recovery": recovery,
+               "issues": [{"path": "request.direction_id", "code": "conflict",
+                           "message": "ownership conflict"}]}
+    response = runtime_tools._augment_agent_error(
+        "update-direction", payload, detail=payload["detail"], request={"action": "start"},
+    )
+    assert response["recovery"] == recovery
+
+
+@pytest.mark.parametrize("action", ["discard", "adopt"])
+def test_missing_experiment_fields_reach_runtime_before_null_evidence_checks(
+    monkeypatch: pytest.MonkeyPatch, action: str,
+) -> None:
+    original = {"action": action, "name": "proposal"}
+    def reject(_context, command, received):
+        assert command == "record-experiment" and received == original
+        raise RuntimeServiceError(400, {"issues": [
+            {"path": "request.before", "code": "missing", "message": "Field required"},
+            {"path": "request.after", "code": "missing", "message": "Field required"},
+        ]})
+    monkeypatch.setattr(runtime_tools, "runtime_journal", reject)
+    with pytest.raises(RuntimeServiceError) as raised:
+        record_experiment(object(), original)
+    response = runtime_tools._augment_agent_error(
+        "record-experiment", raised.value.payload, detail="Field required", request=original,
+    )
+    assert response["recovery"][0]["instruction"] == (
+        "Supply the missing required fields: request.before, request.after."
+    )

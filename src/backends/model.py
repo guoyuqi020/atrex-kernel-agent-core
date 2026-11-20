@@ -212,6 +212,8 @@ class AgentRunResult:
     session_id: str = ""
     budget_exhausted: bool = False
     response_usage_complete: bool | None = None
+    failure_kind: str | None = None
+    provider_error_code: str | None = None
 
     @property
     def stdout_tail(self) -> str:

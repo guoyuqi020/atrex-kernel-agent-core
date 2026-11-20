@@ -97,6 +97,6 @@ def test_blocked_bootstrap_can_handoff_real_diagnostics_without_baseline(tmp_pat
     )
     request = helpers._report(receipt["experiment_id"])
     request.update(
-        status="blocked", final_candidate=None, profile_evidence=None, blocker="Diagnostic failure"
+        status="blocked", final_candidate=None, blocker="Diagnostic failure"
     )
     assert runtime_tools.attempt_report(context, request)["report_status"] == "blocked"
