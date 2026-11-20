@@ -159,7 +159,7 @@ def captured_observation(stdout: str, events, capabilities) -> CapturedObservati
         return None
     # Legacy phases still depend on stream order. Native-only responses have no
     # reliable position among those markers; do not fabricate a phase. Claude's
-    # total follows result.usage and excludes separately observed child counters.
+    # total accumulates main responses and excludes separately observed child counters.
     # Full per-response counters remain in token-usage.json for every backend.
     if report["backend"] == "claude":
         from aka.agent.adapter import ClaudeAdapter

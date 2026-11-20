@@ -1,7 +1,7 @@
 """Provider counters with a clearly labelled conversation-text fallback.
 
-Claude totals follow result.usage; modelUsage and child diagnostics have a
-different scope and must not replace or augment that total.
+Claude totals use unique main-response counters throughout the invocation.
+Provider settlements and child counters are retained separately for audit.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from aka.agent.model import (
     subtract_token_usage,
     sum_token_usages,
 )
-from aka.agent.usage_summary import claude_usage_fallback_reason
 
 COMPONENTS = (
     "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
@@ -592,25 +591,14 @@ class UsageAccumulator:
             total, exact, warnings = pi_total, pi_exact, pi_warnings
             basis = "pi_settled_stream" if exact else "pi_source_counter_bounds"
         elif self.backend == "claude":
-            # result.usage is the chosen accounting contract, not modelUsage
-            # (which also includes internal queries such as session titles).
-            # Keep child/native counters as diagnostics without adding them.
-            total = self.terminal
-            basis = "provider_result_usage"
-            exact = finished and not self.missing and total.measurement == "exact"
-            fallback_reason = claude_usage_fallback_reason(
-                total.total_tokens, main.total_tokens, finished=finished,
-            )
-            if fallback_reason:
-                total = main
-                exact = False
-                basis = "main_response_fallback"
-                warnings.append(fallback_reason)
-            if not _same(main, self.terminal):
-                # Response attribution and provider billing are different
-                # observations. Do not inflate or downgrade result.usage just
-                # to make provisional/missing per-response counters add up.
-                warnings.append("claude_response_usage_incomplete_or_unreconciled")
+            # A terminal result can cover only the final provider turn. Never
+            # replace the invocation's accumulated responses when it arrives.
+            total = main
+            basis = "main_response_usage"
+            if main.total_tokens is None:
+                warnings.append("claude_main_response_usage_unavailable")
+            if self.terminal.total_tokens is not None and not _same(main, self.terminal):
+                warnings.append("claude_terminal_usage_differs_from_responses")
         elif self.backend == "codex" and self.codex_totals:
             # Native counters are cumulative per rollout; subtract the start snapshot.
             # Root's stdout total may be session-cumulative or turn-only. Do not add it again.
@@ -670,7 +658,7 @@ class UsageAccumulator:
                 if self.backend == "dsh"
                 else "pi_stream; native-only evidence conservatively merged without shared response IDs"
                 if self.backend == "pi"
-                else "native child counters are diagnostic only; not added to result.usage"
+                else "native child counters are diagnostic only; not added to main responses"
                 if self.backend == "claude"
                 else "native_transcripts_and_stream; unexported calls cannot be counted"
             ),
