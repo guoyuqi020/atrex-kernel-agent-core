@@ -916,8 +916,11 @@ class SupervisorRuntime:
             return self.execute_journal(capability, request)
         with _validating_request():
             allowed = {"argv"} if route.endswith("execute") else {"argv", "tool"}
-            if set(request) != allowed:
-                raise ValueError(f"Request fields must be {sorted(allowed)}")
+            optional = {"predictions"} if route == "/v1/gateway/execute" else set()
+            if not allowed <= set(request) or set(request) - allowed - optional:
+                raise ValueError(f"Request fields must be {sorted(allowed)}; optional: {sorted(optional)}")
+            from aka.workflow.light.predictions import validate_predictions
+            predictions = validate_predictions(request.get("predictions", []))
             argv = validated_argv(request["argv"])
         if route == "/v1/gateway/execute":
             words = argv[:argv.index("--")] if "--" in argv else argv
@@ -943,6 +946,8 @@ class SupervisorRuntime:
                 if kind == "auto":
                     kind = requested_operation("auto", parsed_access.command) if parsed_access.command else "run"
                     kind = {"run": "evaluate", "same_allocation_abba": "evaluate"}.get(kind, kind)
+            if predictions and kind not in {"evaluate", "command", "dev"}:
+                raise AgentRequestError("Predictions are supported only for Evaluate and Command/Dev", code="invalid_prediction_operation")
             if kind not in self.config.agate_tools:
                 raise AgentRequestError(f"Agate Runtime tool {kind!r} is disabled for this Campaign.",
                     code="runtime_tool_disabled", next_action=(
@@ -963,6 +968,7 @@ class SupervisorRuntime:
                     raise ValueError(f"--help requires one supported --kind ({', '.join(schema['supported_kinds'])}); got {kind!r}")
             return {"operation": "help", "status": "completed", "result": {
                 "kind": kind, "request_schema": schema,
+                "optional_predictions": "--predictions JSON: JSON array of {scope, prediction}; frozen before new execution, not sent to Agate. Evaluate and Command/Dev only.",
                 "campaign_defaults": {"warmup": self.evaluation_configuration.warmup_iters,
                     "bench": self.evaluation_configuration.bench_iters,
                     "step_timeout_seconds": self.config.evaluation_step_timeout},
@@ -1091,7 +1097,7 @@ class SupervisorRuntime:
                     raise SessionRevokedError("Session revoked while waiting for a shared measurement")
             response = self.experiments.execute(command, request_id=capability.request_id,
                 identity=identity, kernels=kernels, deadline=capability.deadline,
-                check_wait=check_wait)
+                check_wait=check_wait, predictions=predictions)
             agent_result = response.get("agent_result", {})
             record_id = agent_result.get("gateway_record_id")
             if capability.journal and record_id:
