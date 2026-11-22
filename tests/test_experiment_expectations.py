@@ -72,3 +72,47 @@ def test_exposed_schema_matches_structured_request():
     jsonschema.validate(request(), schema)
     assert "direction_id" not in schema["properties"]
     assert set(schema["properties"]["expectations"]["items"]["properties"]["assessment"]["enum"]) == {"met", "missed", "unresolved"}
+
+
+def test_next_step_review_revision_and_projection(tmp_path):
+    import jsonschema
+    from aka.workflow.light.host.journal import _direction_attempt_views
+    current, reviewed = state(), []
+    value = dict(request(), next_step={'action': 'Preserve input reuse', 'reason': 'Repeated reads remain untested'})
+    schema = journal_schema('experiment_record', {}, experiments_enabled=True, directions_enabled=False)
+    jsonschema.validate(value, schema)
+    result = record_experiment(current, tmp_path, value,
+        review_claim=lambda kind, target: reviewed.append(deepcopy(target)) or {})
+    assert reviewed[0]['next_step'] == value['next_step']
+    eid = result['experiment_id']
+    revision = dict(request(), experiment_id=eid)
+    record_experiment(current, tmp_path, revision)
+    experiment = current['experiments'][0]
+    assert experiment['next_step'] == value['next_step']
+    store = ResearchStore(tmp_path / 'research')
+    store.observe_experiment(experiment)
+    assert 'Preserve input reuse' in str(store.board())
+    versions = {('directions','d',1): ('',{'name':'Parallelism'},{},set()),
+                ('experiments',eid,1): ('',dict(experiment,direction_id='d'),{},set())}
+    view = _direction_attempt_views(versions)['research-library/directions/d/attempts.md'].decode()
+    assert '| Next action | Reason |' in view
+    assert 'Preserve input reuse | Repeated reads remain untested' in view
+    revision['next_step'] = {'action':'Test dispatch', 'reason':'Short shapes regressed'}
+    record_experiment(current, tmp_path, revision)
+    assert current['experiments'][0]['next_step']['action'] == 'Test dispatch'
+    revision['next_step'] = None
+    jsonschema.validate(revision, schema)
+    record_experiment(current, tmp_path, revision)
+    assert _public_experiment(current['experiments'][0])['next_step'] is None
+    assert store.events()[0]['payload']['experiment']['next_step'] == value['next_step']
+
+
+@pytest.mark.parametrize('bad', ['do it', {}, {'action':'x'}, {'action':'x','reason':''},
+    {'action':[], 'reason':'why'}, {'action':'x','reason':'why','extra':True}])
+def test_next_step_validation_before_review(tmp_path, bad):
+    current, reviewed = state(), []
+    with pytest.raises((AgentRequestError, ValueError)):
+        record_experiment(current, tmp_path, dict(request(), next_step=bad),
+            review_claim=lambda *args: reviewed.append(args))
+    assert current['experiments'] == []
+    assert reviewed == []

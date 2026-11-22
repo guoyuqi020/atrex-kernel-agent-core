@@ -94,3 +94,14 @@ python3 tools/sandbox.py --kind record-experiment --request-file scratch/experim
 Save the concluded attempt promptly without waiting for the next attempt's results; this command
 is not a gate on continuing work. To supplement or correct the same attempt, submit its required
 fields with the returned `experiment_id`.
+
+<!-- experiments:start -->
+Use optional Experiment `next_step` to record the chosen next action separately from the interpretation:
+```json
+"next_step": {
+  "action": "Implement V-split while preserving input reuse",
+  "reason": "The previous trial repeated input reads; partitioning with reuse remains untested"
+}
+```
+`action` says what to do; `reason` explains why this is the next useful attempt. Both are nonempty strings when provided. Omit `next_step` on revision to preserve it; use `null` to clear an obsolete plan. This is an editable plan, not a new tool, mandatory report, Review requirement, or execution gate. A concrete next attempt normally stays under the existing Direction; create another Direction only when the high-level idea changes. The Direction attempt view displays action and reason separately; Runtime does not infer them from `interpretation` or execute them automatically.
+<!-- experiments:end -->

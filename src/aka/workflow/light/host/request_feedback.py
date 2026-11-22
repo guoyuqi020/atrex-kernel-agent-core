@@ -105,6 +105,10 @@ def journal_schema(operation, body, *, research_records=False, directions_enable
             "Concrete implementation, probe, or test method and its difference from prior attempts. "
             "Omission on revision preserves the previous value."
         )
+        properties["next_step"] = {
+            "anyOf": [_object({"action": _text(), "reason": _text()}, {"action", "reason"}), {"type": "null"}],
+            "description": "Optional next action and rationale. Omit on revision to retain; null clears it. A plan, not an execution or lifecycle gate.",
+        }
         expectation_properties = {key: _text() for key in EXPERIMENT_EXPECTATION_FIELDS}
         expectation_properties["assessment"]["enum"] = sorted(EXPERIMENT_EXPECTATION_ASSESSMENTS)
         properties["expectations"] = {

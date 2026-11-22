@@ -116,3 +116,25 @@ Claim Review is disabled by default unless explicitly enabled for this Campaign.
 <!-- directions:start -->
 Read `research-library/directions/<direction_id>/attempts.md` when choosing the next attempt under a Direction. Runtime automatically groups all linked, visible Experiments using their latest visible revisions, including failures and unresolved predictions; it does not filter by `supporting_experiment_ids` or Review quality. The table shows method differences, predictions, observations, assessments and interpretation. “Not recorded” is missing information, not evidence that a branch was tested or ruled out. Use the linked version JSON for records and attachments. This read-only view follows the same peer visibility watermark as the Research Library and requires no extra record or lifecycle action.
 <!-- directions:end -->
+
+<!-- experiments:start -->
+Use optional Experiment `next_step` to record the chosen next action separately from the interpretation:
+```json
+"next_step": {
+  "action": "Implement V-split while preserving input reuse",
+  "reason": "The previous trial repeated input reads; partitioning with reuse remains untested"
+}
+```
+`action` says what to do; `reason` explains why this is the next useful attempt. Both are nonempty strings when provided. Omit `next_step` on revision to preserve it; use `null` to clear an obsolete plan. This is an editable plan, not a new tool, mandatory report, Review requirement, or execution gate. A concrete next attempt normally stays under the existing Direction; create another Direction only when the high-level idea changes. The Direction attempt view displays action and reason separately; Runtime does not infer them from `interpretation` or execute them automatically.
+<!-- experiments:end -->
+
+<!-- directions:start -->
+### Where to record the next step
+
+- Another implementation, parameter choice, dataflow variant, or probe under the same high-level idea: keep the current Direction. Once the attempt has useful results, record an Experiment; do not create a Direction for every next action.
+- Additional measurements or a correction to the same attempt: revise its Experiment. A materially different approach is a new Experiment under the same Direction when the high-level idea remains unchanged.
+- A different primary optimization principle or target problem: create a new Direction.
+- A distinct high-level idea worth exploring later: record a proposed Direction (or defer it using the supported lifecycle operation), so it does not survive only in conversation or another record's future-work text. Do not start it merely to document it.
+
+When Experiment recording is enabled, use `next_step.action` and `next_step.reason` for the concrete selected action and rationale. Keep remaining same-idea branches in the Direction's plan or assessment. These are recording guidelines, not prerequisites for implementation or evaluation; do not turn each parameter trial into a separate record.
+<!-- directions:end -->

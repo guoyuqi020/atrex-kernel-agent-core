@@ -95,7 +95,7 @@ _SHARED_GATEWAY_RECORD_REASONS = frozenset({
 })
 EXPERIMENT_FIELDS = {"name", "intent", "interpretation"}
 EXPERIMENT_OPTIONAL_FIELDS = {
-    "experiment_id", "gateway_record_ids", "references", "implementation", "expectations",
+    "experiment_id", "gateway_record_ids", "references", "implementation", "expectations", "next_step",
 }
 EXPERIMENT_EXPECTATION_FIELDS = {"scope", "prediction", "observation", "assessment"}
 EXPERIMENT_EXPECTATION_ASSESSMENTS = frozenset({"met", "missed", "unresolved"})
@@ -1356,8 +1356,8 @@ def _direction_attempt_views(versions) -> dict[str, bytes]:
                  "Latest visible version of every linked Experiment, including failed and unresolved attempts. "
                  "Historical versions remain in the Experiment directories. Predictions may be retrospective; "
                  "this view does not establish when they were recorded or infer that an idea is ruled out.", "",
-                 "| Attempt | Method / difference | Scope and prediction | Observation | Assessment | Prediction origin | Explicitly unresolved | Interpretation / next step |",
-                 "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+                 "| Attempt | Method / difference | Scope and prediction | Observation | Assessment | Prediction origin | Explicitly unresolved | Interpretation | Next action | Reason |",
+                 "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
         count = 0
         for (experiment_kind, experiment_id), (version, experiment) in sorted(latest.items()):
             if experiment_kind != "experiments" or experiment.get("direction_id") != identity:
@@ -1376,7 +1376,9 @@ def _direction_attempt_views(versions) -> dict[str, bytes]:
                        cell(f"{scope}: {prediction}" if scope and prediction else prediction),
                        cell(expectation.get("observation")), cell(assessment),
                        cell(expectation.get("prediction_origin", "retrospective")), cell(unresolved),
-                       cell(experiment.get("interpretation"))]
+                       cell(experiment.get("interpretation")),
+                       cell((experiment.get("next_step") or {}).get("action")),
+                       cell((experiment.get("next_step") or {}).get("reason"))]
                 lines.append("| " + " | ".join(row) + " |")
         if not count:
             lines.extend(["", "No linked Experiments are visible yet."])
@@ -3328,6 +3330,14 @@ def _closure_support(
     return selected
 
 
+def _experiment_next_step(raw: object) -> dict[str, str] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != {"action", "reason"}:
+        raise field_error("next_step", "Use {action, reason}, or null to clear the next step")
+    return {key: _text(raw[key], f"Experiment next_step.{key}") for key in ("action", "reason")}
+
+
 def _experiment_expectations(raw: object) -> list[dict[str, Any]]:
     """Validate Agent-authored comparisons; measured facts remain in cited Records."""
     if not isinstance(raw, list):
@@ -3556,10 +3566,11 @@ def record_experiment(
         "gateway_record_ids": record_ids,
         "interpretation": interpretation,
     }
-    for key in ("implementation", "expectations"):
+    for key in ("implementation", "expectations", "next_step"):
         if key in value:
             experiment[key] = (
                 _text(value[key], "Experiment implementation") if key == "implementation"
+                else _experiment_next_step(value[key]) if key == "next_step"
                 else _experiment_expectations(value[key])
             )
         elif existing is not None and key in existing:
