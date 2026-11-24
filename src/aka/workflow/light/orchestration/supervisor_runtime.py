@@ -171,6 +171,7 @@ class RuntimeConfig:
     evaluator_reference_dir: Path | None = None
     private_reference_dir: Path | None = None
     atrex_bench_root: Path | None = None
+    wiki_reference_paths: tuple[tuple[str, str], ...] = ()
     wiki_profile_root: Path | None = None
     task_id: str = ""
     optimization_mode: str = "fast"
@@ -794,7 +795,8 @@ class SupervisorRuntime:
         mounts.extend(FilesystemMount(source, target, False) for source, target in installations)
         # Installed wheels are under the selected Python library. Also support
         # the explicitly selected checkout and Wiki resource tree in development.
-        resources = [ROOT.parents[1],
+        resources = [Path(path) for _, path in self.config.wiki_reference_paths]
+        resources += [ROOT.parents[1],
                      self.plugins.resource_file("gpu-wiki", "tools/query_nl.py").parent.parent]
         if self.config.wiki_options.settings_file:
             resources.append(Path(self.config.wiki_options.settings_file))
