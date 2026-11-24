@@ -74,14 +74,10 @@ def select_session_usage(value: Mapping) -> dict:
     if value.get("backend") == "claude" and basis not in {
         "main_response_usage", "conversation_text_estimate",
     }:
-        total = usage((value.get("by_agent") or {}).get("main"))
+        by_agent = value.get("by_agent")
+        total = usage(by_agent.get("main") if isinstance(by_agent, Mapping) else None)
         if total["total_tokens"] is not None:
             total = total | {"measurement": "partial"}
         basis = "main_response_usage"
         reason = "claude_response_accounting_selected"
     return {"usage": total, "accounting_basis": basis, "fallback_reason": reason}
-
-
-def session_usage(value: Mapping) -> dict:
-    """Return selected counters for callers that only need usage totals."""
-    return select_session_usage(value)["usage"]
